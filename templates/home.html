@@ -1,5 +1,80 @@
 <!-- templates/home.html -->
 {% extends "base.html" %}
+{% load json_filter %}
+
 {% block content %}
-<h1>Salut, les Nazes</h1>
+<script type="module">
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.121.1/build/three.module.js';
+    import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.121.1/examples/jsm/controls/OrbitControls.js';
+    
+    function resizeRendererToDisplaySize(renderer) {
+      const canvas = renderer.domElement;
+      const pixelRatio = window.devicePixelRatio;
+      const width  = canvas.clientWidth  * pixelRatio | 0;
+      const height = canvas.clientHeight * pixelRatio | 0;
+      const needResize = canvas.width !== width || canvas.height !== height;
+      if (needResize) {
+        renderer.setSize(width, height, false);
+      }
+      return needResize;
+    }   
+    
+    function render(renderer, scene, camera) {
+      if (resizeRendererToDisplaySize(renderer)) {
+        const canvas = renderer.domElement;
+        camera.aspect = canvas.clientWidth / canvas.clientHeight;
+        camera.updateProjectionMatrix();
+      }
+      renderer.render(scene, camera)
+    }
+
+    const scene = new THREE.Scene();
+
+    const canvas = document.querySelector('#c');
+
+    // const camera = new THREE.PerspectiveCamera( 75, 1, .5, 500000 );
+    const radius = {{ radius | tojson }};
+    // les arguments sont left, right, top, bottom, near, far
+    const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, -radius, radius);
+    camera.zoom = 1;
+    const renderer = new THREE.WebGLRenderer({
+      canvas,   
+      alpha: true,
+      premultipliedAlpha: false,
+    });
+
+    const material = new THREE.MeshDepthMaterial();
+    material.side = THREE.DoubleSide;
+
+    const center = {{ center | tojson }}
+    const controls = new OrbitControls(camera, canvas); 
+    controls.target.set(...center);
+    controls.update();
+
+
+
+    const positions = {{ positions | tojson }}
+    const normals = {{ normals | tojson }}
+    const faces = {{ faces | tojson }}
+    var geometry = new THREE.BufferGeometry();
+    const positionNumComponents = 3;
+    const normalNumComponents = 3;
+    geometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(positions), positionNumComponents));
+    geometry.setAttribute(
+        'normal',
+        new THREE.BufferAttribute(new Float32Array(normals), normalNumComponents));
+    geometry.setIndex( faces );
+    const surface = new THREE.Mesh( geometry, material );
+    scene.add( surface )
+   
+    function animate() {
+      render(renderer, scene, camera)
+      requestAnimationFrame(animate)
+    }
+    requestAnimationFrame(animate)
+
+  </script>
+
 {% endblock content %}
