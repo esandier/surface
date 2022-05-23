@@ -3,40 +3,44 @@
 {% load json_filter %}
 
 {% block content %}
+
+<div id="box" style="position:relative; width:500px; height:500px; border: 5px solid black">
+
+  <svg id="d">
+    <g id="svg" transform="translate(0) scale(1)">
+    </g>
+  </svg>
+
+<canvas id="c"></canvas>
+
+</div>
+
+
+
 <script type="module">
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.121.1/build/three.module.js';
     import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.121.1/examples/jsm/controls/OrbitControls.js';
     
-    function resizeRendererToDisplaySize(renderer) {
-      const canvas = renderer.domElement;
-      const pixelRatio = window.devicePixelRatio;
-      const width  = canvas.clientWidth  * pixelRatio | 0;
-      const height = canvas.clientHeight * pixelRatio | 0;
-      const needResize = canvas.width !== width || canvas.height !== height;
-      if (needResize) {
-        renderer.setSize(width, height, false);
-      }
-      return needResize;
-    }   
-    
-    function render(renderer, scene, camera) {
-      if (resizeRendererToDisplaySize(renderer)) {
-        const canvas = renderer.domElement;
-        camera.aspect = canvas.clientWidth / canvas.clientHeight;
-        camera.updateProjectionMatrix();
-      }
-      renderer.render(scene, camera)
-    }
-
     const scene = new THREE.Scene();
-
     const canvas = document.querySelector('#c');
 
     // const camera = new THREE.PerspectiveCamera( 75, 1, .5, 500000 );
     const radius = {{ radius | tojson }};
+    const center = {{ center | tojson }}
+
     // les arguments sont left, right, top, bottom, near, far
-    const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, -radius, radius);
+    const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, 0, 4 * radius);
     camera.zoom = 1;
+
+    camera.position.set(
+      center[0] + radius, 
+      center[1] + radius, 
+      center[2] + radius
+    );
+    camera.up.set(0,0,1);        // set up
+    camera.lookAt(...center);
+    camera.updateProjectionMatrix();
+
     const renderer = new THREE.WebGLRenderer({
       canvas,   
       alpha: true,
@@ -46,12 +50,12 @@
     const material = new THREE.MeshDepthMaterial();
     material.side = THREE.DoubleSide;
 
-    const center = {{ center | tojson }}
     const controls = new OrbitControls(camera, canvas); 
     controls.target.set(...center);
+    controls.addEventListener('end',myMouseUp ,false);
+    controls.addEventListener('start',myMouseDown ,false);
+    controls.enableZoom = false;
     controls.update();
-
-
 
     const positions = {{ positions | tojson }}
     const normals = {{ normals | tojson }}
@@ -68,13 +72,103 @@
     geometry.setIndex( faces );
     const surface = new THREE.Mesh( geometry, material );
     scene.add( surface )
-   
+
+    const axesHelper = new THREE.AxesHelper( 5 );
+    scene.add( axesHelper );
+
+
+    function resizeRendererToDisplaySize(renderer) {
+      const canvas = renderer.domElement;
+      const pixelRatio = window.devicePixelRatio;
+      const width  = canvas.clientWidth  * pixelRatio | 0;
+      const height = canvas.clientHeight * pixelRatio | 0;
+      const needResize = canvas.width !== width || canvas.height !== height;
+      if (needResize) {
+        renderer.setSize(width, height, false);
+      }
+      return needResize;
+    }   
+    
+    function render(renderer, scene, camera) {
+      if (resizeRendererToDisplaySize(renderer)) {
+        const canvas = renderer.domElement;
+        camera.aspect = canvas.clientWidth / canvas.clientHeight;
+        camera.up.set(0,0,1);        // set up
+
+        camera.updateProjectionMatrix();
+      }
+      renderer.render(scene, camera)
+    }
+
+
     function animate() {
       render(renderer, scene, camera)
       requestAnimationFrame(animate)
     }
-    requestAnimationFrame(animate)
 
+    function myMouseUp(){
+      
+      let url = "{% url 'home' %}";
+      let I = new THREE.Vector3( 1,0,0 ).unproject( camera );
+      let J = new THREE.Vector3( 0,1,0 ).unproject( camera );
+      let O = new THREE.Vector3( 0,0,0 ).unproject( camera );
+
+      let data = {
+        'I': I.sub(O).toArray(),
+        'J': J.sub(O).toArray(),
+        'zoom': camera.zoom
+      }
+
+      var request = new Request(url, {
+        method: 'POST',
+        // body: data,
+        body: JSON.stringify(data, null, '\t'),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      console.log('request data', data);
+
+      fetch(request)
+      .then(response => response.json())
+      .then(function(data) {
+        console.log(data)
+        let radius = data.radius;
+        let center = data.center;
+        let zoom = data.zoom;
+        let lines = data.lines;
+
+        let svg = document.getElementById('svg');
+        let width = svg.parentElement.clientWidth;
+        let height = svg.parentElement.clientHeight;
+
+        let scaleX = zoom * width/(2*radius);  // de coordonnées surface en pixels
+        let scaleY = - zoom * height/(2*radius); // signe moins pour que y soit dirigé vers le haut
+        let transX = width/2 - center[0] * width/(2*radius);
+        let transY = height/2 + center[1] * width/(2*radius);
+
+        console.log(scaleX, scaleY, transX, transY);
+        svg.transform.baseVal.getItem(1).setScale(scaleX, scaleY);
+        svg.transform.baseVal.getItem(0).setTranslate(transX, transY);
+
+        let string = "";
+        for (const line of lines ) {
+          string = string + "<polyline points = ' "+ line +" ' fill='none' stroke='black' stroke-width='.006%'/>\n";
+        }
+
+        svg.innerHTML = string;
+        material.opacity = 0.2;
+      })
+      // .catch((error) => {
+      //   console.error('Error:', error);
+      // });
+    }
+    function myMouseDown(){
+      svg.innerHTML = ''
+      material.opacity = 1;
+    }      
+    requestAnimationFrame(animate);
   </script>
 
 {% endblock content %}

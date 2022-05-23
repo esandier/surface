@@ -5,11 +5,11 @@
      margin: 0;
      height: 100%;
   }
-  #c {
+  #c, #d {
      width: 100%;
      height: 100%;
      display: block;
-     position: relative;
+     position: absolute;
      left: 0 ;
      top: 0;
      z-index: 2;     
@@ -30,9 +30,6 @@
 		</style>
 	</head>
 	<body>
-    <div id="box" style="width:500px; height:500px; border: 5px solid black">
-      <canvas id="c"></canvas>
-    </div>
 
 {% block content %} {% endblock content %}
     

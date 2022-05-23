@@ -358,24 +358,68 @@ class Surface:
         # pass
         print(s)
 
-    def __init__(self, X="x", Y="y", Z="x*y", param_names="x y"):
+    def __init__(self, X="x", Y="y", Z="x*y", param_names="x y", bounds = (0,1,0,1) , quotient=("no", "no")):
         t0 = time.perf_counter()
+        self.low_res = 80
+
+        self.u_min, self.u_max, self.v_min, self.v_max = (
+            bounds[0],
+            bounds[1],
+            bounds[2],
+            bounds[3],
+        )
+        self.u_identify = quotient[0]
+        self.v_identify = quotient[1]
 
         u, v = sp.symbols(param_names)
+
+        # On détermine la bounding box (avec résolution low_res) pour perturber S, ça sert aussi ds for_3js
+        S_pur = sp.Array(sp.sympify([X, Y, Z]))
+        Slambda = lambdify([u, v], S_pur, "numpy")
+        u_grid, v_grid = np.meshgrid(
+            np.linspace(self.u_min, self.u_max, self.low_res+1), 
+            np.linspace(self.v_min, self.v_max, self.low_res+1),
+            indexing="ij"
+        )
+        self.X_grid, self.Y_grid, self.Z_grid = Slambda(u_grid, v_grid)
+        self.bbox = (
+            np.amin(self.X_grid), 
+            np.amax(self.X_grid), 
+            np.amin(self.Y_grid), 
+            np.amax(self.Y_grid), 
+            np.amin(self.Z_grid), 
+            np.amax(self.Z_grid)
+        )
+        print(self.bbox)
+        self.center = [(self.bbox[0]+self.bbox[1])/2, (self.bbox[2]+self.bbox[3])/2, (self.bbox[4]+self.bbox[5])/2]
+        print(self.center)
+        dX, dY, dZ = self.bbox[1] - self.bbox[0], self.bbox[3] - self.bbox[2], self.bbox[5] - self.bbox[4]
+        self.radius = np.sqrt(dX**2 + dY**2 + dZ**2)/2
+        print(self.radius)
+
+        # On perturbe S, et on fabrique les fonctions lambdifiées
+        u, v = sp.symbols(param_names)
+        d_u, d_v = self.u_max - self.u_min, self.v_max - self.v_min
+        print(d_u)
+        print(d_v)
         ax_x, ax_y, ax_z = sp.symbols("ax_x ax_y ax_z")
         ax = sp.Array([ax_x, ax_y, ax_z])
         du, dv = sp.symbols("du dv")
-        # on perturbe S pour éviter les dérivées nulles
-        S_sp = sp.Array(sp.sympify([X, Y, Z])) + sp.Array(
+        # on perturbe S pour éviter les dérivées nulles, ces perturbations semblent bien marcher. Plus grand, ça fait des problèmes avec des vues dégénérées
+        S_sp = S_pur + sp.Array(
             [
-                0.0001
-                * sp.sin(
-                    u * 0.00034521 + v * 0.00012345
-                ),  # ces valeurs semblent bien marcher. Plus grand, ça fait des problèmes avec des vues dégénérées
-                0.0001 * sp.sin(u * 0.00076521 + v * 0.00065735),
-                0.0001 * sp.sin(u * 0.00054721 + v * 0.00019674),
+                0.0001 * dX * sp.sin(u * 0.00034521 / d_u + v * 0.00012345 / d_v),  
+                0.0001 * dY * sp.sin(u * 0.00076521 / d_u + v * 0.00065735 / d_v),
+                0.0001 * dZ * sp.sin(u * 0.00054721 / d_u + v * 0.00019674 / d_v),
             ]
         )
+        # S_sp = S_pur + sp.Array(
+        #     [
+        #         0.0001  * sp.sin(u * 0.00034521  + v * 0.00012345),  
+        #         0.0001  * sp.sin(u * 0.00076521  + v * 0.00065735),
+        #         0.0001  * sp.sin(u * 0.00054721  + v * 0.00019674),
+        #     ]
+        # )
         # dérivée de S.N dans la direction (du, dv)
         # DS_axis_sp = sp.diff(S_sp,u).dot([ax_x,ax_y,ax_z]) * du + sp.diff(S_sp,v).dot([ax_x,ax_y,ax_z]) * dv
         Su_sp = sp.diff(S_sp, u)  # dérivée par rapport à u, comme expression sympy
@@ -419,60 +463,36 @@ class Surface:
         self.SN_axis = lambdify([u, v, ax_x, ax_y, ax_z], SN_axis_sp, "numpy")
         self.SD_jac = lambdify([u, v, ax_x, ax_y, ax_z], SD_jac_sp, "numpy")
 
+        # finalement, on fabrique une grille de normales pour for_3js
+        self.NX_grid, self.NY_grid, self.NZ_grid = self.SN(u_grid, v_grid)
+
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "init surface"))
 
     def set_axis(
-        self, elev=20, azim=0
+        self, I = [1,0,0], J = [0,0,1]
     ):  # definit l'axe et les fonctions self.XY et self.Z
-        # elev et azim sont coord sphériques (en degrés) du point de vision. elev est l'angle avec le plan xy
-        # elev = angle axe Z avec le plan de vision azim = angle de rot du plan xy autour de z
-        self.elev, self.azim = elev, azim
-        theta = self.azim * np.pi / 180
-        phi = self.elev * np.pi / 180
-        self.axis = np.array(
-            [np.cos(theta) * np.cos(phi), np.sin(theta) * np.cos(phi), np.sin(phi)]
-        )  # coordonnées x,y,z de la normale au plan de vision
-
-        # Repère dont 'axis' est l'axe z
-        I = np.cross(np.array([0, 0, 1]), self.axis)
-        J = np.cross(self.axis, I)
-        I, J = I / norm(I), J / norm(J)
-        # définition des attributs de la classe
-
+        vecI, vecJ = np.array(I), np.array(J)
+        vecI, vecJ = vecI/norm(vecI), vecJ/norm(vecJ)
+        self.axis = np.cross(vecI, vecJ)  
+        self.axis = self.axis/norm(self.axis) # coordonnées x,y,z de la normale au plan de vision
         def XY(vec):  # renvoie coordonnées d'un point de l'espace dans le repère I,J
-            return np.array([np.inner(I, vec.T), np.inner(J, vec.T)])
+            return np.array([np.inner(vecI, vec.T), np.inner(vecJ, vec.T)])
 
         def Z(vec):  # renvoie coordonnées d'un point de l'espace sur l'axe 'axis'
             return np.inner(self.axis, vec.T)
 
         def XYZ(vec):  # renvoie le vecteur dont les coord. sur (I,J) sont 'vec'
-            return vec[0] * I + vec[1] * J
+            return vec[0] * vecI + vec[1] * vecJ
 
         self.XY = XY
         self.Z = Z
         self.XYZ = XYZ
 
-    def for_3js(self, bounds, res = 10) :
-        u_min, u_max, v_min, v_max = (
-            bounds[0],
-            bounds[1],
-            bounds[2],
-            bounds[3],
-        )
-        u_list = np.linspace(u_min, u_max, res + 1)  # res*res = number of squares
-        v_list = np.linspace(v_min, v_max, res + 1)
-
-        self.u_grid, self.v_grid = np.meshgrid(
-            u_list, v_list, indexing="ij"
-        )  # matrix indexing, u = indice de ligne, v = indice de colonne
-
-        # grille des coordonnées x, y, et z du point de la surface
-        x_grid, y_grid, z_grid = self.S(self.u_grid, self.v_grid) 
-        nx_grid, ny_grid, nz_grid = self.SN(self.u_grid, self.v_grid) # grille des coordonnées x, y, et z de la normale aux points
-
+    def for_3js(self) :
+        res = self.low_res
         # liste 1d  x_1,y_1,z_1,x_2,y_2,z_2,... des positions/normales. l'indice du point (i,j) de la grille est i*(res+1) + j
-        positions = np.transpose(np.array([x_grid.flatten(), y_grid.flatten(), z_grid.flatten()])).flatten() 
-        normals = np.transpose(np.array([nx_grid.flatten(), ny_grid.flatten(), nz_grid.flatten()])).flatten()
+        positions = np.transpose(np.array([self.X_grid.flatten(), self.Y_grid.flatten(), self.Z_grid.flatten()])).flatten() 
+        normals = np.transpose(np.array([self.NX_grid.flatten(), self.NY_grid.flatten(), self.NZ_grid.flatten()])).flatten()
         # index(i,j) = indice du point p(i,j)
         index = np.reshape(np.arange((res+1)*(res+1)), (res+1, res+1))
         a = index[:-1,:-1]
@@ -481,38 +501,26 @@ class Surface:
         d = index[1:,1:]
         faces = np.concatenate((np.transpose(np.array([a,c,b])).flatten(), np.transpose(np.array([c,d,b])).flatten()))
         
-        xm, xM,ym,yM,zm,zM = np.amin(x_grid), np.amax(x_grid), np.amin(y_grid), np.amax(y_grid), np.amin(z_grid), np.amax(z_grid)
-        center = [(xm+xM)/2, (ym+yM)/2, (zm+zM)/2]
-        radius = np.sqrt((xM - xm)**2 + (yM - ym)**2 + (zM - zm)**2)/2
-
-
-
-        return positions.tolist(), normals.tolist(), faces.tolist(), center, radius    
+        return positions.tolist(), normals.tolist(), faces.tolist(), self.center, self.radius    
 
     def triangulate(
-        self, bounds, res, quotient=("no", "no")
-    ):  # bounds = (-1,1,-1,1), res = 100):
+        self, res
+    ):  
         t0 = time.perf_counter()
         self.res = res
 
-        u_list = np.linspace(bounds[0], bounds[1], res + 1)  # res = number of squares
-        v_list = np.linspace(bounds[2], bounds[3], res + 1)
+        u_list = np.linspace(self.u_min, self.u_max, res + 1)  # res = number of squares
+        v_list = np.linspace(self.v_min, self.v_max, res + 1)
 
-        self.u_min, self.u_max, self.v_min, self.v_max = (
-            bounds[0],
-            bounds[1],
-            bounds[2],
-            bounds[3],
-        )
         self.uv_vector = 5 * np.array(
             [res / (self.u_max - self.u_min), res / (self.v_max - self.v_min)]
         )  # multiplié par la longueur, donne le nombre de subdivision. Grand = plus de subdivisions.
 
-        self.u_grid, self.v_grid = np.meshgrid(
+        u_grid, v_grid = np.meshgrid(
             u_list, v_list, indexing="ij"
         )  # matrix indexing: u est l'indice de ligne, v l'indice de colonne
-        self.S_grid = self.S(self.u_grid, self.v_grid)
-        self.SN_grid = self.SN(self.u_grid, self.v_grid)
+        self.S_grid = self.S(u_grid, v_grid)
+        self.SN_grid = self.SN(u_grid, v_grid)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "calcul grid"))
 
         t0 = time.perf_counter()
@@ -523,13 +531,13 @@ class Surface:
             np.meshgrid(u_list, v_list)
         ).T  # transposé fait que u = ligne, v = colonne, et que le dernier axe = point
 
-        if quotient[0] == "cy":
+        if self.u_identify == "cy":
             points[res, :] = points[0, :]
-        if quotient[1] == "cy":
+        if self.v_identify == "cy":
             points[:, res] = points[:, 0]
-        if quotient[0] == "mo":
+        if self.u_identify == "mo":
             points[res, :] = points[0, ::-1]  # reverse order
-        if quotient[1] == "mo":
+        if self.v_identify == "mo":
             points[:, res] = points[::-1, 0]
 
         # les sommets du carré: b au dessus de a, d au dessus de c, c à droite de a
@@ -652,11 +660,11 @@ class Surface:
             ),
             dtype=e_type,
         )  # vertic
-        if quotient[0] == "cy":
+        if self.u_identify == "cy":
             lf_eds["g"] = g[-1, :]
-        if quotient[1] == "cy":
+        if self.v_identify == "cy":
             dn_eds["g"] = f[:, -1]
-        if quotient[0] == "mo":
+        if self.u_identify == "mo":
             lf_eds["g"] = np.flip(g[-1, :], 0)
             dg_eds["flip"][-1, :] = -1
             hr_eds["flip"][-1, :] = -1
@@ -665,14 +673,14 @@ class Surface:
             ] = (
                 -1
             )  # indique que la normale calculée avec NZ grid donne une orientation incohérente aux extremites de l'arete
-        if quotient[1] == "mo":
+        if self.v_identify == "mo":
             dg_eds["flip"][:, -1] = -1
             dn_eds["g"] = np.flip(f[:, -1], 0)
             vr_eds["flip"][:, -1] = -1
             lf_eds["flip"][-1] = rt_eds["flip"][-1] = -1
 
         # tous ensemble
-        if (quotient[0] == "cy" or quotient[0] == "mo") and quotient[1] == "no":
+        if (self.u_identify == "cy" or self.u_identify == "mo") and self.v_identify == "no":
             self.eds = np.array(
                 np.concatenate(
                     (
@@ -695,7 +703,7 @@ class Surface:
             self.beds = self.eds[
                 self.b_index :
             ]  # a view of the edges containing only the boundary edges
-        elif quotient[0] == "no" and (quotient[1] == "cy" or quotient[1] == "mo"):
+        elif self.u_identify == "no" and (self.v_identify == "cy" or self.v_identify == "mo"):
             self.eds = np.array(
                 np.concatenate(
                     (
@@ -716,7 +724,7 @@ class Surface:
             self.beds = self.eds[
                 self.b_index :
             ]  # a view of the edges containing only the boundary edges
-        elif quotient[0] != "no" and quotient[1] != "no":
+        elif self.u_identify != "no" and self.v_identify != "no":
             self.eds = np.array(
                 np.concatenate(
                     (
@@ -762,7 +770,7 @@ class Surface:
 
 
         # les coins. Points transformés en tuples pour être hashables
-        if quotient[0] == quotient[1] == "no":
+        if self.u_identify == self.v_identify == "no":
             self.corners = set(
                 [
                     tuple(points[0, 0]),
@@ -784,9 +792,9 @@ class Surface:
         # les generateurs du groupe par lequel on quotiente R^2.
 
         def f_u(pt, i):  # itéré i fois, où i est un entier relatif
-            if quotient[0] == "cy":
+            if self.u_identify == "cy":
                 return pt + i * np.array([self.u_max - self.u_min, 0])
-            elif quotient[0] == "mo":
+            elif self.u_identify == "mo":
                 y = pt[1] if i % 2 == 0 else self.v_min + self.v_max - pt[1]
                 return np.array([pt[0] + i * (self.u_max - self.u_min), y])
             else:
@@ -795,9 +803,9 @@ class Surface:
         self.generator_u = f_u
 
         def f_v(pt, i):
-            if quotient[1] == "cy":
+            if self.v_identify == "cy":
                 return pt + i * np.array([0, self.v_max - self.v_min])
-            elif quotient[1] == "mo":
+            elif self.v_identify == "mo":
                 x = pt[0] if i % 2 == 0 else self.u_max + self.u_min - pt[0]
                 return np.array([x, pt[1] + i * (self.v_max - self.v_min)])
             else:
@@ -818,7 +826,7 @@ class Surface:
         def simple_close(pt, qt):
             return qt
 
-        if quotient[0] != "no" or quotient[1] != "no":
+        if self.u_identify != "no" or self.v_identify != "no":
             self.close = close
         else:
             self.close = simple_close  # s'il n'y a pas de raccord, il faut éviter de ralentir le programme avec la fonction close.
@@ -833,7 +841,6 @@ class Surface:
             "f": {},
             "g": {},
         }  # b=bord, c = contour, f,g = fictifs bord, contour (arêtes qui s'échappent vers un point de visi = 0)
-        #print("elev:%0.3f  azim:%0.3f"%(self.elev, self.azim)) # debug
         self.find_silhouette()  # trouve les lignes de plis et les cusps
         self.lines = []
         self.break_lines()  # découpe les bords et plis à chaque bord-pli ou cusp.(long)
@@ -856,7 +863,7 @@ class Surface:
         #for p, v in self.visibilities.items(): # debug
         #    print("point:[%0.2f,%0.2f] visibilité:%i"%(*self.XY(np.array(self.S(*p))), v))
 
-        self.origine = self.lines[line][idx]['fp'] #debug
+        # self.origine = self.lines[line][idx]['fp'] #debug
 
     def find_silhouette(self):
         t0 = time.perf_counter()
@@ -928,10 +935,13 @@ class Surface:
         t0 = time.perf_counter()
 
         self.c_pts = fromarrays((vec_i, vec_s, dir_vec.T, pts_num), dtype=c_type)
-        self.c_lines = make_lines(
-            self.eds[self.c_pts["e"]]["f"], self.eds[self.c_pts["e"]]["g"]
-        )
-        # self.c_lines = self.make_c_lines(self.cpoints)
+        if len(self.c_pts) != 0 :
+            self.c_lines = make_lines(
+                self.eds[self.c_pts["e"]]["f"], self.eds[self.c_pts["e"]]["g"]
+            )
+            # self.c_lines = self.make_c_lines(self.cpoints)
+        else:
+            self.c_lines = []
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "make contour lines"))
 
         ######## breaks au  bord #########
@@ -1463,203 +1473,33 @@ class Surface:
                     dic[tuple(pt)].discard((i, j))
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Visibilité"))
 
-    def plot(self, T0):
-        #def plot_uv_line(ax, type, line, vis, color=0):
-        #    l = np.array(line)
-        #    l = self.S(l[:, 0], l[:, 1])
-        #    if vis == 0:
-        #        ax.plot(l[0], l[1], l[2], color="black")
-        #    elif vis != 0:
-
-        #        col = "black"
-        #        col = colormap[min(14, max(vis+8, 0))]
-        #        # col = 'powderblue' if type == 'b' else 'thistle' if type =='c' else 'navajowhite'
-        #        #col = (1+.5/min(vis, -1),1+.5/min(vis, -1),1+.5/min(vis, -1)) # le min evite une erreur si vis > 0
-
-        #        linestyle = 'solid'
-        #        #linestyle = linestyles[min(4, max(-vis, 0))]
-        #        #linestyle = (0,(2,1))
-
-        #        ax.plot(l[0], l[1], l[2], linestyle=linestyle, color=col)
-
+    def plot_for_browser(self):
         t0 = time.perf_counter()
-        fig = plt.figure(dpi=100)
 
-        ax = fig.add_subplot(projection="3d")
-        ax.set(proj_type="ortho")
-        ax.view_init(elev=self.elev, azim=self.azim)
-        ax.set_axis_off()
-        fig.tight_layout()
-
-        ptref = [0, 0]
-        global point_mark
-        point_mark = ax.scatter(
-            *self.S(*self.lines[ptref[0]][ptref[1]]["fp"]), marker=""
-        )
-        #ax.scatter(*self.S(*self.origine))# debug
-
-        ## print visibilities
-        # for i, l in enumerate(self.lines):
-        #    print(' line number : ', i, 'visibilities : ', self.visibilities[tuple(l[0]['ixfp'])], ', ', self.visibilities[tuple(l[-1]['ixfp'])])
-
-        def zoom(factor):
-            limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
-            average = np.column_stack(
-                ((limits[:, 0] + limits[:, 1]) / 2, (limits[:, 0] + limits[:, 1]) / 2)
-            )
-            new = (limits - average) / factor + average
-            ax.set(xlim=new[0], ylim=new[1], zlim=new[2])
-
-        def zoom_point():
-            res = self.res
-            p = self.lines[ptref[0]][ptref[1]]["fp"]
-            pt = self.S(*p)
-            limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
-            average = np.column_stack(
-                ((limits[:, 0] + limits[:, 1]) / 2, (limits[:, 0] + limits[:, 1]) / 2)
-            )
-            new = (limits - average) / res + np.column_stack((pt, pt))
-            ax.set(xlim=new[0], ylim=new[1], zlim=new[2])
-            plt.show()
-
-        def pt_change():
-            global point_mark
-            point_mark.remove()
-            point_mark = ax.scatter(
-                *self.S(*self.lines[ptref[0]][ptref[1]]["fp"]), marker="x"
-            )
-
-        def onkey(event):
-            # print(event.key)
-            if event.key == "u":
-                zoom(0.9)
-            if event.key == "y":
-                zoom(1.1)
-            if event.key == "ù":
-                ptref[0] = (ptref[0] + 1) % len(self.lines)
-                print(ptref[0], " ", ptref[1])
-                pt_change()
-            if event.key == "m":
-                ptref[0] = (ptref[0] - 1) % len(self.lines)
-                print(ptref[0], " ", ptref[1])
-                pt_change()
-            if event.key == " ":
-                ptref[1] = -1 - ptref[1]
-                print(ptref[0], " ", ptref[1])
-                pt_change()
-            if event.key == "x":
-                zoom_point()
-            if event.key == "!":
-                surf.set_axis(elev = ax.elev, azim = ax.azim)
-                surf.traitement()
-                ax.clear()
-                ax.set(proj_type="ortho")
-                ax.view_init(elev=self.elev, azim=self.azim)
-                ax.set_axis_off()
-                #ax.scatter(*self.S(*self.origine))# debug
-                surf.plot_lines(ax)
-                #for i, l in enumerate(self.lines): # debug
-                #    for j in range(len(l) - 1):
-                #        for (s,v) in self.line_bks[i][j]:
-                #            p, q = l[j]["fp"], l[j + 1]["fp"]
-                #            ax.scatter(*self.S(*((1 - s) * p + s * q)))
-            plt.show()
-
-        # plt.rcParams['keymap.left'].remove('left')
-        cid = fig.canvas.mpl_connect("key_press_event", onkey)
-
-        surf.plot_lines(ax)
-
-        #visible_lines = []  # tracées en dernier
-
-        #for i, l in enumerate(self.lines):
-        #    type = "?"
-        #    if l[0]["type"] == "??":
-        #        continue
-        #    # if l[0].type[0] == 'v':
-        #    #    ax.scatter(*self.S(*l[0]['fp']), marker = 'x')
-        #    # if l[-1].type[0] == 'v':
-        #    #    ax.scatter(*self.S(*l[-1]['fp']), marker = 'x')
-        #    vis = l[0]["v"]
-        #    if tuple(l[0]["ixfp"]) in self.visibilities:
-        #        type = l[0]["type"][1]
-        #        vis += self.visibilities[tuple(l[0]["ixfp"])]
-
-        #    # des flèches a chaque début et fin de ligne qui indiquent un éventuel changement de visibilité
-        #    # if l[0]['v'] != 0:
-        #    #    color = 'green' if l[0]['v'] > 0 else 'red'
-        #    #    p, q = self.S(*l[0]['fp']), self.S(*l[1]['fp'])
-        #    #    #print(p,q,norm(q-p))
-        #    #    ax.quiver(*p, *(.02*(q - p)/norm(q-p)),  color=color)
-        #    # if l[-1]['v'] != 0:
-        #    #    color = 'green' if l[0]['v'] > 0 else 'red'
-        #    #    p, q = self.S(*l[-1]['fp']), self.S(*l[-2]['fp'])
-        #    #    #print(p,q,norm(q-p))
-        #    #    ax.quiver(*p, *(.02*(q - p)/norm(q-p)),  color=color)
-
-        #    line = []
-        #    for j in range(len(l) - 1):
-        #        p, q = l[j]["fp"], l[j + 1]["fp"]
-        #        line.append(p)
-        #        for s, v in self.line_bks[i][j]:
-        #            line.append((1 - s) * p + s * q)
-        #            # ax.scatter(*self.S(*line[-1]))
-        #            if vis == 0:
-        #                visible_lines.append(line)
-        #            else:
-        #                # if vis > 0:
-        #                #    plt.close(fig)
-        #                #    return 'fail'
-        #                plot_uv_line(
-        #                    ax, type, line, vis
-        #                )  # , 0 if type !='?' else 'navajowhite')
-        #            vis = vis + v
-        #            line = [line[-1]]
-        #    line.append(l[-1]["fp"])
-        #    if vis == 0:
-        #        visible_lines.append(line)
-        #    else:
-        #        # if vis > 0:
-        #        #    plt.close(fig)
-        #        #    return 'fail'
-        #        plot_uv_line(ax, type, line, vis)
-        #for line in visible_lines:
-        #    plot_uv_line(ax, type, line, 0)
-
-        # ax.quiver(*self.S(self.u_grid[0,0], self.v_grid[0,0]), *(axis*10), color='black') # flèche vers l'observateur
-
-        # ax.plot_surface(self.S_grid[0,0,:, :], self.S_grid[1,0,:, :], self.S_grid[2,0,:, :]) # la surface en facettes
-
-        # for i, p in enumerate(self.c_pts): # des flèches vers la surface
-        #    ax.quiver(*self.S(*p['fp'])[:,0], *(.03 * self.XYZ(p.d)), color='black')
-        # for i, e in enumerate(self.beds):
-        #    ax.quiver(*self.S(*e['fp'])[:,0], *(.02 * self.XYZ(self.dirint(e))),  color='black')
-
-        # for l in self.b_lines: # des gros points là où il y a changement de visibilité au bord
-        #    for i, idx in enumerate(l):
-        #        index = idx if idx >= 0 else len(self.beds) + idx
-        #        if index in self.breaks['b']:
-        #            for s, v in self.breaks['b'][index]:
-        #                point = (1 - s) * self.dom_pt(self.beds[idx].p) + s * self.dom_pt(self.beds[idx].q)
-        #                ax.scatter(*self.S(*point))
-
-        # for l in self.c_lines: # des gros points là où il y a changement de visibilité sur les contours
-        #    for i in range(len(l)-1):
-        #        if l[i] in self.breaks['c']:
-        #            for s, v in self.breaks['c'][l[i]]:
-        #                point = (1 - s) * self.c_pts[l[i]]['fp'] + s * self.c_pts[l[i+1]]['fp']
-        #                ax.scatter(*self.S(*point))
-
-
-
-        limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
-        ax.set_box_aspect(aspect=np.ptp(limits, axis=1))
+        lines = defaultdict(list)  # clé = visibilité, valeur = liste de lignes. ligne = [x_1,y_1,x_2,y_2...]
+        for i, l in enumerate(self.lines):
+            type = "?"
+            if l[0]["type"] == "??":
+                continue
+            vis = l[0]["v"]
+            if tuple(l[0]["ixfp"]) in self.visibilities:
+                type = l[0]["type"][1]
+                vis += self.visibilities[tuple(l[0]["ixfp"])]
+            line = []
+            for j in range(len(l) - 1):
+                p, q = l[j]["fp"], l[j + 1]["fp"]
+                line.append(self.XY(np.array(self.S(*p))))
+                for s, v in self.line_bks[i][j]:
+                    line.append(self.XY(np.array(self.S(*((1 - s) * p + s * q)))))
+                    lines[vis].append(line)
+                    vis = vis + v
+                    line = [line[-1]] # coordonnées x,y du dernier point
+            last_pt = l[-1]["fp"]
+            line.append(self.XY(np.array(self.S(*last_pt))))
+            lines[vis].append(line)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
-        self.print("[%0.3fs] %s" % (time.perf_counter() - T0, "Total"))
-        # plt.gca()
-        # plt.close(fig)
-        # return 'pass'
-        plt.show()
+
+        return lines, self.center, self.radius  
 
     def relevement(self, fp):
         # relève la courbe fp
@@ -1677,9 +1517,6 @@ class Surface:
             + np.array(self.Suv(u, v)) * du * dv * 2
             + np.array(self.Svv(u, v)) * dv * dv
         )
-
-    def dom_pt(self, p):
-        return DP((self.u_grid[tuple(p)], self.v_grid[tuple(p)]))
 
     def other_pt(self, e): # pas utilisé
         fp, fq, fr = self.faces[e.f]
