@@ -93,8 +93,6 @@
       if (resizeRendererToDisplaySize(renderer)) {
         const canvas = renderer.domElement;
         camera.aspect = canvas.clientWidth / canvas.clientHeight;
-        camera.up.set(0,0,1);        // set up
-
         camera.updateProjectionMatrix();
       }
       renderer.render(scene, camera)
@@ -109,14 +107,20 @@
     function myMouseUp(){
       
       let url = "{% url 'home' %}";
-      let I = new THREE.Vector3( 1,0,0 ).unproject( camera );
-      let J = new THREE.Vector3( 0,1,0 ).unproject( camera );
-      let O = new THREE.Vector3( 0,0,0 ).unproject( camera );
+      let svg = document.getElementById('svg');
+      let width = svg.parentElement.clientWidth;
+      let height = svg.parentElement.clientHeight;
+      let I = new THREE.Vector3( 1,0,-1 ).unproject( camera );
+      let J = new THREE.Vector3( 0,1,-1 ).unproject( camera );
+      let O = new THREE.Vector3( 0,0,-1 ).unproject( camera );
+      // let O = new THREE.Vector3( width/2, height/2, -1 ).unproject( camera );
+      let zoom = 1;// camera.zoom;
 
       let data = {
         'I': I.sub(O).toArray(),
         'J': J.sub(O).toArray(),
-        'zoom': camera.zoom
+        'O': O.toArray(),
+        // 'zoom': camera.zoom
       }
 
       var request = new Request(url, {
@@ -128,26 +132,23 @@
         },
       });
 
-      console.log('request data', data);
+      // console.log('request data', data);
 
       fetch(request)
       .then(response => response.json())
       .then(function(data) {
-        console.log(data)
-        let radius = data.radius;
-        let center = data.center;
-        let zoom = data.zoom;
+        // console.log('response  ', data)
+        // let radius = data.radius;
+        let origin = data.origin;
+        // let zoom = data.zoom;
         let lines = data.lines;
+        console.log('origin  ', origin);
 
-        let svg = document.getElementById('svg');
-        let width = svg.parentElement.clientWidth;
-        let height = svg.parentElement.clientHeight;
 
         let scaleX = zoom * width/(2*radius);  // de coordonnées surface en pixels
         let scaleY = - zoom * height/(2*radius); // signe moins pour que y soit dirigé vers le haut
-        let transX = width/2 - center[0] * width/(2*radius);
-        let transY = height/2 + center[1] * width/(2*radius);
-
+        let transX = width/2 - zoom * origin[0] * width/(2*radius);
+        let transY =  height/2 + zoom * origin[1] * height/(2*radius);
         console.log(scaleX, scaleY, transX, transY);
         svg.transform.baseVal.getItem(1).setScale(scaleX, scaleY);
         svg.transform.baseVal.getItem(0).setTranslate(transX, transY);

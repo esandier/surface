@@ -24,13 +24,14 @@ class HomePageView(TemplateView):
         data = json.loads(request.body.decode())
         I = data['I']
         J = data['J']
-        zoom = data['zoom']
+        O = data['O']
+        # zoom = data['zoom']
 
         self.surf.triangulate(70)
         self.surf.set_axis(I,J)
         self.surf.traitement()
         
-        lines, center, radius = self.surf.plot_for_browser()
+        lines = self.surf.plot_for_browser()
         for vis in lines:
             for i, l in enumerate(lines[vis]):
                 string = ""
@@ -40,9 +41,11 @@ class HomePageView(TemplateView):
 
         response = {}
         response['lines'] = lines[0]
-        response['center'] = center
-        response['radius'] = radius
-        response['zoom'] = zoom
+        print(O)
+        response['origin'] = self.surf.XY(np.array(O)).tolist()
+        # response['center'] = center
+        # response['radius'] = radius
+        # response['zoom'] = zoom
 
         return HttpResponse(json.dumps(response), content_type='application/json')        
 

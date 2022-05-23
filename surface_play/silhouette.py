@@ -476,7 +476,7 @@ class Surface:
         self.axis = np.cross(vecI, vecJ)  
         self.axis = self.axis/norm(self.axis) # coordonnées x,y,z de la normale au plan de vision
         def XY(vec):  # renvoie coordonnées d'un point de l'espace dans le repère I,J
-            return np.array([np.inner(vecI, vec.T), np.inner(vecJ, vec.T)])
+            return np.array([np.inner(vecI, vec.T), np.inner(vecJ, vec.T)]) # le .T est pour le cas d'appel vectoriel. Pour 1 vecteur, ça change rien
 
         def Z(vec):  # renvoie coordonnées d'un point de l'espace sur l'axe 'axis'
             return np.inner(self.axis, vec.T)
@@ -1499,7 +1499,7 @@ class Surface:
             lines[vis].append(line)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
 
-        return lines, self.center, self.radius  
+        return lines 
 
     def relevement(self, fp):
         # relève la courbe fp
