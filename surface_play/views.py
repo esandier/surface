@@ -9,8 +9,6 @@ from django.shortcuts import get_object_or_404, redirect, render
 from surface_play.models import SurfaceRecord
 from .silhouette import *
 import json
-import dill
-
 
 class SurfacePlayView(TemplateView):
     template_name = "play.html"
