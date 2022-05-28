@@ -1,41 +1,55 @@
 # pages/views.py
-from django.views.generic import TemplateView
+from django.views.generic import TemplateView, ListView
+from django.urls import reverse_lazy
+from django.views.generic.edit import CreateView, DeleteView, UpdateView
 from django.http import HttpResponse, HttpResponseRedirect
+from django.shortcuts import get_object_or_404, redirect, render
+
+
+from surface_play.models import SurfaceRecord
 from .silhouette import *
 import json
+import dill
 
 
+class SurfacePlayView(TemplateView):
+    template_name = "play.html"
 
-class HomePageView(TemplateView):
-    template_name = "home.html"
-    surf = Surface('u','v','sin(u*u + v*v)', 'u v' , bounds = (-5,5,-5,5))
+    # def dispatch(self, request, *args, **kwargs):
+    #     self.pk = self.kwargs['pk']
+    #     return super().dispatch(request, *args, **kwargs)
 
-    def setup(self, request, *args, **kwargs):
-        super().setup(request, *args, **kwargs)
-        self.surf.triangulate(700)
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        positions, normals, faces, center, radius = self.surf.for_3js() 
+    def get(self, request, pk):
+        rec = get_object_or_404(SurfaceRecord, pk=pk)
+        surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
+        positions, normals, faces, center, radius = surf.for_3js() 
+        context = {}
         context['positions'] = positions
         context['normals'] = normals
         context['faces'] = faces
         context['center'] = center
         context['radius'] = radius
-        return context
+        context['surface'] = rec
+        context['pk'] = pk
+
+        return render(request, self.template_name, context)
         
-    def post(self, request):
+    def post(self, request, pk):
+        rec = get_object_or_404(SurfaceRecord, pk=pk)
+        surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
+        surf.triangulate(300)
+
         data = json.loads(request.body.decode())
         I = data['I']
         J = data['J']
         O = data['O']
         # zoom = data['zoom']
 
-        # self.surf.triangulate(300)
-        self.surf.set_axis(I,J)
-        self.surf.traitement()
+        # surf = request.session['surface']
+        surf.set_axis(I,J)
+        surf.traitement()
         
-        lines = self.surf.plot_for_browser()
+        lines = surf.plot_for_browser()
         for vis in lines:
             for i, l in enumerate(lines[vis]):
                 string = ""
@@ -45,7 +59,7 @@ class HomePageView(TemplateView):
 
         response = {}
         response['lines'] = lines[0]
-        response['origin'] = self.surf.XY(np.array(O)).tolist()
+        response['origin'] = surf.XY(np.array(O)).tolist()
         # response['center'] = center
         # response['radius'] = radius
         # response['zoom'] = zoom
@@ -53,32 +67,23 @@ class HomePageView(TemplateView):
         return HttpResponse(json.dumps(response), content_type='application/json')        
 
 
-class AboutPageView(TemplateView):
-    template_name = "about.html"
 
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
+class SurfaceRecordListView(ListView):
+    model = SurfaceRecord
+    context_object_name = 'surfaces'
 
-        # surf = Surface('u','v','2*sin(u)', 'u v', bounds = (-3,3,-3,3))
-        # surf.triangulate(70)
-        surf = Surface('(2+ u*cos(3*v/2))*cos(v)','(2+ u*cos(3*v/2))*sin(v) ','u*sin(3*v/2)', 'u v', bounds = (-1.4,1.4,0, 6.2831), quotient=('no','mo'))
-        surf.triangulate(100)        
-        
-        surf.set_axis(elev=40, azim=40)
-        surf.traitement()
-        lines, center, radius = surf.plot_for_browser()
-        for vis in lines:
-            for i, l in enumerate(lines[vis]):
-                string = ""
-                for p in l:
-                    string += " %f,%f " % (p[0], p[1])
-                lines[vis][i] = string
-        context['lines'] = lines[0]
-        context['center'] = center
-        context['radius'] = radius
+class SurfaceRecordCreateView(CreateView):
+    model = SurfaceRecord
+    fields = ['name', 'X', 'Y', 'Z', 'parameter_names', 'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify']
 
-        return context    
-    
+class SurfaceRecordUpdateView(UpdateView):
+    model = SurfaceRecord
+    fields = ['name', 'X', 'Y', 'Z', 'parameter_names', 'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify']
+
+class SurfaceRecordDeleteView(DeleteView):
+    model = SurfaceRecord
+    success_url = reverse_lazy('surface-list')
+
 #surf = Surface('u','v', 'log(cos(v)/cos(u))', 'u v')
 #surf.triangulate(bounds = (-1.5,1.5,-1.5,1.5), res = 53)
 #surf.set_axis(elev = 20, azim = 28)

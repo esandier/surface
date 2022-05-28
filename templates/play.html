@@ -3,6 +3,11 @@
 {% load json_filter %}
 
 {% block content %}
+<div class = 'titre'>
+  <h1>{{ surface.name }} = Silhouette</h1>
+  <a id='home-link' href="{% url 'surfaces' %}" class="glyph"><span class="fa fa-home"></span></a>
+</div>
+
 
 <div style="position:relative; width:500px; height:500px; border: none">
 
@@ -24,8 +29,9 @@
     const scene = new THREE.Scene();
 
     // const camera = new THREE.PerspectiveCamera( 75, 1, .5, 500000 );
-    const radius = {{ radius | tojson }};
-    const center = {{ center | tojson }}
+    const radius = {{ radius }};
+    const center = {{ center | tojson }};
+    const pk = {{ pk }};
 
     // les arguments sont left, right, top, bottom, near, far
     const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, 0, 4 * radius);
@@ -116,7 +122,7 @@
 
 
 
-      let url = "{% url 'home' %}";
+      let url = "{% url 'surface-play' pk=pk %}";
       let I = new THREE.Vector3( 1,0,-1 ).unproject( camera );
       let J = new THREE.Vector3( 0,1,-1 ).unproject( camera );
       let O = new THREE.Vector3( 0,0,-1 ).unproject( camera );

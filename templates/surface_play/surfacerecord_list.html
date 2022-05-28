@@ -1,0 +1,30 @@
+<!-- templates/home.html -->
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class = 'titre'>
+	<h1>Liste des surfaces</h1>
+  <a href="{% url 'surface-add' %}" class="glyph"><span class="fa fa-plus"></span></a>
+</div>
+
+<div class="content container">
+	<div class="row">
+		<div class="col"  id = 'liste-surfaces'>
+			{% for surface in surfaces %}
+			<div class = 'item-liste'>
+          <a href="{% url 'surface-update' pk=surface.pk %}" class="list-glyph">
+            <span class="fa fa-pencil"></span></a>
+          <a href="{% url 'surface-delete' pk=surface.pk %}" class="list-glyph">
+            <span class="fa fa-trash"></span></a>
+          <div style = 'display:inline-block'>
+          <a href="{% url 'surface-play' pk=surface.pk %}" class="list-title">
+            <h1>{{ surface.name }}	</h1>
+          </a>
+				  </div>
+			</div>
+			{% endfor %}
+		</div>
+	</div>
+</div>
+{% endblock content %}

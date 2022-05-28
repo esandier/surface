@@ -1,11 +1,23 @@
 <!-- templates/base.html -->
+<!DOCTYPE html>
+<!-- Bootstrap -->
+<link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/css/bootstrap.min.css" integrity="sha384-rwoIResjU2yc3z8GV/NPeZWAv56rSmLldC3R/AZzGRnGxQQKnKkoFVhFQhNUwEyJ" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+<!-- Font -->
+<link href="//fonts.googleapis.com/css?family=Crete+Round&ampsubset=latin,latin-ext" rel="stylesheet" type="text/css">
+<!-- Bootstrap -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tether/1.4.0/js/tether.min.js"></script>
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/js/bootstrap.min.js"></script>
 
+
+<!-- CSS -->
 <style>
   html, body {
      margin: 0;
      height: 100%;
   }
-  #c, #d {
+
+  .plot {
      width: 100%;
      height: 100%;
      display: block;
@@ -14,15 +26,130 @@
      top: 0;
      z-index: 2;     
   }
+
+  * {
+    box-sizing: border-box;
+    -webkit-box-sizing: border-box;
+    -moz-box-sizing: border-box;
+  }
+
+  body {
+    font-family: 'Crete Round', serif;
+  }
+
+  div.titre h1, div.titre h1 a, div.titre h1 a:visited, div.titre h1 a:active {
+    color: #ffffff;
+    font-size: 24pt;
+    text-decoration: none;
+  }
+
+  div.titre {
+    background-color: #ff9400;
+    margin-top: 0;
+      margin-bottom: 20px;
+    padding: 10px 10px 10px 20px;
+    display:flex;
+    justify-content: space-between;
+  }
+
+/* View Liste-exos */
+
+  .glyph, .glyph-visited {
+    background:inherit;
+    border:none;
+    color: #ffffff; /* ce sont des glyphs blancs */
+    font-size: 20pt;
+    margin-right: 20px;
+    align-self:center;
+  }
+
+  glyph:hover, a.list-glyph:hover {
+	    color: Grey; /* Couleur des glyphs quand on passe dessus */
+  }
+
+  div.item-liste{
+    display:flex;
+    margin-top: 10px;
+  }
+
+  div.item-liste h1, input.item-liste {
+    font-size: 18pt;
+    color: SteelBlue;
+    margin: 0px;
+  }
+
+  .list-glyph, .list-glyph:hover, .list-glyph:visited,.list-title, .list-title:hover, .list-title:visited {
+    color: #ff9400;
+    float: left;
+    font-size: 18pt;
+    margin-right: 10px;
+    align-self:flex-start;
+  }
+
+
+  /* Les champs input */
+
+  .absolute{
+      position: absolute;
+  }
+
+  .absolute_center{
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+  }
+    
+  .phantom {
+    opacity : 0;
+    z-index: 0;
+  }
+
+  .noborder {
+      border:none;
+  }
+
+  
+
+  /* Menu développement bootstrap */
+  .editable-outer {
+      position: relative;
+      padding:7px 7px 7px 7px;
+      background:inherit;
+      width:250px;
+      }
+
+  .editable-label {
+      display: inline-block;
+      font: inherit;
+      margin: 0;
+      white-space: pre;
+      background:inherit;
+      width:inherit;
+      border:1px solid transparent;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+  .editable-input {
+      display: inline-block;
+      font: inherit;
+      margin: 0;
+      white-space: pre;
+      width:inherit;
+      border:1px solid white;
+      background:inherit;
+      overflow: hidden;
+      text-overflow: ellipsis;
+
+  }
+
+
   </style>
 
 <!DOCTYPE html>
-<html>
-  <header>
-    <a href="{% url 'home' %}">Home</a> |
-    <a href="{% url 'about' %}">About</a>
-  </header>
-    
+
+<html>    
 	<head>
 		<meta charset="utf-8">
 		<style>
@@ -30,8 +157,7 @@
 		</style>
 	</head>
 	<body>
-
-{% block content %} {% endblock content %}
-    
+    {% block content %} 
+    {% endblock content %}
   </body>
 </html>  
