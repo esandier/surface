@@ -3,13 +3,13 @@
 {% load json_filter %}
 
 {% block content %}
-<div class = 'titre'>
+<div class = 'container-fluid titre'>
   <h1>{{ surface.name }} = Silhouette</h1>
-  <a id='home-link' href="{% url 'surfaces' %}" class="glyph"><span class="fa fa-home"></span></a>
+  <h1><a id='home-link' href="{% url 'surfaces' %}" class="glyph"><span class="fa fa-home"></span></a></h1>
 </div>
 
 
-<div style="position:relative; width:500px; height:500px; border: none">
+<div class="container" style="position:relative; width:500px; height:500px; border: none">
 
   <svg class="plot" viewBox="-1 -1 2 2">
     <g id="svg" transform="translate(0) scale(1)" style="pointer-events:none">

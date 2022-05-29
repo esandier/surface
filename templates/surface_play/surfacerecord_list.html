@@ -3,25 +3,27 @@
 
 {% block content %}
 
-<div class = 'titre'>
+<div class = 'container-fluid titre'>
 	<h1>Liste des surfaces</h1>
-  <a href="{% url 'surface-add' %}" class="glyph"><span class="fa fa-plus"></span></a>
+	<h1><a class = 'glyph' href="{% url 'surface-add' %}"><span class="fa fa-plus"></span></a></h1>
 </div>
 
-<div class="content container">
+<div class="container-fluid content">
 	<div class="row">
 		<div class="col"  id = 'liste-surfaces'>
 			{% for surface in surfaces %}
-			<div class = 'item-liste'>
-          <a href="{% url 'surface-update' pk=surface.pk %}" class="list-glyph">
-            <span class="fa fa-pencil"></span></a>
-          <a href="{% url 'surface-delete' pk=surface.pk %}" class="list-glyph">
-            <span class="fa fa-trash"></span></a>
-          <div style = 'display:inline-block'>
-          <a href="{% url 'surface-play' pk=surface.pk %}" class="list-title">
-            <h1>{{ surface.name }}	</h1>
-          </a>
-				  </div>
+			<div class = 'list-group-item item-liste'>
+				<h3>
+					<a href="{% url 'surface-update' pk=surface.pk %}" class="list-glyph">
+						<span class="fa fa-pencil"></span>
+					</a>
+					<a href="{% url 'surface-delete' pk=surface.pk %}" class="list-glyph">
+						<span class="fa fa-trash"></span>
+					</a>
+					<a href="{% url 'surface-play' pk=surface.pk %}">
+						{{ surface.name }}
+					</a>
+				</h3>
 			</div>
 			{% endfor %}
 		</div>

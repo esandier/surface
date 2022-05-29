@@ -3,9 +3,9 @@
 {% load json_filter %}
 
 {% block content %}
-<div class = 'titre'>
+<div class = 'container-fluid titre'>
   <h1>{{ object.name }} = Silhouette</h1>
-  <a id='home-link' href="{% url 'surfaces' %}" class="glyph"><span class="fa fa-home"></span></a>
+	<h1><a id='home-link' class = 'glyph' "{% url 'surfaces' %}"><span class="fa fa-home"></span></a></h1>
 </div>
 <div class = "content-container" style = "margin-left: 10%;">
 <form action="" method="post">
