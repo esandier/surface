@@ -80,7 +80,7 @@ class SurfaceRecordUpdateView(UpdateView):
 
 class SurfaceRecordDeleteView(DeleteView):
     model = SurfaceRecord
-    success_url = reverse_lazy('surface-list')
+    success_url = reverse_lazy('surfaces')
 
 #surf = Surface('u','v', 'log(cos(v)/cos(u))', 'u v')
 #surf.triangulate(bounds = (-1.5,1.5,-1.5,1.5), res = 53)

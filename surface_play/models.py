@@ -12,7 +12,7 @@ class SurfaceRecord(models.Model):
     name = models.CharField(max_length = 100)
     X = models.CharField(max_length=400, default = 'u') 
     Y = models.CharField(max_length=400, default = 'v')
-    Z = models.CharField(max_length=400, default = 'u*u+v*v')
+    Z = models.CharField(max_length=400, default = '0')
     parameter_names = models.CharField(max_length=30, default = 'u v')
     u_min = models.FloatField(default = 0)
     u_max = models.FloatField(default = 1)

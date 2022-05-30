@@ -3,12 +3,13 @@
 
 {% block content %}
 
-<div class = 'container-fluid titre'>
-	<h1>Liste des surfaces</h1>
-	<h1><a class = 'glyph' href="{% url 'surface-add' %}"><span class="fa fa-plus"></span></a></h1>
-</div>
-
-<div class="container-fluid content">
+<div class="container-fluid d-flex min-vh-100 flex-column">
+	<!-- I want this container to stretch to the height of the parent -->
+	<div class="row d-flex justify-content-between p-3 titre">
+	  <h1>Surfaces</h1>
+	  <h1><a class = 'glyph' href="{% url 'surface-add' %}"><span class="fa fa-plus"></span></a></h1>
+	</div>
+  
 	<div class="row">
 		<div class="col"  id = 'liste-surfaces'>
 			{% for surface in surfaces %}
