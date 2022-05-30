@@ -15,25 +15,41 @@
     <link href="//fonts.googleapis.com/css?family=Crete+Round&ampsubset=latin,latin-ext" rel="stylesheet" type="text/css">
 
     <style>
-      html, body {
-         margin: 0;
-         height: 100%;
-      }
-    
-      .plot {
-         width: 100%;
-         height: 100%;
-         display: block;
-         position: absolute;
-         left: 0 ;
-         top: 0;
-         z-index: 2;     
-      }
-    
       * {
         box-sizing: border-box;
         -webkit-box-sizing: border-box;
         -moz-box-sizing: border-box;
+      }
+    
+      html, body {
+         margin: 0;
+         height: 100%;
+      }
+      .box {
+        display: flex;
+        flex-flow: column;
+        height: 100%;
+      }
+
+      .box .row {
+        border: none;
+      }
+
+      .box .row.header {
+        flex: 0 1 auto;
+        justify-content:space-between;
+      }
+
+      .box .row.content {
+        flex: 1 1 auto;
+      }
+      .plot {
+         width: 100%;
+         height: 80%;
+         position: absolute;
+         left: 0 ;
+         bottom: 0;
+         z-index: 2;     
       }
     
       body {
@@ -42,17 +58,11 @@
     
       div.titre h1, div.titre h1 a, div.titre h1 a:visited, div.titre h1 a:active {
         color: #ffffff;
-        /* font-size: 24pt; */
         text-decoration: none;
       }
     
       div.titre {
         background-color: #ff9400;
-        margin-top: 0;
-          margin-bottom: 20px;
-        padding: 10px 10px 10px 20px;
-        display:flex;
-        justify-content: space-between;
       }
     
     /* View Liste-exos */
@@ -61,9 +71,6 @@
         background:inherit;
         border:none;
         color: #ffffff; /* ce sont des glyphs blancs */
-        /* font-size: 20pt; */
-        margin-right: 20px;
-        align-self:center;
       }
     
       glyph:hover, list-glyph:hover {
@@ -75,15 +82,12 @@
       }
     
       a, input.item-liste {
-        /* font-size: 18pt; */
         color: SteelBlue;
-        /* margin: 0px; */
       }
     
       .list-glyph, .list-glyph:hover, .list-glyph:visited,.list-title, .list-title:hover, .list-title:visited {
         color: #ff9400;
         float: left;
-        /* font-size: 18pt; */
         margin-right: 10px;
         align-self:flex-start;
       }

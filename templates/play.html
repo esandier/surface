@@ -3,21 +3,24 @@
 {% load json_filter %}
 
 {% block content %}
-<div class = 'container-fluid titre'>
-  <h1>{{ surface.name }} = Silhouette</h1>
-  <h1><a id='home-link' href="{% url 'surfaces' %}" class="glyph"><span class="fa fa-home"></span></a></h1>
+<div class="container-fluid d-flex min-vh-100 flex-column">
+  <!-- I want this container to stretch to the height of the parent -->
+  <div class="row p-2 justify-content-between titre">
+    <h1>{{ surface.name }} = Silhouette</h1>
+    <h1><a id='home-link' href="{% url 'surfaces' %}" class="glyph"><span class="fa fa-home"></span></a></h1>
+  </div>
+  <div class="row justify-content-between">
+  <!-- I want this row height to filled the remaining height -->
+    <svg class="plot" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet">
+      <g id="svg" transform="translate(0) scale(1)" style="pointer-events:none">
+      </g>
+    </svg>
+
+    <canvas class="plot" id="canvas"></canvas>
+  </div>
 </div>
 
 
-<div class="container-fluid" style="position:relative; height:80%; border: none">
-
-  <svg class="plot" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet">
-    <g id="svg" transform="translate(0) scale(1)" style="pointer-events:none">
-    </g>
-  </svg>
-
-  <canvas class="plot" id="canvas"></canvas>
-</div>
 
 <script type="module">
     const canvas = document.getElementById('canvas');
