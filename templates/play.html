@@ -157,8 +157,7 @@
       .then(response => response.json())
       .then(function(data) {
         let origin = data.origin;
-        let lines = data.lines;
-
+        const lines = data.lines_by_visibility;
 
         let scaleX = zoom / radius;  // la viewbox fait que les coord dans la boite sont [-1,1]X[-1,1]], y dirigé vers le bas
         let scaleY = - zoom / radius; // signe moins pour que y soit dirigé vers le haut
@@ -168,8 +167,15 @@
         svg.transform.baseVal.getItem(0).setTranslate(transX, transY);
 
         let string = "";
-        for (const line of lines ) {
-          string = string + "<polyline points = ' "+ line +" ' fill='none' vector-effect='non-scaling-stroke' stroke='black' stroke-width='1.5'/>\n";
+        for(const i in lines) {
+          for (const line of lines[i] ) {
+            if( i == '0' ) {
+              string = string + "<polyline points = ' "+ line +" ' fill='none' vector-effect='non-scaling-stroke' stroke='black' stroke-width='1.5'/>\n";
+            }
+            else {
+              string = string + "<polyline stroke-dasharray='4' points = ' "+ line +" ' fill='none' vector-effect='non-scaling-stroke' stroke='lightgrey' stroke-width='1.5'/>\n";
+            }
+          }         
         }
 
         svg.innerHTML = string;

@@ -5,6 +5,7 @@ from django.views.generic.edit import CreateView, DeleteView, UpdateView
 from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, redirect, render
 
+from collections import defaultdict
 
 from surface_play.models import SurfaceRecord
 from .silhouette import *
@@ -48,15 +49,16 @@ class SurfacePlayView(TemplateView):
         surf.traitement()
         
         lines = surf.plot_for_browser()
+        lines_by_visibility = defaultdict(list)
         for vis in lines:
             for i, l in enumerate(lines[vis]):
                 string = ""
                 for p in l:
                     string += " %f,%f " % (p[0], p[1])
-                lines[vis][i] = string
+                lines_by_visibility[int(vis)].append(string)# transforme en int python pour sérialiser
 
         response = {}
-        response['lines'] = lines[0]
+        response['lines_by_visibility'] = lines_by_visibility
         response['origin'] = surf.XY(np.array(O)).tolist()
         # response['center'] = center
         # response['radius'] = radius

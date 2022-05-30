@@ -4,6 +4,8 @@ from django.urls import reverse
 # Create your models here.
 
 class SurfaceRecord(models.Model):
+    class Meta:
+        ordering = ['name']
 
     class Identify(models.TextChoices):
         MOEBIUS = 'mo'
