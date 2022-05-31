@@ -75,14 +75,17 @@ class SurfaceRecordListView(ListView):
 class SurfaceRecordCreateView(CreateView):
     model = SurfaceRecord
     fields = ['name', 'X', 'Y', 'Z', 'parameter_names', 'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify']
+    context_object_name = 'surface'
 
 class SurfaceRecordUpdateView(UpdateView):
     model = SurfaceRecord
     fields = ['name', 'X', 'Y', 'Z', 'parameter_names', 'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify']
+    context_object_name = 'surface'
 
 class SurfaceRecordDeleteView(DeleteView):
     model = SurfaceRecord
     success_url = reverse_lazy('surfaces')
+    context_object_name = 'surface'
 
 #surf = Surface('u','v', 'log(cos(v)/cos(u))', 'u v')
 #surf.triangulate(bounds = (-1.5,1.5,-1.5,1.5), res = 53)

@@ -7,7 +7,10 @@
   <!-- I want this container to stretch to the height of the parent -->
   <div class="row d-flex justify-content-between p-3 titre">
     <h1>{{ surface.name }}</h1>
-    <h1><a id='home-link' href="{% url 'surfaces' %}" class="glyph"><span class="fa fa-home"></span></a></h1>
+    <h1>
+      <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph"><span class="far fa-pen-to-square"></span></a>
+      <a href="{% url 'surfaces' %}" class="glyph"><span class="fa-regular fa-rectangle-list"></span></a>
+    </h1>
   </div>
   <div class="row" style="flex:1">
   <!-- I want this row height to filled the remaining height -->
