@@ -49,20 +49,19 @@ class SurfacePlayView(TemplateView):
         surf.traitement()
         
         lines = surf.plot_for_browser()
-        lines_by_visibility = defaultdict(list)
-        for vis in lines:
+        lines_by_visibility = []
+        for vis in sorted(lines):
+            lines_out = []
             for i, l in enumerate(lines[vis]):
                 string = ""
                 for p in l:
                     string += " %f,%f " % (p[0], p[1])
-                lines_by_visibility[int(vis)].append(string)# transforme en int python pour sérialiser
+                lines_out.append(string)
+            lines_by_visibility.append(lines_out)
 
         response = {}
         response['lines_by_visibility'] = lines_by_visibility
         response['origin'] = surf.XY(np.array(O)).tolist()
-        # response['center'] = center
-        # response['radius'] = radius
-        # response['zoom'] = zoom
 
         return HttpResponse(json.dumps(response), content_type='application/json')        
 
