@@ -216,8 +216,10 @@ class Surface:
 
         u, v = sp.symbols(param_names)
 
-        # On détermine la bounding box (avec résolution low_res) pour perturber S, ça sert aussi ds for_3js
-        S_pur = sp.Array(sp.sympify([X, Y, Z]))
+        # On détermine la bounding box (avec résolution low_res) pour perturber S, ça sert aussi dans for_3js
+        with sp.evaluate(False) :
+            truc_nul = u*sp.sin(sp.pi)
+        S_pur = sp.Array(sp.sympify([X, Y, Z])) + sp.Array([truc_nul,truc_nul,truc_nul])
         Slambda = lambdify([u, v], S_pur, "numpy")
         u_grid, v_grid = np.meshgrid(
             np.linspace(self.u_min, self.u_max, self.low_res+1), 

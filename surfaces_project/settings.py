@@ -102,6 +102,8 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+SESSION_SERIALIZER = 'django.contrib.sessions.serializers.PickleSerializer' # pour pouvoir serialiser une surface.
+
 
 # Internationalization
 # https://docs.djangoproject.com/en/4.0/topics/i18n/

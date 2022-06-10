@@ -1,8 +1,6 @@
 ﻿# Todo:
-# interface web. Publier.
 
 # Corriger l'exclusion d'intersections (en prenant comme règle que les segments ne doivent pas appartenir à une même face ?)
-# Corriger le bug dans simplify: cf message ci-dessous, plot de (sin(u)+sin(v)^2 
 # Ajouter la perspective (axis dépend du point) ?
 # Corriger pour avoir un résultat correct en cas d'échelle non-isotrope ?
 # automatiser la résolution. Soit en fonction de la courbure max, soit en fonction des incohérences de visibilité.
@@ -358,24 +356,65 @@ class Surface:
         # pass
         print(s)
 
-    def __init__(self, X="x", Y="y", Z="x*y", param_names="x y"):
+    def __init__(self, X="x", Y="y", Z="x*y", param_names="x y", bounds = (0,1,0,1) , quotient=("no", "no")):
         t0 = time.perf_counter()
+        self.low_res = 80
+
+        self.u_min, self.u_max, self.v_min, self.v_max = (
+            bounds[0],
+            bounds[1],
+            bounds[2],
+            bounds[3],
+        )
+        self.u_identify = quotient[0]
+        self.v_identify = quotient[1]
 
         u, v = sp.symbols(param_names)
+
+        # On détermine la bounding box (avec résolution low_res) pour perturber S, ça sert aussi dans for_3js
+        with sp.evaluate(False) :
+            truc_nul = u*sp.sin(sp.pi)
+        S_pur = sp.Array(sp.sympify([X, Y, Z])) + sp.Array([truc_nul,truc_nul,truc_nul])
+        Slambda = lambdify([u, v], S_pur, "numpy")
+        u_grid, v_grid = np.meshgrid(
+            np.linspace(self.u_min, self.u_max, self.low_res+1), 
+            np.linspace(self.v_min, self.v_max, self.low_res+1),
+            indexing="ij"
+        )
+        self.X_grid, self.Y_grid, self.Z_grid = Slambda(u_grid, v_grid)
+        self.bbox = (
+            np.amin(self.X_grid), 
+            np.amax(self.X_grid), 
+            np.amin(self.Y_grid), 
+            np.amax(self.Y_grid), 
+            np.amin(self.Z_grid), 
+            np.amax(self.Z_grid)
+        )
+        self.center = [(self.bbox[0]+self.bbox[1])/2, (self.bbox[2]+self.bbox[3])/2, (self.bbox[4]+self.bbox[5])/2]
+        dX, dY, dZ = self.bbox[1] - self.bbox[0], self.bbox[3] - self.bbox[2], self.bbox[5] - self.bbox[4]
+        self.radius = np.sqrt(dX**2 + dY**2 + dZ**2)/2
+
+        # On perturbe S, et on fabrique les fonctions lambdifiées
+        u, v = sp.symbols(param_names)
+        d_u, d_v = self.u_max - self.u_min, self.v_max - self.v_min
         ax_x, ax_y, ax_z = sp.symbols("ax_x ax_y ax_z")
         ax = sp.Array([ax_x, ax_y, ax_z])
         du, dv = sp.symbols("du dv")
-        # on perturbe S pour éviter les dérivées nulles
-        S_sp = sp.Array(sp.sympify([X, Y, Z])) + sp.Array(
+        # on perturbe S pour éviter les dérivées nulles, ces perturbations semblent bien marcher. Plus grand, ça fait des problèmes avec des vues dégénérées
+        S_sp = S_pur + sp.Array(
             [
-                0.0001
-                * sp.sin(
-                    u * 0.00034521 + v * 0.00012345
-                ),  # ces valeurs semblent bien marcher. Plus grand, ça fait des problèmes avec des vues dégénérées
-                0.0001 * sp.sin(u * 0.00076521 + v * 0.00065735),
-                0.0001 * sp.sin(u * 0.00054721 + v * 0.00019674),
+                0.0001 * dX * sp.sin(u * 0.00034521 / d_u + v * 0.00012345 / d_v),  
+                0.0001 * dY * sp.sin(u * 0.00076521 / d_u + v * 0.00065735 / d_v),
+                0.0001 * dZ * sp.sin(u * 0.00054721 / d_u + v * 0.00019674 / d_v),
             ]
         )
+        # S_sp = S_pur + sp.Array(
+        #     [
+        #         0.0001  * sp.sin(u * 0.00034521  + v * 0.00012345),  
+        #         0.0001  * sp.sin(u * 0.00076521  + v * 0.00065735),
+        #         0.0001  * sp.sin(u * 0.00054721  + v * 0.00019674),
+        #     ]
+        # )
         # dérivée de S.N dans la direction (du, dv)
         # DS_axis_sp = sp.diff(S_sp,u).dot([ax_x,ax_y,ax_z]) * du + sp.diff(S_sp,v).dot([ax_x,ax_y,ax_z]) * dv
         Su_sp = sp.diff(S_sp, u)  # dérivée par rapport à u, comme expression sympy
@@ -409,7 +448,7 @@ class Surface:
             ]
         )
 
-        self.S = lambdify([u, v], S_sp, "numpy")
+        self.S = lambdify([u, v], S_sp, "numpy")# applied to a numpy array, creates a list of three np.arrays of the same dimension
         self.Su = lambdify([u, v], Su_sp, "numpy")
         self.Sv = lambdify([u, v], Sv_sp, "numpy")
         self.Suu = lambdify([u, v], Suu_sp, "numpy")
@@ -419,63 +458,50 @@ class Surface:
         self.SN_axis = lambdify([u, v, ax_x, ax_y, ax_z], SN_axis_sp, "numpy")
         self.SD_jac = lambdify([u, v, ax_x, ax_y, ax_z], SD_jac_sp, "numpy")
 
+        # finalement, on fabrique une grille de normales pour for_3js
+        self.NX_grid, self.NY_grid, self.NZ_grid = self.SN(u_grid, v_grid)
+
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "init surface"))
 
     def set_axis(
-        self, elev=20, azim=0
+        self, I = [1,0,0], J = [0,0,1]
     ):  # definit l'axe et les fonctions self.XY et self.Z
-        # elev et azim sont coord sphériques (en degrés) du point de vision. elev est l'angle avec le plan xy
-        # elev = angle axe Z avec le plan de vision azim = angle de rot du plan xy autour de z
-        self.elev, self.azim = elev, azim
-        theta = self.azim * np.pi / 180
-        phi = self.elev * np.pi / 180
-        self.axis = np.array(
-            [np.cos(theta) * np.cos(phi), np.sin(theta) * np.cos(phi), np.sin(phi)]
-        )  # coordonnées x,y,z de la normale au plan de vision
-
-        # Repère dont 'axis' est l'axe z
-        I = np.cross(np.array([0, 0, 1]), self.axis)
-        J = np.cross(self.axis, I)
-        I, J = I / norm(I), J / norm(J)
-        # définition des attributs de la classe
-
+        vecI, vecJ = np.array(I), np.array(J)
+        vecI, vecJ = vecI/norm(vecI), vecJ/norm(vecJ)
+        self.axis = np.cross(vecI, vecJ)  
+        self.axis = self.axis/norm(self.axis) # coordonnées x,y,z de la normale au plan de vision
         def XY(vec):  # renvoie coordonnées d'un point de l'espace dans le repère I,J
-            return np.array([np.inner(I, vec.T), np.inner(J, vec.T)])
+            return np.array([np.inner(vecI, vec.T), np.inner(vecJ, vec.T)]) # le .T est pour le cas d'appel vectoriel. Pour 1 vecteur, ça change rien
 
         def Z(vec):  # renvoie coordonnées d'un point de l'espace sur l'axe 'axis'
             return np.inner(self.axis, vec.T)
 
         def XYZ(vec):  # renvoie le vecteur dont les coord. sur (I,J) sont 'vec'
-            return vec[0] * I + vec[1] * J
+            return vec[0] * vecI + vec[1] * vecJ
 
         self.XY = XY
         self.Z = Z
         self.XYZ = XYZ
 
+
     def triangulate(
-        self, bounds, res, quotient=("no", "no")
-    ):  # bounds = (-1,1,-1,1), res = 100):
+        self, res
+    ):  
         t0 = time.perf_counter()
         self.res = res
 
-        u_list = np.linspace(bounds[0], bounds[1], res + 1)  # res = number of squares
-        v_list = np.linspace(bounds[2], bounds[3], res + 1)
+        u_list = np.linspace(self.u_min, self.u_max, res + 1)  # res = number of squares
+        v_list = np.linspace(self.v_min, self.v_max, res + 1)
 
-        self.u_min, self.u_max, self.v_min, self.v_max = (
-            bounds[0],
-            bounds[1],
-            bounds[2],
-            bounds[3],
-        )
         self.uv_vector = 5 * np.array(
             [res / (self.u_max - self.u_min), res / (self.v_max - self.v_min)]
         )  # multiplié par la longueur, donne le nombre de subdivision. Grand = plus de subdivisions.
 
-        self.u_grid, self.v_grid = np.meshgrid(
+        u_grid, v_grid = np.meshgrid(
             u_list, v_list, indexing="ij"
-        )  # matrix indexing
-        self.S_grid = self.S(self.u_grid, self.v_grid)
-        self.SN_grid = self.SN(self.u_grid, self.v_grid)
+        )  # matrix indexing: u est l'indice de ligne, v l'indice de colonne
+        self.S_grid = self.S(u_grid, v_grid)
+        self.SN_grid = self.SN(u_grid, v_grid)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "calcul grid"))
 
         t0 = time.perf_counter()
@@ -486,13 +512,13 @@ class Surface:
             np.meshgrid(u_list, v_list)
         ).T  # transposé fait que u = ligne, v = colonne, et que le dernier axe = point
 
-        if quotient[0] == "cy":
+        if self.u_identify == "cy":
             points[res, :] = points[0, :]
-        if quotient[1] == "cy":
+        if self.v_identify == "cy":
             points[:, res] = points[:, 0]
-        if quotient[0] == "mo":
+        if self.u_identify == "mo":
             points[res, :] = points[0, ::-1]  # reverse order
-        if quotient[1] == "mo":
+        if self.v_identify == "mo":
             points[:, res] = points[::-1, 0]
 
         # les sommets du carré: b au dessus de a, d au dessus de c, c à droite de a
@@ -615,11 +641,11 @@ class Surface:
             ),
             dtype=e_type,
         )  # vertic
-        if quotient[0] == "cy":
+        if self.u_identify == "cy":
             lf_eds["g"] = g[-1, :]
-        if quotient[1] == "cy":
+        if self.v_identify == "cy":
             dn_eds["g"] = f[:, -1]
-        if quotient[0] == "mo":
+        if self.u_identify == "mo":
             lf_eds["g"] = np.flip(g[-1, :], 0)
             dg_eds["flip"][-1, :] = -1
             hr_eds["flip"][-1, :] = -1
@@ -628,14 +654,14 @@ class Surface:
             ] = (
                 -1
             )  # indique que la normale calculée avec NZ grid donne une orientation incohérente aux extremites de l'arete
-        if quotient[1] == "mo":
+        if self.v_identify == "mo":
             dg_eds["flip"][:, -1] = -1
             dn_eds["g"] = np.flip(f[:, -1], 0)
             vr_eds["flip"][:, -1] = -1
             lf_eds["flip"][-1] = rt_eds["flip"][-1] = -1
 
         # tous ensemble
-        if (quotient[0] == "cy" or quotient[0] == "mo") and quotient[1] == "no":
+        if (self.u_identify == "cy" or self.u_identify == "mo") and self.v_identify == "no":
             self.eds = np.array(
                 np.concatenate(
                     (
@@ -658,7 +684,7 @@ class Surface:
             self.beds = self.eds[
                 self.b_index :
             ]  # a view of the edges containing only the boundary edges
-        elif quotient[0] == "no" and (quotient[1] == "cy" or quotient[1] == "mo"):
+        elif self.u_identify == "no" and (self.v_identify == "cy" or self.v_identify == "mo"):
             self.eds = np.array(
                 np.concatenate(
                     (
@@ -679,7 +705,7 @@ class Surface:
             self.beds = self.eds[
                 self.b_index :
             ]  # a view of the edges containing only the boundary edges
-        elif quotient[0] != "no" and quotient[1] != "no":
+        elif self.u_identify != "no" and self.v_identify != "no":
             self.eds = np.array(
                 np.concatenate(
                     (
@@ -721,11 +747,11 @@ class Surface:
             self.beds = self.eds[
                 self.b_index :
             ]  # a view of the edges containing only the boundary edges
-        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "triangulation-bis"))
+        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "triangulation"))
 
 
         # les coins. Points transformés en tuples pour être hashables
-        if quotient[0] == quotient[1] == "no":
+        if self.u_identify == self.v_identify == "no":
             self.corners = set(
                 [
                     tuple(points[0, 0]),
@@ -747,9 +773,9 @@ class Surface:
         # les generateurs du groupe par lequel on quotiente R^2.
 
         def f_u(pt, i):  # itéré i fois, où i est un entier relatif
-            if quotient[0] == "cy":
+            if self.u_identify == "cy":
                 return pt + i * np.array([self.u_max - self.u_min, 0])
-            elif quotient[0] == "mo":
+            elif self.u_identify == "mo":
                 y = pt[1] if i % 2 == 0 else self.v_min + self.v_max - pt[1]
                 return np.array([pt[0] + i * (self.u_max - self.u_min), y])
             else:
@@ -758,9 +784,9 @@ class Surface:
         self.generator_u = f_u
 
         def f_v(pt, i):
-            if quotient[1] == "cy":
+            if self.v_identify == "cy":
                 return pt + i * np.array([0, self.v_max - self.v_min])
-            elif quotient[1] == "mo":
+            elif self.v_identify == "mo":
                 x = pt[0] if i % 2 == 0 else self.u_max + self.u_min - pt[0]
                 return np.array([x, pt[1] + i * (self.v_max - self.v_min)])
             else:
@@ -781,7 +807,7 @@ class Surface:
         def simple_close(pt, qt):
             return qt
 
-        if quotient[0] != "no" or quotient[1] != "no":
+        if self.u_identify != "no" or self.v_identify != "no":
             self.close = close
         else:
             self.close = simple_close  # s'il n'y a pas de raccord, il faut éviter de ralentir le programme avec la fonction close.
@@ -819,7 +845,8 @@ class Surface:
         #for p, v in self.visibilities.items(): # debug
         #    print("point:[%0.2f,%0.2f] visibilité:%i"%(*self.XY(np.array(self.S(*p))), v))
 
-        self.origine = self.lines[line][idx]['fp'] #debug
+        # self.origine = self.lines[line][idx]['fp'] #debug
+
 
     def find_silhouette(self):
         t0 = time.perf_counter()
@@ -891,10 +918,13 @@ class Surface:
         t0 = time.perf_counter()
 
         self.c_pts = fromarrays((vec_i, vec_s, dir_vec.T, pts_num), dtype=c_type)
-        self.c_lines = make_lines(
-            self.eds[self.c_pts["e"]]["f"], self.eds[self.c_pts["e"]]["g"]
-        )
-        # self.c_lines = self.make_c_lines(self.cpoints)
+        if len(self.c_pts) != 0 :
+            self.c_lines = make_lines(
+                self.eds[self.c_pts["e"]]["f"], self.eds[self.c_pts["e"]]["g"]
+            )
+            # self.c_lines = self.make_c_lines(self.cpoints)
+        else:
+            self.c_lines = []
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "make contour lines"))
 
         ######## breaks au  bord #########
@@ -1450,6 +1480,10 @@ class Surface:
 
         ax = fig.add_subplot(projection="3d")
         ax.set(proj_type="ortho")
+        # I (cos theta, sin theta, 0)= J = (-sin theta cos elev, costheta cos elev, sin elev)
+        self.elev = np.arcsin(self.axis[2])
+        self.azim = np.arctan2(self.axis[1]/np.cos(self.elev), self.axis[0]/np.cos(self.elev))  * 180 / np.pi
+        self.elev = self.elev  * 180 / np.pi
         ax.view_init(elev=self.elev, azim=self.azim)
         ax.set_axis_off()
         fig.tight_layout()
@@ -1513,11 +1547,13 @@ class Surface:
             if event.key == "x":
                 zoom_point()
             if event.key == "!":
-                surf.set_axis(elev = ax.elev, azim = ax.azim)
+                theta = ax.azim * np.pi / 180
+                phi = ax.elev * np.pi / 180
+                surf.set_axis([-np.sin(theta), np.cos(theta), 0], [-np.cos(theta)*np.sin(phi), -np.sin(theta)*np.sin(phi), np.cos(phi)])
                 surf.traitement()
                 ax.clear()
                 ax.set(proj_type="ortho")
-                ax.view_init(elev=self.elev, azim=self.azim)
+                ax.view_init(elev=ax.elev, azim=ax.azim)
                 ax.set_axis_off()
                 #ax.scatter(*self.S(*self.origine))# debug
                 surf.plot_lines(ax)
@@ -2176,11 +2212,11 @@ T0 = time.perf_counter()
 #surf.traitement()
 #surf.plot(T0)
 
-#surf = Surface('u','v','4*sin(u)', 'u v' )
-#surf.triangulate(bounds = (0,10,-2,2), res = 43)
-#surf.set_axis(elev = 20, azim = 28)
-#surf.traitement()
-#surf.plot(T0)
+# surf = Surface('u','v','4*sin(u)', 'u v', bounds = (0,10,-2,2))
+# surf.triangulate(res = 43)
+# surf.set_axis([1,1,0],[-1,1,3])
+# surf.traitement()
+# surf.plot(T0)
 
 #surf = Surface('u*(4+ sin(10*exp(-5*(u*u+v*v))))/sqrt(u*u+v*v+.0001)','3*(u*u+v*v)','v*(4+ sin(10*exp(-5*(u*u+v*v))))/sqrt(u*u+v*v+.0001)', 'u v' )
 #surf.triangulate(bounds = (-1,1,-1,1), res = 367)
@@ -2200,9 +2236,9 @@ T0 = time.perf_counter()
 #surf.traitement()
 #surf.plot(T0)
 
-surf = Surface('u','v','sin(u*u + v*v)', 'u v' ) # temps à battre : entre 10 et 12,5 secondes
-surf.triangulate(bounds = (-5,5,-5,5), res = 500) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
-surf.set_axis(elev = 20, azim = 48)
+surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
+surf.triangulate(res = 400) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
+surf.set_axis([1,1,0],[-1,1,3])
 surf.traitement()
 surf.plot(T0)
 
