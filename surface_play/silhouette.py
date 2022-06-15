@@ -1319,7 +1319,7 @@ class Surface:
         ####### Initialisation
         visited = set()
         unseen = set()
-        lines_dic = defaultdict(set) # lignes par sommet, indice de ligne >=0 si le sommet est l[0], indice <0 si sommet = l[-1]
+        lines_dic = defaultdict(set) # lignes par sommet, indice de ligne, et 0 si le sommet est l[0], -1 si sommet = l[-1]
         for i, l in enumerate(self.lines):
             p, q = tuple(l[0]["ixfp"]), tuple(l[-1]["ixfp"])
             lines_dic[p].add((i, 0))
@@ -1348,9 +1348,13 @@ class Surface:
                 qt = tuple(l[-1 - j]["ixfp"])
                 if qt in unseen :
                     self.visibilities[qt] = self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"])
+                    if self.visibilities[qt]>0:
+                        print("vis >0 !!!") # debug
                     unseen.discard(qt)
                     visited.add(qt)
-                    lines_dic[qt].discard((i,-1-j))
+                    # lines_dic[qt].discard((i,-1-j))
+                elif self.visibilities[qt] != self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"]):
+                    print("inconsistency!!!!") # debug
             visited.discard(pt)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Visibilité"))
 

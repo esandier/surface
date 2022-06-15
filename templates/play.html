@@ -13,23 +13,23 @@
       <div id="spinner" class="spinner-border" style="visibility:hidden" role="status">
         <span class="visually-hidden"></span>
       </div>  
-      <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph"><span class="far fa-pen-to-square"></span></a>
-      <a href="{% url 'surfaces' %}" class="glyph"><span class="fa-regular fa-rectangle-list"></span></a>
+      <a href="#" id="download-button" style = "visibility:hidden" class="glyph"><span class="fa-regular fa-circle-down"></span></a>
+      <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph"><span style = "line-height: inherit"  class="far fa-pen-to-square"></span></a>
+      <a href="{% url 'surfaces' %}" class="glyph"><span style = "line-height: inherit"  class="fa-regular fa-rectangle-list"></span></a>
     </h1>
   </div>
   <div class="row" style="flex-grow:1; position:relative">
-  <svg style="position:absolute; height:100%; width:100%" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet">
+  <svg id="svgbox" style="position:absolute; height:100%; width:100%" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet">
     <g id="svg" transform="translate(0) scale(1)" style="pointer-events:none"></g>
   </svg>
   <canvas id="canvas" style="position:absolute; height:100%; width:100%"></canvas>
   </div>
-<!-- </div> -->
-
 
 
 <script type="module">
+    const downloadButton = document.getElementById("download-button");
     const spinner = document.getElementById("spinner");
-    spinner.style.visibility = "hidden";
+    spinner.remove();
     const canvas = document.getElementById('canvas');
     var svg = document.getElementById('svg');
 
@@ -133,7 +133,8 @@
     }
 
     function myMouseUp(){  
-      spinner.style.visibility = "visible"
+      downloadButton.replaceWith(spinner)
+      spinner.style.visibility = "visible";
       controls.enabled = false;
       controls.update();
       camera.updateProjectionMatrix();
@@ -160,8 +161,6 @@
         },
       });
 
-      
-
       fetch(request)
       .then(response => response.json())
       .then(function(data) {
@@ -174,6 +173,7 @@
         let transY =  zoom * origin[1] / radius;
         svg.transform.baseVal.getItem(1).setScale(scaleX, scaleY);
         svg.transform.baseVal.getItem(0).setTranslate(transX, transY);
+
 
         let string = "";
         for(var i = 0; i < lines.length; i++) {
@@ -190,7 +190,13 @@
         svg.innerHTML = string;
         material.opacity = 0.2;
         controls.enabled = true;
-        spinner.style.visibility = "hidden" 
+        downloadButton.style.visibility = "visible";
+        spinner.replaceWith(downloadButton);
+        let fileName = "{{ surface.name }}.svg";
+        let svgData = exportSVG();
+        let hrefAttribute = 'data:image/svg+xml; charset=utf8, ' + encodeURIComponent(svgData.replace(/></g, '>\n\r<'));
+        downloadButton.setAttribute("href", hrefAttribute);
+        downloadButton.setAttribute("download", fileName);
       })
       .catch((error) => {
         console.error('Error:', error);
@@ -198,10 +204,18 @@
     }
     function myMouseDown(){
       // console.log('down !')
-
-      svg.innerHTML = ''
+      svg.innerHTML = '';
+      downloadButton.style.visibility = "hidden";
       material.opacity = 1;
     }   
+    function exportSVG() {
+      let clone = document.getElementById('svgbox').cloneNode(true);
+      let svgDocType = document.implementation.createDocumentType('svg', "-//W3C//DTD SVG 1.1//EN", "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd");
+      let svgDoc = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', svgDocType);
+      svgDoc.replaceChild(clone, svgDoc.documentElement);
+      var svgData = (new XMLSerializer()).serializeToString(svgDoc);
+      return(svgData)
+    }
     resizeRendererToDisplaySize(renderer)       
     requestAnimationFrame(animate);
   </script>
