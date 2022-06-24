@@ -830,22 +830,24 @@ class Surface:
         self.simplify_lines()  # espace les points régulièrement (à l'écran) pour éviter les artefacts de discrétisation.
         self.line_bks = [[[] for j in range(len(l) - 1)] for l in self.lines]
         line, idx = self.inter_bis() # calcule les intersections/chgement de visi. Renvoie: point visible (long)
-        #line, idx = 0, 0
-        #for i, l in enumerate(self.lines): #debug
-        #    print("ligne:%i type:%s len:%i debut:[%0.2f,%0.2f] fin:[%0.2f,%0.2f]  chgt visi début:%i chgt visi fin:%i"%(i,l[0]['type'], 
-        #                                                                                                     len(l), *self.XY(np.array(self.S(*l['fp'][0]))), 
-        #                                                                                                     *self.XY(np.array(self.S(*l['fp'][-1]))), l['v'][0],  l['v'][-1]))
-        #    string = 'breaks : ['
-        #    for j in range(len(l) - 1):
-        #        for (s,v) in self.line_bks[i][j]:
-        #            string+= "(%i, %i) "%(j,v)
-        #    print(string+']')
+        # line, idx = 0, 0
+        for i, l in enumerate(self.lines): #debug
+           self.print("ligne:%i type:%s len:%i debut:[%0.2f,%0.2f] fin:[%0.2f,%0.2f]  chgt visi début:%i chgt visi fin:%i"%(i,l[0]['type'], 
+                                                                                                            len(l), *self.XY(np.array(self.S(*l['fp'][0]))), 
+                                                                                                            *self.XY(np.array(self.S(*l['fp'][-1]))), l['v'][0],  l['v'][-1]))
+           string = 'breaks : ['
+           for j in range(len(l) - 1):
+               for (s,v) in self.line_bks[i][j]:
+                   string+= "(%i, %i) "%(j,v)
+           self.print(string+']')
         self.visibilities = {}
-        self.visibility(line, idx)  # propage la visibilité à toutes les lignes
+        self.visibilite(line, idx)  # propage la visibilité à toutes les lignes
+
+        # self.visibility(line, idx)  # propage la visibilité à toutes les lignes
         #for p, v in self.visibilities.items(): # debug
         #    print("point:[%0.2f,%0.2f] visibilité:%i"%(*self.XY(np.array(self.S(*p))), v))
 
-        # self.origine = self.lines[line][idx]['fp'] #debug
+        self.origine = self.lines[line][idx]['fp'] #debug
 
 
     def find_silhouette(self):
@@ -1107,16 +1109,16 @@ class Surface:
         def trim(
             l,
         ):  # on enlève les cusps de l pour ne pas connecter à un cusp. on renvoie les indices dans la ligne initiale, et la ligne tronquée.
-            #i, j = 0, len(l)
-            #if l["type"][0][0] == "v":
-            #    i = 1
-            #if l["type"][-1][0] == "v":
-            #    j = len(l) - 1
             i, j = 0, len(l)
-            if l["type"][0][0] == "v":
-                i = min(5,len(l)//3) # on évite les extrêmités des lignes, dans la mesure du possible. Ici: marge de 10, à trois ça déconne parfois
-            if l["type"][-1][0] == "v":
-                j = len(l)-min(5, len(l)//3)
+            if l["type"][0][0] == "v" and j > 1:
+               i = 1
+            if l["type"][-1][0] == "v" and i < len(l) - 2:
+               j = len(l) - 1
+            # i, j = 0, len(l)
+            # if l["type"][0][0] == "v":
+            #     i = min(5,len(l)//3) # on évite les extrêmités des lignes, dans la mesure du possible. Ici: marge de 10, à trois ça déconne parfois
+            # if l["type"][-1][0] == "v":
+            #     j = len(l)-min(5, len(l)//3)
             return np.arange(i, j), l[i:j]
 
         self.cc_s = (
@@ -1212,20 +1214,35 @@ class Surface:
             p, q = self.lines[il][ie], self.lines[jl][je]
             self.lines.append(self.connection(p, q))
         # découpage des lignes pour que les points de connection soient des extrêmités.
-        for l in dic:
-            # print(' line ', l, '   cut at edges  ', [self.lines[l][i].e for i in dic[l]])
-            if dic[l][0] != 0:
-                dic[l] = [0] + dic[l]
-            if dic[l][-1] != len(self.lines[l]) - 1:
-                dic[l].append(len(self.lines[l]) - 1)
+        # for l in dic:          
+        #     # print(' line ', l, '   cut at edges  ', [self.lines[l][i].e for i in dic[l]])
+        #     if dic[l][0] != 0:
+        #         dic[l] = [0] + dic[l]
+        #     if dic[l][-1] != len(self.lines[l]) - 1:
+        #         dic[l].append(len(self.lines[l]) - 1)
 
-            lines = [
-                self.lines[l][dic[l][i] : dic[l][i + 1] + 1]
-                for i in range(len(dic[l]) - 1)
-            ]
-            self.lines[l] = lines[0]
-            self.lines = self.lines + lines[1:]
-            # print('results in lines ', [[m[0]['e'], m[-1]['e']] for m in lines])
+        #     lines = [
+        #         self.lines[l][dic[l][i] : dic[l][i + 1] + 1]
+        #         for i in range(len(dic[l]) - 1)
+        #     ]
+        #     self.lines[l] = lines[0]
+        #     self.lines = self.lines + lines[1:]
+        #     # print('results in lines ', [[m[0]['e'], m[-1]['e']] for m in lines])
+        
+        for l in dic:
+            if dic[l]:
+                point_list = [0] + dic[l] + [len(self.lines[l]) - 1] # on ajoute les extrêmités de la ligne
+                lines = [
+                    self.lines[l][point_list[i] : point_list[i + 1] + 1]
+                    for i in range(len(point_list) - 1)
+                    if point_list[i] != point_list[i + 1]
+                ]
+                if len(lines) > 1 and np.all(lines[0][0]["ixfp"] == lines[-1][-1]["ixfp"]): # mêmes début et fin, on resoude
+                    lines[0] = np.concatenate([lines.pop(), lines[0][1:]])
+                self.lines[l] = lines[0]
+                self.lines = self.lines + lines[1:]
+
+                # print('results in lines ', [[m[0]['e'], m[-1]['e']] for m in lines])
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "connect"))
 
@@ -1355,7 +1372,7 @@ class Surface:
         u_tol, v_tol = (self.u_max - self.u_min) / self.res, (
             self.v_max - self.v_min
         ) / self.res
-        tol = 0.5 * np.array( # sert pour exclure certaines intersections de segments, s'ils sont trop proches dans le domaine
+        tol = .8 * np.array( # sert pour exclure certaines intersections de segments, s'ils sont trop proches dans le domaine
             [u_tol, v_tol]
         )  # pas clair par quoi il faut multiplier, avec .O1 pose des problèmes en raccord cylindre
 
@@ -1415,6 +1432,53 @@ class Surface:
         else:  # sinon c'est q qui a le min de x.
             return e["l_idx"], e["e_idx"] + 1
 
+    def visibilite(self, line, idx):
+        # calcul de la visibilité des extrêmités des lignes, sachant que
+        # le point idx de la ligne line a la visibilité 0
+        t0 = time.perf_counter()
+
+        ####### Initialisation
+        visited = set()
+        unseen = set()
+        lines_dic = defaultdict(set) # lignes par sommet, indice de ligne, et 0 si le sommet est l[0], -1 si sommet = l[-1]
+        for i, l in enumerate(self.lines):
+            p, q = tuple(l[0]["ixfp"]), tuple(l[-1]["ixfp"])
+            lines_dic[p].add((i, 0))
+            lines_dic[q].add((i, -1))
+            unseen.update([p,q])
+
+        v = (
+            self.lines[line][idx]["v"]
+            if (idx == 0 or idx == len(self.lines[line]) - 1)
+            else 0
+        )
+
+        vis = self.propagation(line, idx, v)
+        p, q = self.lines[line][0], self.lines[line][-1]
+        point = q if idx == 0 else p
+        self.visibilities[tuple(point["ixfp"])] = vis
+        visited.add(tuple(point["ixfp"]))
+        unseen.discard(tuple(point["ixfp"]))
+
+        ####### Propagation
+        dic = defaultdict(set)
+        while visited :
+            pt = visited.pop()
+            for i, j in lines_dic[pt] :
+                l = self.lines[i]
+                qt = tuple(l[-1 - j]["ixfp"])
+                if qt in unseen :
+                    self.visibilities[qt] = self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"])
+                    if self.visibilities[qt]>0:
+                        print("vis >0 !!!") # debug
+                    unseen.discard(qt)
+                    visited.add(qt)
+                    # lines_dic[qt].discard((i,-1-j))
+                elif self.visibilities[qt] != self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"]):
+                    print("inconsistency!!!!") # debug
+            visited.discard(pt)
+        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Visibilité"))
+
     def visibility(self, line, idx):
         t0 = time.perf_counter()
 
@@ -1457,23 +1521,6 @@ class Surface:
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Visibilité"))
 
     def plot(self, T0):
-        #def plot_uv_line(ax, type, line, vis, color=0):
-        #    l = np.array(line)
-        #    l = self.S(l[:, 0], l[:, 1])
-        #    if vis == 0:
-        #        ax.plot(l[0], l[1], l[2], color="black")
-        #    elif vis != 0:
-
-        #        col = "black"
-        #        col = colormap[min(14, max(vis+8, 0))]
-        #        # col = 'powderblue' if type == 'b' else 'thistle' if type =='c' else 'navajowhite'
-        #        #col = (1+.5/min(vis, -1),1+.5/min(vis, -1),1+.5/min(vis, -1)) # le min evite une erreur si vis > 0
-
-        #        linestyle = 'solid'
-        #        #linestyle = linestyles[min(4, max(-vis, 0))]
-        #        #linestyle = (0,(2,1))
-
-        #        ax.plot(l[0], l[1], l[2], linestyle=linestyle, color=col)
 
         t0 = time.perf_counter()
         fig = plt.figure(dpi=100)
@@ -1493,7 +1540,7 @@ class Surface:
         point_mark = ax.scatter(
             *self.S(*self.lines[ptref[0]][ptref[1]]["fp"]), marker=""
         )
-        #ax.scatter(*self.S(*self.origine))# debug
+        ax.scatter(*self.S(*self.origine))# debug
 
         ## print visibilities
         # for i, l in enumerate(self.lines):
@@ -2012,6 +2059,26 @@ class Surface:
             "[%0.3fs] %s" % (time.perf_counter() - t0, "Intersections des courbes")
         )
 
+    def propagation(self, l_idx, idx, visib):
+        # propage la visibilité sur une ligne l_idx à partir du point idx de visibilité visib
+        # dans le sens + si idx est <> -1, dans le sens - sinon. Renvoie la visibilité à l'extrêmité
+        # attention, visib est la visibilité quand on est déjà dans la ligne
+        l = self.lines[l_idx]
+        vis = 0
+        if idx == 0 :
+            for bks in self.line_bks[l_idx][
+                idx:
+            ]:  # attention, idx peut-être négatif, y faut pas utiliser range
+                for s, v in bks:
+                    vis = vis + v
+            # on soustrait le changement de visi à l'extrêmité
+            return visib + vis - l[-1]["v"]
+        else:
+            for bks in self.line_bks[l_idx][0:idx]:
+                for s, v in bks:
+                    vis = vis + v
+            return visib - vis - l[0]["v"]
+
     def propagate(self, l_idx, idx, visib):
         # propage la visibilité sur une ligne l_idx à partir du point idx de visibilité visib
         # attention, visib est la visibilité quand on est déjà dans la ligne
@@ -2095,11 +2162,10 @@ class Surface:
         visible_lines = []  # tracées en dernier
         for i, l in enumerate(self.lines):
             type = "?"
-            if l[0]["type"] == "??":
-                continue
+            # if l[0]["type"] == "??":
+            #     continue
             vis = l[0]["v"]
             if tuple(l[0]["ixfp"]) in self.visibilities:
-                type = l[0]["type"][1]
                 vis += self.visibilities[tuple(l[0]["ixfp"])]
             line = []
             for j in range(len(l) - 1):
@@ -2130,14 +2196,14 @@ class Surface:
             ax.plot(l[0], l[1], l[2], color="black")
         elif vis != 0:
 
-            col = "black"
-            #col = colormap[min(14, max(vis+8, 0))]
+            # col = "black"
+            col = colormap[min(14, max(vis+8, 0))]
             # col = 'powderblue' if type == 'b' else 'thistle' if type =='c' else 'navajowhite'
-            col = (1+.5/min(vis, -1),1+.5/min(vis, -1),1+.5/min(vis, -1)) # le min evite une erreur si vis > 0
+            # col = (1+.5/min(vis, -1),1+.5/min(vis, -1),1+.5/min(vis, -1)) # le min evite une erreur si vis > 0
 
             linestyle = 'solid'
-            #linestyle = linestyles[min(4, max(-vis, 0))]
-            linestyle = (0,(2,1))
+            # linestyle = linestyles[min(4, max(-vis, 0))]
+            # linestyle = (0,(2,1))
 
             ax.plot(l[0], l[1], l[2], linestyle=linestyle, color=col)
 
@@ -2236,8 +2302,14 @@ T0 = time.perf_counter()
 #surf.traitement()
 #surf.plot(T0)
 
-surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
-surf.triangulate(res = 400) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
+# surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
+# surf.triangulate(res = 400) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
+# surf.set_axis([1,1,0],[-1,1,3])
+# surf.traitement()
+# surf.plot(T0)
+
+surf = Surface('cos(u)*cosh(v)','sin(u)*cosh(v)','v', 'u v', bounds = (0,6.2839,-1.3,1.3), quotient=('cy','no')) # ça déconne complètement
+surf.triangulate(res = 300) 
 surf.set_axis([1,1,0],[-1,1,3])
 surf.traitement()
 surf.plot(T0)

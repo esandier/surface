@@ -13,9 +13,9 @@
       <div id="spinner" class="spinner-border" style="visibility:hidden" role="status">
         <span class="visually-hidden"></span>
       </div>  
-      <a href="#" id="download-button" style = "visibility:hidden" class="glyph"><span class="fa-regular fa-circle-down"></span></a>
-      <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph"><span style = "line-height: inherit"  class="far fa-pen-to-square"></span></a>
-      <a href="{% url 'surfaces' %}" class="glyph"><span style = "line-height: inherit"  class="fa-regular fa-rectangle-list"></span></a>
+      <a href="#" id="download-button" style = "visibility:hidden" class="glyph"><span style="vertical-align:middle" class="fa-regular fa-circle-down"></span></a>
+      <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph"><span style="vertical-align:middle"  class="far fa-pen-to-square"></span></a>
+      <a href="{% url 'surfaces' %}" class="glyph"><span style="vertical-align:middle"  class="fa-regular fa-rectangle-list"></span></a>
     </h1>
   </div>
   <div class="row" style="flex-grow:1; position:relative">
@@ -52,7 +52,7 @@
       center[1] + radius, 
       center[2] + radius
     );
-    camera.up.set(0,0,1);        // set up
+    camera.up.set(0,0,1);   // la position de la camera. l'axe qui va vers l'observateur est (1,1,1). le vecteur (0,0,1) est vertical dans le plan
     camera.lookAt(...center);
     camera.updateProjectionMatrix();
     camera.aspect = canvas.clientWidth / canvas.clientHeight;
@@ -142,7 +142,7 @@
 
 
       let url = "{% url 'surface-play' pk=pk %}";
-      let I = new THREE.Vector3( 1,0,-1 ).unproject( camera );
+      let I = new THREE.Vector3( 1,0,-1 ).unproject( camera );// coordonnées du repère 2D dans l'espace 3D
       let J = new THREE.Vector3( 0,1,-1 ).unproject( camera );
       let O = new THREE.Vector3( 0,0,-1 ).unproject( camera );
       let zoom = camera.zoom;

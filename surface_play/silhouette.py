@@ -1,5 +1,5 @@
 ﻿# Todo:
-# interface web. Publier.
+# Corriger le problème su simplify lines aux points de cusps qui a l'air de déconnecter la ligne.
 
 # Corriger l'exclusion d'intersections (en prenant comme règle que les segments ne doivent pas appartenir à une même face ?)
 # Corriger le bug dans simplify: cf message ci-dessous, plot de (sin(u)+sin(v)^2 
@@ -31,8 +31,8 @@ from collections import deque
 from collections import defaultdict
 import bisect
 
-# import matplotlib.pyplot as plt
-# from matplotlib.widgets import Button
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
 import time
 
 colormap = [
@@ -245,21 +245,22 @@ class Surface:
         ax_x, ax_y, ax_z = sp.symbols("ax_x ax_y ax_z")
         ax = sp.Array([ax_x, ax_y, ax_z])
         du, dv = sp.symbols("du dv")
-        # on perturbe S pour éviter les dérivées nulles, ces perturbations semblent bien marcher. Plus grand, ça fait des problèmes avec des vues dégénérées
-        S_sp = S_pur + sp.Array(
+
+        # Le choix de la perturbation est délicat. En gros il faut une dérivée suffisament grande 
+        # (de l'ordre de dérivée de X divisé par resolution), amplitude petite pour que ça se voie pas, oscillation pas trop
+        # grande pour pas perturber les cusps.
+        
+        freq_u = 2 if self.u_identify != "mo" else 1
+        freq_v = 2 if self.v_identify != "mo" else 1
+         
+        S_sp = S_pur + (sp.sin((u - self.u_min) * freq_u * sp.pi / d_u) * sp.sin((v - self.v_min) * freq_v * sp.pi / d_v)) * sp.Array(
             [
-                0.0001 * dX * sp.sin(u * 0.00034521 / d_u + v * 0.00012345 / d_v),  
-                0.0001 * dY * sp.sin(u * 0.00076521 / d_u + v * 0.00065735 / d_v),
-                0.0001 * dZ * sp.sin(u * 0.00054721 / d_u + v * 0.00019674 / d_v),
+                0.005 * dX * .346,  
+                0.005 * dY * .632,  
+                0.005 * dZ * .693,  
             ]
         )
-        # S_sp = S_pur + sp.Array(
-        #     [
-        #         0.0001  * sp.sin(u * 0.00034521  + v * 0.00012345),  
-        #         0.0001  * sp.sin(u * 0.00076521  + v * 0.00065735),
-        #         0.0001  * sp.sin(u * 0.00054721  + v * 0.00019674),
-        #     ]
-        # )
+
         # dérivée de S.N dans la direction (du, dv)
         # DS_axis_sp = sp.diff(S_sp,u).dot([ax_x,ax_y,ax_z]) * du + sp.diff(S_sp,v).dot([ax_x,ax_y,ax_z]) * dv
         Su_sp = sp.diff(S_sp, u)  # dérivée par rapport à u, comme expression sympy
@@ -348,6 +349,8 @@ class Surface:
     ):  
         t0 = time.perf_counter()
         self.res = res
+        
+        d_u, d_v = self.u_max - self.u_min, self.v_max - self.v_min
 
         u_list = np.linspace(self.u_min, self.u_max, res + 1)  # res = number of squares
         v_list = np.linspace(self.v_min, self.v_max, res + 1)
@@ -685,23 +688,23 @@ class Surface:
         self.simplify_lines()  # espace les points régulièrement (à l'écran) pour éviter les artefacts de discrétisation.
         self.line_bks = [[[] for j in range(len(l) - 1)] for l in self.lines]
         line, idx = self.intersections() # calcule les intersections/chgement de visi. Renvoie: point visible (long)
-        #line, idx = 0, 0
-        #for i, l in enumerate(self.lines): #debug
-        #    print("ligne:%i type:%s len:%i debut:[%0.2f,%0.2f] fin:[%0.2f,%0.2f]  chgt visi début:%i chgt visi fin:%i"%(i,l[0]['type'], 
-        #                                                                                                     len(l), *self.XY(np.array(self.S(*l['fp'][0]))), 
-        #                                                                                                     *self.XY(np.array(self.S(*l['fp'][-1]))), l['v'][0],  l['v'][-1]))
-        #    string = 'breaks : ['
-        #    for j in range(len(l) - 1):
-        #        for (s,v) in self.line_bks[i][j]:
-        #            string+= "(%i, %i) "%(j,v)
-        #    print(string+']')
+        # line, idx = 0, 0
+        for i, l in enumerate(self.lines): #debug
+           self.print("ligne:%i type:%s len:%i debut:[%0.2f,%0.2f] fin:[%0.2f,%0.2f]  chgt visi début:%i chgt visi fin:%i"%(i,l[0]['type'], 
+                                                                                                            len(l), *self.XY(np.array(self.S(*l['fp'][0]))), 
+                                                                                                            *self.XY(np.array(self.S(*l['fp'][-1]))), l['v'][0],  l['v'][-1]))
+           string = 'breaks : ['
+           for j in range(len(l) - 1):
+               for (s,v) in self.line_bks[i][j]:
+                   string+= "(%i, %i) "%(j,v)
+           self.print(string+']')
         self.visibilities = {}
         # self.visibility(line, idx)  # propage la visibilité à toutes les lignes
         self.visibilite(line, idx)  # propage la visibilité à toutes les lignes
         #for p, v in self.visibilities.items(): # debug
         #    print("point:[%0.2f,%0.2f] visibilité:%i"%(*self.XY(np.array(self.S(*p))), v))
 
-        # self.origine = self.lines[line][idx]['fp'] #debug
+        self.origine = self.lines[line][idx]['fp'] #debug
 
     def find_silhouette(self):
         t0 = time.perf_counter()
@@ -811,8 +814,8 @@ class Surface:
                     1 if np.inner(self.dS(*p, *(q - p)), self.axis) > 0 else -1
                 )  # ça monte dans le sens p, q. donc la visibilité augmente
                 r = (p + q) / 2
-                #nu = (q-p).perp()
-                #for j in range(10): # bisection pour trouver le point précis, avec newton pour rester sur le contour
+                # nu = np.array([-(q-p)[1], (q-p)[0]])
+                # for j in range(20): # bisection pour trouver le point précis, avec newton pour rester sur le contour
                 #    a, b = (p+q)/2 - nu/2, (p+q)/2 + nu/2
                 #    s = newton(NZbis, 0.5, args=(a[0], a[1], nu[0], nu[1]))
                 #    r = a + s * (b-a)
@@ -1113,25 +1116,27 @@ class Surface:
             lmin, lmax = np.min(p[-1]), np.max(p[-1])
             im_min, im_max = min(lmin, im_min), max(lmax, im_max)
 
-        # vector which scales XY coordinates
+        # vector which scales XY coordinates to a square of sidelength 1
         scale = np.array([1, 1]) / (im_max - im_min)
 
         for i, l in enumerate(self.lines):
+            origin, end = l[0], l[-1]
             l["fp"] = self.relevement(l["fp"])
-            intervals = norm(scale * (p[i][1:] - p[i][:-1]), axis=1)
+            intervals = norm(scale * (p[i][1:] - p[i][:-1]), axis=1) # interval[i] = dist(p[i], p[i+1])
             # indices = np.where(intervals==0)[0]
             # if indices.size >0:
             #    print(len(l))
             #    print(l['fp'])
-            #    print("l(i) %0.3f, %0.3f  l(i+1) %0.3f, %0.3f"%tuple(list(l['fp'][i])+list(l['fp'][i+1])))
-            lengths = np.cumsum(intervals)  # length[i] = dist(l[i+1], l[0])
-            index = np.searchsorted(sample, lengths[-1] / 2)
+            #    print("l(i) %0.3f, %0.3f  l(i+1) %0.3f, %0.3f"%tuple(list(l['fp'][i])+list(l['fp'][i+1]))
+            lengths = np.cumsum(intervals)  # lengths[i+1] - lengths[i] = interval[i+1], lengths[i] = dist(p[0], p[i+1])
+            index = np.searchsorted(sample, lengths[-1] / 2) # sample[index - 1] < l/2 <= sample[index]
             points = np.concatenate(
-                (sample[:index], lengths[-1] - sample[index - 1 :: -1])
+                (sample[:index], lengths[-1] - sample[index - 1 :: -1]) 
             )[
                 1:-1
             ]  # points[i] = sample[i+1]
-            j = np.searchsorted(lengths, points)
+            j = np.searchsorted(lengths, points) # lengths[j[k]-1] < points[k] <= lengths[j[k]]  
+            # p[k] = ((length[j[k]] - points[k]) * p[j[k]] + (point[k] - lenght[j[k] - 1]) * p[j[k]])/interval[j[k]]
             fp_s = (
                 (points - lengths[j] + intervals[j]) * l[j + 1]["fp"].T
                 + (lengths[j] - points) * l[j]["fp"].T
@@ -1145,8 +1150,8 @@ class Surface:
                 dirint_s / (0.1 + norm(dirint_s, axis=0))
             ).T  # .1 pour éviter div par 0
             line = np.empty((len(j) + 2,), dtype=line_pt_type)
-            line[0] = l[0]
-            line[-1] = l[-1]
+            line[0] = origin
+            line[-1] = end
             line["type"][1:-1] = l[1]["type"]
             line["v"][1:-1] = 0
             line["d"][1:-1] = dirint_s
@@ -1349,12 +1354,12 @@ class Surface:
                 if qt in unseen :
                     self.visibilities[qt] = self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"])
                     if self.visibilities[qt]>0:
-                        print("vis >0 !!!") # debug
+                        self.print("visibilité > 0 !!!") # debug
                     unseen.discard(qt)
                     visited.add(qt)
                     # lines_dic[qt].discard((i,-1-j))
                 elif self.visibilities[qt] != self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"]):
-                    print("inconsistency!!!!") # debug
+                    self.print("inconsistency!!!!") # debug
             visited.discard(pt)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Visibilité"))
 
@@ -1385,6 +1390,201 @@ class Surface:
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
 
         return lines 
+
+    def plot_for_terminal(self, T0):
+
+        t0 = time.perf_counter()
+        fig = plt.figure(dpi=100)
+
+        ax = fig.add_subplot(projection="3d")
+        ax.set(proj_type="ortho")
+        # axis = (  cos azim cos elev, sin azim cos elev, sin elev)
+        self.elev = np.arcsin(self.axis[2])
+        self.azim = np.arctan2(self.axis[1]/np.cos(self.elev), self.axis[0]/np.cos(self.elev))  * 180 / np.pi # atan2(y,x)
+        self.elev = self.elev  * 180 / np.pi
+        ax.view_init(elev=self.elev, azim=self.azim )
+        ax.set_axis_off()
+        fig.tight_layout()
+
+        ptref = [0, 0]
+        global point_mark
+        point_mark = ax.scatter(
+            *self.S(*self.lines[ptref[0]][ptref[1]]["fp"]), marker=""
+        )
+        ax.scatter(*self.S(*self.origine))# debug
+
+        ## print visibilities
+        # for i, l in enumerate(self.lines):
+        #    print(' line number : ', i, 'visibilities : ', self.visibilities[tuple(l[0]['ixfp'])], ', ', self.visibilities[tuple(l[-1]['ixfp'])])
+
+        def zoom(factor):
+            limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
+            average = np.column_stack(
+                ((limits[:, 0] + limits[:, 1]) / 2, (limits[:, 0] + limits[:, 1]) / 2)
+            )
+            new = (limits - average) / factor + average
+            ax.set(xlim=new[0], ylim=new[1], zlim=new[2])
+
+        def zoom_point():
+            res = self.res
+            p = self.lines[ptref[0]][ptref[1]]["fp"]
+            pt = self.S(*p)
+            limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
+            average = np.column_stack(
+                ((limits[:, 0] + limits[:, 1]) / 2, (limits[:, 0] + limits[:, 1]) / 2)
+            )
+            new = (limits - average) / res + np.column_stack((pt, pt))
+            ax.set(xlim=new[0], ylim=new[1], zlim=new[2])
+            plt.show()
+
+        def pt_change():
+            global point_mark
+            point_mark.remove()
+            point_mark = ax.scatter(
+                *self.S(*self.lines[ptref[0]][ptref[1]]["fp"]), marker="x"
+            )
+
+        def onkey(event):
+            # print(event.key)
+            if event.key == "u":
+                zoom(0.9)
+            if event.key == "y":
+                zoom(1.1)
+            if event.key == "ù":
+                ptref[0] = (ptref[0] + 1) % len(self.lines)
+                print(ptref[0], " ", ptref[1])
+                pt_change()
+            if event.key == "m":
+                ptref[0] = (ptref[0] - 1) % len(self.lines)
+                print(ptref[0], " ", ptref[1])
+                pt_change()
+            if event.key == " ":
+                ptref[1] = -1 - ptref[1]
+                print(ptref[0], " ", ptref[1])
+                pt_change()
+            if event.key == "&":
+                ptref[1] = max(ptref[1] - 1, -len(self.lines[ptref[0]]))
+                print(ptref[0], " ", ptref[1])
+                pt_change()
+            if event.key == "é":
+                ptref[1] = min(ptref[1] + 1, len(self.lines[ptref[0]])-1)
+                print(ptref[0], " ", ptref[1])
+                pt_change()                
+            if event.key == "x":
+                zoom_point()
+            if event.key == "!":
+                theta = ax.azim * np.pi / 180
+                phi = ax.elev * np.pi / 180
+                self.set_axis([-np.sin(theta), np.cos(theta), 0], [-np.cos(theta)*np.sin(phi), -np.sin(theta)*np.sin(phi), np.cos(phi)])
+                self.traitement()
+                ax.clear()
+                ax.set(proj_type="ortho")
+                ax.view_init(elev=ax.elev, azim=ax.azim)
+                ax.set_axis_off()
+                #ax.scatter(*self.S(*self.origine))# debug
+                self.plot_lines(ax)
+                #for i, l in enumerate(self.lines): # debug
+                #    for j in range(len(l) - 1):
+                #        for (s,v) in self.line_bks[i][j]:
+                #            p, q = l[j]["fp"], l[j + 1]["fp"]
+                #            ax.scatter(*self.S(*((1 - s) * p + s * q)))
+            plt.show()
+
+        # plt.rcParams['keymap.left'].remove('left')
+        cid = fig.canvas.mpl_connect("key_press_event", onkey)
+
+        self.plot_lines(ax)
+
+        #visible_lines = []  # tracées en dernier
+
+        #for i, l in enumerate(self.lines):
+        #    type = "?"
+        #    if l[0]["type"] == "??":
+        #        continue
+        #    # if l[0].type[0] == 'v':
+        #    #    ax.scatter(*self.S(*l[0]['fp']), marker = 'x')
+        #    # if l[-1].type[0] == 'v':
+        #    #    ax.scatter(*self.S(*l[-1]['fp']), marker = 'x')
+        #    vis = l[0]["v"]
+        #    if tuple(l[0]["ixfp"]) in self.visibilities:
+        #        type = l[0]["type"][1]
+        #        vis += self.visibilities[tuple(l[0]["ixfp"])]
+
+        #    # des flèches a chaque début et fin de ligne qui indiquent un éventuel changement de visibilité
+        #    # if l[0]['v'] != 0:
+        #    #    color = 'green' if l[0]['v'] > 0 else 'red'
+        #    #    p, q = self.S(*l[0]['fp']), self.S(*l[1]['fp'])
+        #    #    #print(p,q,norm(q-p))
+        #    #    ax.quiver(*p, *(.02*(q - p)/norm(q-p)),  color=color)
+        #    # if l[-1]['v'] != 0:
+        #    #    color = 'green' if l[0]['v'] > 0 else 'red'
+        #    #    p, q = self.S(*l[-1]['fp']), self.S(*l[-2]['fp'])
+        #    #    #print(p,q,norm(q-p))
+        #    #    ax.quiver(*p, *(.02*(q - p)/norm(q-p)),  color=color)
+
+        #    line = []
+        #    for j in range(len(l) - 1):
+        #        p, q = l[j]["fp"], l[j + 1]["fp"]
+        #        line.append(p)
+        #        for s, v in self.line_bks[i][j]:
+        #            line.append((1 - s) * p + s * q)
+        #            # ax.scatter(*self.S(*line[-1]))
+        #            if vis == 0:
+        #                visible_lines.append(line)
+        #            else:
+        #                # if vis > 0:
+        #                #    plt.close(fig)
+        #                #    return 'fail'
+        #                plot_uv_line(
+        #                    ax, type, line, vis
+        #                )  # , 0 if type !='?' else 'navajowhite')
+        #            vis = vis + v
+        #            line = [line[-1]]
+        #    line.append(l[-1]["fp"])
+        #    if vis == 0:
+        #        visible_lines.append(line)
+        #    else:
+        #        # if vis > 0:
+        #        #    plt.close(fig)
+        #        #    return 'fail'
+        #        plot_uv_line(ax, type, line, vis)
+        #for line in visible_lines:
+        #    plot_uv_line(ax, type, line, 0)
+
+        # ax.quiver(*self.S(self.u_grid[0,0], self.v_grid[0,0]), *(axis*10), color='black') # flèche vers l'observateur
+
+        # ax.plot_surface(self.S_grid[0,0,:, :], self.S_grid[1,0,:, :], self.S_grid[2,0,:, :]) # la surface en facettes
+
+        # for i, p in enumerate(self.c_pts): # des flèches vers la surface
+        #    ax.quiver(*self.S(*p['fp'])[:,0], *(.03 * self.XYZ(p.d)), color='black')
+        # for i, e in enumerate(self.beds):
+        #    ax.quiver(*self.S(*e['fp'])[:,0], *(.02 * self.XYZ(self.dirint(e))),  color='black')
+
+        # for l in self.b_lines: # des gros points là où il y a changement de visibilité au bord
+        #    for i, idx in enumerate(l):
+        #        index = idx if idx >= 0 else len(self.beds) + idx
+        #        if index in self.breaks['b']:
+        #            for s, v in self.breaks['b'][index]:
+        #                point = (1 - s) * self.dom_pt(self.beds[idx].p) + s * self.dom_pt(self.beds[idx].q)
+        #                ax.scatter(*self.S(*point))
+
+        # for l in self.c_lines: # des gros points là où il y a changement de visibilité sur les contours
+        #    for i in range(len(l)-1):
+        #        if l[i] in self.breaks['c']:
+        #            for s, v in self.breaks['c'][l[i]]:
+        #                point = (1 - s) * self.c_pts[l[i]]['fp'] + s * self.c_pts[l[i+1]]['fp']
+        #                ax.scatter(*self.S(*point))
+
+
+
+        limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
+        ax.set_box_aspect(aspect=np.ptp(limits, axis=1))
+        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
+        self.print("[%0.3fs] %s" % (time.perf_counter() - T0, "Total"))
+        # plt.gca()
+        # plt.close(fig)
+        # return 'pass'
+        plt.show()
 
     def json_out(self):
         pass
@@ -1660,14 +1860,14 @@ class Surface:
             ax.plot(l[0], l[1], l[2], color="black")
         elif vis != 0:
 
-            col = "black"
-            #col = colormap[min(14, max(vis+8, 0))]
+            # col = "black"
+            col = colormap[min(14, max(vis+8, 0))]
             # col = 'powderblue' if type == 'b' else 'thistle' if type =='c' else 'navajowhite'
-            col = (1+.5/min(vis, -1),1+.5/min(vis, -1),1+.5/min(vis, -1)) # le min evite une erreur si vis > 0
+            # col = (1+.5/min(vis, -1),1+.5/min(vis, -1),1+.5/min(vis, -1)) # le min evite une erreur si vis > 0
 
             linestyle = 'solid'
             #linestyle = linestyles[min(4, max(-vis, 0))]
-            linestyle = (0,(2,1))
+            # linestyle = (0,(2,1))
 
             ax.plot(l[0], l[1], l[2], linestyle=linestyle, color=col)
 
