@@ -1,5 +1,6 @@
 ﻿# Todo:
-# Corriger le problème su simplify lines aux points de cusps qui a l'air de déconnecter la ligne.
+# Corriger la connection qui traverse une ligne de contour, probablement dû au raccord cylindre qui fout la merde. visible sur le 
+# vase bulle sous certains angles. 
 
 # Corriger l'exclusion d'intersections (en prenant comme règle que les segments ne doivent pas appartenir à une même face ?)
 # Corriger le bug dans simplify: cf message ci-dessous, plot de (sin(u)+sin(v)^2 
@@ -255,12 +256,18 @@ class Surface:
          
         S_sp = S_pur + (sp.sin((u - self.u_min) * freq_u * sp.pi / d_u) * sp.sin((v - self.v_min) * freq_v * sp.pi / d_v)) * sp.Array(
             [
-                0.005 * dX * .346,  
-                0.005 * dY * .632,  
-                0.005 * dZ * .693,  
+                0.0005 * dX * .346,  
+                0.0005 * dY * .632,  
+                0.0005 * dZ * .693,  
             ]
         )
-
+        # S_sp = S_pur + sp.Array(
+        #     [
+        #         0.00051 * dX * sp.sin(u * 0.00034521 / d_u + v * 0.00012345 / d_v),  
+        #         0.00051 * dY * sp.sin(u * 0.00076521 / d_u + v * 0.00065735 / d_v),
+        #         0.00051 * dZ * sp.sin(u * 0.00054721 / d_u + v * 0.00019674 / d_v),
+        #     ]
+        # )
         # dérivée de S.N dans la direction (du, dv)
         # DS_axis_sp = sp.diff(S_sp,u).dot([ax_x,ax_y,ax_z]) * du + sp.diff(S_sp,v).dot([ax_x,ax_y,ax_z]) * dv
         Su_sp = sp.diff(S_sp, u)  # dérivée par rapport à u, comme expression sympy
@@ -847,8 +854,8 @@ class Surface:
                 sens = (
                     0 if i >= 0 else 1
                 )  # indique si il y a inversion du sens de parcours.
-                fp = e["fp"] if i >= 0 else e["fp"] + e.fdp
-                fq = e["fp"] if i < 0 else e["fp"] + e.fdp
+                fp = e["fp"] if i >= 0 else e["fp"] + e["fdp"]
+                fq = e["fp"] if i < 0 else e["fp"] + e["fdp"]
 
                 lines[-1].append(
                     ("bb", e_idx + self.b_index, 0, self.dirint(e, sens), fp, fp)
@@ -1121,7 +1128,6 @@ class Surface:
 
         for i, l in enumerate(self.lines):
             origin, end = l[0], l[-1]
-            l["fp"] = self.relevement(l["fp"])
             intervals = norm(scale * (p[i][1:] - p[i][:-1]), axis=1) # interval[i] = dist(p[i], p[i+1])
             # indices = np.where(intervals==0)[0]
             # if indices.size >0:
@@ -1135,11 +1141,15 @@ class Surface:
             )[
                 1:-1
             ]  # points[i] = sample[i+1]
+
             j = np.searchsorted(lengths, points) # lengths[j[k]-1] < points[k] <= lengths[j[k]]  
+            line = np.empty((len(j) + 2,), dtype=line_pt_type)
+            l_fp = self.relevement(l["fp"]) # comme on interpole, il faut un relèvement dans le cas 'cy' ou 'mo'
+
             # p[k] = ((length[j[k]] - points[k]) * p[j[k]] + (point[k] - lenght[j[k] - 1]) * p[j[k]])/interval[j[k]]
             fp_s = (
-                (points - lengths[j] + intervals[j]) * l[j + 1]["fp"].T
-                + (lengths[j] - points) * l[j]["fp"].T
+                (points - lengths[j] + intervals[j]) * l_fp[j + 1].T
+                + (lengths[j] - points) * l_fp[j].T
             ) / intervals[j]
             dirint_s = (
                 (points - lengths[j] + intervals[j]) * l[j + 1]["d"].T
@@ -1149,7 +1159,7 @@ class Surface:
             dirint_s = (
                 dirint_s / (0.1 + norm(dirint_s, axis=0))
             ).T  # .1 pour éviter div par 0
-            line = np.empty((len(j) + 2,), dtype=line_pt_type)
+
             line[0] = origin
             line[-1] = end
             line["type"][1:-1] = l[1]["type"]
@@ -1612,7 +1622,7 @@ class Surface:
         nu = e["dir"]
         fp = e["fp"] + s * e["fdp"]
         vec = self.XY(self.dS(*fp, *nu))
-        t = self.XY(self.dS(*fp, *e.fdp))
+        t = self.XY(self.dS(*fp, *e["fdp"]))
         t = t / norm(t)
         vec = vec - np.inner(vec, t) * t
         return vec / norm(vec)
@@ -1821,12 +1831,12 @@ class Surface:
         l["type"] = "??"
         return l
 
-    def plot_lines(self, ax):
+    def plot_lines(self, ax): # utilisé uniquement dans 'plot_for_terminal'
         visible_lines = []  # tracées en dernier
         for i, l in enumerate(self.lines):
             type = "?"
-            if l[0]["type"] == "??":
-                continue
+            # if l[0]["type"] == "??":
+            #     continue
             vis = l[0]["v"]
             if tuple(l[0]["ixfp"]) in self.visibilities:
                 type = l[0]["type"][1]

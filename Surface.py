@@ -991,8 +991,8 @@ class Surface:
                 sens = (
                     0 if i >= 0 else 1
                 )  # indique si il y a inversion du sens de parcours.
-                fp = e["fp"] if i >= 0 else e["fp"] + e.fdp
-                fq = e["fp"] if i < 0 else e["fp"] + e.fdp
+                fp = e["fp"] if i >= 0 else e["fp"] + e["fdp"]
+                fq = e["fp"] if i < 0 else e["fp"] + e["fdp"]
 
                 lines[-1].append(
                     ("bb", e_idx + self.b_index, 0, self.dirint(e, sens), fp, fp)
@@ -1412,7 +1412,7 @@ class Surface:
         # for i in range(len(bag_bis)):
         #    e = bag_bis[i]
         #    emax, emin = np.maximum(e.p, e.p + e.dp), np.minimum(e.p, e.p + e.dp)
-        #    efmax, efmin = np.maximum(e['fp'], e['fp'] + e.fdp), np.minimum(e['fp'], e['fp'] + e.fdp)
+        #    efmax, efmin = np.maximum(e['fp'], e['fp'] + e['fdp']), np.minimum(e['fp'], e['fp'] + e['fdp'])
         #    sub = bag_bis[i+1:j[i]]
         #    subq = sub.p + sub.dp
         #    subj = sub[
@@ -1742,7 +1742,7 @@ class Surface:
         nu = e["dir"]
         fp = e["fp"] + s * e["fdp"]
         vec = self.XY(self.dS(*fp, *nu))
-        t = self.XY(self.dS(*fp, *e.fdp))
+        t = self.XY(self.dS(*fp, *e['fdp']))
         t = t / norm(t)
         vec = vec - np.inner(vec, t) * t
         return vec / norm(vec)
@@ -2302,17 +2302,17 @@ T0 = time.perf_counter()
 #surf.traitement()
 #surf.plot(T0)
 
-# surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
-# surf.triangulate(res = 400) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
-# surf.set_axis([1,1,0],[-1,1,3])
-# surf.traitement()
-# surf.plot(T0)
-
-surf = Surface('cos(u)*cosh(v)','sin(u)*cosh(v)','v', 'u v', bounds = (0,6.2839,-1.3,1.3), quotient=('cy','no')) # ça déconne complètement
-surf.triangulate(res = 300) 
+surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
+surf.triangulate(res = 1000) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
 surf.set_axis([1,1,0],[-1,1,3])
 surf.traitement()
 surf.plot(T0)
+
+# surf = Surface('cos(u)*cosh(v)','sin(u)*cosh(v)','v', 'u v', bounds = (0,6.2839,-1.3,1.3), quotient=('cy','no')) # ça déconne complètement
+# surf.triangulate(res = 300) 
+# surf.set_axis([1,1,0],[-1,1,3])
+# surf.traitement()
+# surf.plot(T0)
 
 
 #################################################################################################################
@@ -2332,11 +2332,11 @@ surf.plot(T0)
 #surf.traitement()
 #surf.plot(T0)
 
-#surf = Surface('(2+ sin(v))*cos(u)','(2+sin(v))*sin(u) ','v', 'u v')
-#surf.triangulate(bounds = (0,6.2831853071795864769252, 1,10), res = 200, quotient=('cy','no'))
-#surf.set_axis(elev = 10, azim = 40)
-#surf.traitement()
-#surf.plot(T0)
+# surf = Surface('(2+ sin(v))*cos(u)','(2+sin(v))*sin(u) ','v', 'u v', bounds = (0,6.2831853071795864769252, 1,10), quotient=('cy','no'))
+# surf.triangulate(res = 200)
+# surf.set_axis([1,1,0],[-1,1,3])
+# surf.traitement()
+# surf.plot(T0)
 
 #surf = Surface('(1.2+ sin(2*v))*cos(u)','(1.2+sin(2*v))*sin(u) ','v', 'u v') 
 #surf.triangulate(bounds = (0,6.2831853071795864769252, 0,10), res = 100, quotient=('cy','no'))

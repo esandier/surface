@@ -78,7 +78,7 @@ T0 = time.perf_counter()
 # surf.triangulate(res = 43)
 # surf.set_axis([1,1,0],[-1,1,3])
 # surf.traitement()
-# surf.plot(T0)
+# surf.plot_for_terminal(T0)
 
 #surf = Surface('u*(4+ sin(10*exp(-5*(u*u+v*v))))/sqrt(u*u+v*v+.0001)','3*(u*u+v*v)','v*(4+ sin(10*exp(-5*(u*u+v*v))))/sqrt(u*u+v*v+.0001)', 'u v' )
 #surf.triangulate(bounds = (-1,1,-1,1), res = 367)
@@ -98,17 +98,17 @@ T0 = time.perf_counter()
 #surf.traitement()
 #surf.plot(T0)
 
-surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
-surf.triangulate(res = 300) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
-surf.set_axis([-1,1,0],[-1,-1,2])
-surf.traitement()
-surf.plot_for_terminal(T0)
+# surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
+# surf.triangulate(res = 300) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
+# surf.set_axis([-1,1,0],[-1,-1,2])
+# surf.traitement()
+# surf.plot_for_terminal(T0)
 
-surf = Surface('cos(u)*cosh(v)','sin(u)*cosh(v)','v', 'u v', bounds = (0,6.28318,-1.3,1.3), quotient=('cy','no')) # ça déconne complètement
-surf.triangulate(res = 300) 
-surf.set_axis([-1,1,0],[-1,-1,2])
-surf.traitement()
-surf.plot_for_terminal(T0)
+# surf = Surface('cos(u)*cosh(v)','sin(u)*cosh(v)','v', 'u v', bounds = (0,6.28318,-1.3,1.3), quotient=('cy','no')) # ça déconne complètement
+# surf.triangulate(res = 300) 
+# surf.set_axis([-1,1,0],[-1,-1,2])
+# surf.traitement()
+# surf.plot_for_terminal(T0)
 
 
 #################################################################################################################
@@ -134,11 +134,11 @@ surf.plot_for_terminal(T0)
 #surf.traitement()
 #surf.plot(T0)
 
-#surf = Surface('(1.2+ sin(2*v))*cos(u)','(1.2+sin(2*v))*sin(u) ','v', 'u v') 
-#surf.triangulate(bounds = (0,6.2831853071795864769252, 0,10), res = 100, quotient=('cy','no'))
-#surf.set_axis(elev = 32.667, azim = -45.333)
-#surf.traitement()
-#surf.plot(T0)
+surf = Surface('(1.2+ sin(2*v))*cos(u)','(1.2+sin(2*v))*sin(u) ','v', 'u v', bounds = (0,6.2831853071795864769252, 0,10), quotient=('cy','no')) 
+surf.triangulate(res = 300)
+surf.set_axis([-1,1,0],[-1,-1,2])
+surf.traitement()
+surf.plot_for_terminal(T0)
 
 #surf = Surface('cos(u)','sin(u) ','v', 'u v')
 #surf.triangulate(bounds = (0,6.2831853071795864769252, 3,9), res = 200, quotient=('cy','no'))
@@ -146,11 +146,11 @@ surf.plot_for_terminal(T0)
 #surf.traitement()
 #surf.plot(T0)
 
-surf = Surface("(2+ u*cos(v/2))*cos(v)", "(2+ u*cos(v/2))*sin(v) ", "u*sin(v/2)", "v u", bounds=(0, 6.28318, -1, 1), quotient=("mo", "no")) # deconne elev=40, azim=40 si res = 600, uniquement si raccord "mo, no"
-surf.triangulate(res=100)
-surf.set_axis([-1,1,0],[-1,-1,2])
-surf.traitement()
-surf.plot_for_terminal(T0)
+# surf = Surface("(2+ u*cos(v/2))*cos(v)", "(2+ u*cos(v/2))*sin(v) ", "u*sin(v/2)", "v u", bounds=(0, 6.28318, -1, 1), quotient=("mo", "no")) # deconne elev=40, azim=40 si res = 600, uniquement si raccord "mo, no"
+# surf.triangulate(res=100)
+# surf.set_axis([-1,1,0],[-1,-1,2])
+# surf.traitement()
+# surf.plot_for_terminal(T0)
 
 #surf = Surface('(2+ u*cos(3*v/2))*cos(v)','(2+ u*cos(3*v/2))*sin(v) ','u*sin(3*v/2)', 'u v')
 #surf.triangulate(bounds = (-1.4,1.4,0, 6.2831), res = 100, quotient=('no','mo'))
