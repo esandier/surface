@@ -15,7 +15,7 @@
 import sympy as sp
 import numpy as np
 import math
-import rtree as rt
+#import rtree as rt
 
 from numpy.linalg import norm
 from numpy.lib.recfunctions import stack_arrays
