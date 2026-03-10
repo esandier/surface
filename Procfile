@@ -1,1 +1,1 @@
-web: gunicorn surfaces_project.wsgi --log-file -
+web: gunicorn surfaces_project.wsgi

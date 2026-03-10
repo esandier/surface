@@ -2302,11 +2302,11 @@ T0 = time.perf_counter()
 #surf.traitement()
 #surf.plot(T0)
 
-surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
-surf.triangulate(res = 1000) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
-surf.set_axis([1,1,0],[-1,1,3])
-surf.traitement()
-surf.plot(T0)
+# surf = Surface('u','v','sin(u*u + v*v)', 'u v', bounds = (-5,5,-5,5)) # temps à battre : entre 10 et 12,5 secondes
+# surf.triangulate(res = 1000) # 600 OK avec x*x/(1+x), même pour -6,6,-6,6. 800 pour x^{3/2}/(1+sqrt(x))
+# surf.set_axis([1,1,0],[-1,1,3])
+# surf.traitement()
+# surf.plot(T0)
 
 # surf = Surface('cos(u)*cosh(v)','sin(u)*cosh(v)','v', 'u v', bounds = (0,6.2839,-1.3,1.3), quotient=('cy','no')) # ça déconne complètement
 # surf.triangulate(res = 300) 
@@ -2350,11 +2350,11 @@ surf.plot(T0)
 #surf.traitement()
 #surf.plot(T0)
 
-#surf = Surface("(2+ u*cos(v/2))*cos(v)", "(2+ u*cos(v/2))*sin(v) ", "u*sin(v/2)", "v u") # deconne elev=40, azim=40 si res = 600, uniquement si raccord "mo, no"
-#surf.triangulate(bounds=(0, 6.28318, -1, 1), res=100, quotient=("mo", "no"))
-#surf.set_axis(elev=40, azim=40)
-#surf.traitement()
-#surf.plot(T0)
+surf = Surface("(2+ u*cos(v/2))*cos(v)", "(2+ u*cos(v/2))*sin(v) ", "u*sin(v/2)", "v u" , bounds=(0, 6.28318, -1, 1), quotient=("mo", "no")) # deconne elev=40, azim=40 si res = 600, uniquement si raccord "mo, no"
+surf.triangulate(res=100)
+surf.set_axis([1,1,0],[-1,1,3])
+surf.traitement()
+surf.plot(T0)
 
 #surf = Surface('(2+ u*cos(3*v/2))*cos(v)','(2+ u*cos(3*v/2))*sin(v) ','u*sin(3*v/2)', 'u v')
 #surf.triangulate(bounds = (-1.4,1.4,0, 6.2831), res = 100, quotient=('no','mo'))

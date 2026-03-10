@@ -261,13 +261,7 @@ class Surface:
                 0.0005 * dZ * .693,  
             ]
         )
-        # S_sp = S_pur + sp.Array(
-        #     [
-        #         0.00051 * dX * sp.sin(u * 0.00034521 / d_u + v * 0.00012345 / d_v),  
-        #         0.00051 * dY * sp.sin(u * 0.00076521 / d_u + v * 0.00065735 / d_v),
-        #         0.00051 * dZ * sp.sin(u * 0.00054721 / d_u + v * 0.00019674 / d_v),
-        #     ]
-        # )
+
         # dérivée de S.N dans la direction (du, dv)
         # DS_axis_sp = sp.diff(S_sp,u).dot([ax_x,ax_y,ax_z]) * du + sp.diff(S_sp,v).dot([ax_x,ax_y,ax_z]) * dv
         Su_sp = sp.diff(S_sp, u)  # dérivée par rapport à u, comme expression sympy
@@ -972,11 +966,6 @@ class Surface:
         def trim(
             l,
         ):  # on enlève les cusps de l pour ne pas connecter à un cusp. on renvoie les indices dans la ligne initiale, et la ligne tronquée.
-            #i, j = 0, len(l)
-            #if l["type"][0][0] == "v":
-            #    i = 1
-            #if l["type"][-1][0] == "v":
-            #    j = len(l) - 1
             i, j = 0, len(l)
             if l["type"][0][0] == "v":
                 i = min(5,len(l)//3) # on évite les extrêmités des lignes, dans la mesure du possible. Ici: marge de 10, à trois ça déconne parfois
@@ -1129,11 +1118,6 @@ class Surface:
         for i, l in enumerate(self.lines):
             origin, end = l[0], l[-1]
             intervals = norm(scale * (p[i][1:] - p[i][:-1]), axis=1) # interval[i] = dist(p[i], p[i+1])
-            # indices = np.where(intervals==0)[0]
-            # if indices.size >0:
-            #    print(len(l))
-            #    print(l['fp'])
-            #    print("l(i) %0.3f, %0.3f  l(i+1) %0.3f, %0.3f"%tuple(list(l['fp'][i])+list(l['fp'][i+1]))
             lengths = np.cumsum(intervals)  # lengths[i+1] - lengths[i] = interval[i+1], lengths[i] = dist(p[0], p[i+1])
             index = np.searchsorted(sample, lengths[-1] / 2) # sample[index - 1] < l/2 <= sample[index]
             points = np.concatenate(
@@ -1214,8 +1198,6 @@ class Surface:
                 dtype=bagtype_bis,
             )
 
-        # bag_bis.sort(order = ('x')) # incompatible avec la suite, où les indices de ligne sont utilisés
-        # j = np.searchsorted(bag_bis.x, np.maximum(bag_bis.p[:,0], bag_bis.p[:,0] + bag_bis.dp[:,0]))
         self.print(
             "[%0.3fs] %s"
             % (time.perf_counter() - t0, "Intersections bis - préparation")
@@ -1240,19 +1222,11 @@ class Surface:
             axis=1,
         )
         index_im = rt.index.Index(generator_function(bb_im), properties=p)
-        # bb_dom = np.concatenate((np.minimum(bag_bis['fp'], bag_bis['fp'] + bag_bis.fdp) - tol,
-        #                         np.maximum(bag_bis['fp'], bag_bis['fp'] + bag_bis.fdp) + tol), axis = 1)
-        # index_dom = rt.index.Index(generator_function(bb_dom), properties = p)
 
         for i, e in enumerate(bag_bis):
             box_im = [j for j in index_im.intersection(bb_im[i]) if j > i]
-            # box_im = set([j for j in index_im.intersection(bb_im[i]) if j > i])
-            # box_dom = set([j for j in index_dom.intersection(bb_dom[i]) if j > i])
-            # emax, emin = np.maximum(e.p, e.p + e.dp), np.minimum(e.p, e.p + e.dp)
             e_p, e_q = e["fp"], e["fp"] + e["fdp"]
             efmax, efmin = np.maximum(e_p, e_q), np.minimum(e_p, e_q)
-            # for j in box_im - box_dom:
-            #    self.edge_inter_bis(e, bag_bis[j])
             for j in box_im:
                 f = bag_bis[j]
                 f_p = self.close(e_p, f["fp"])
@@ -1262,20 +1236,6 @@ class Surface:
                 ):
                     self.edge_intersect(e, f)
 
-        # for i in range(len(bag_bis)):
-        #    e = bag_bis[i]
-        #    emax, emin = np.maximum(e.p, e.p + e.dp), np.minimum(e.p, e.p + e.dp)
-        #    efmax, efmin = np.maximum(e['fp'], e['fp'] + e.fdp), np.minimum(e['fp'], e['fp'] + e.fdp)
-        #    sub = bag_bis[i+1:j[i]]
-        #    subq = sub.p + sub.dp
-        #    subj = sub[
-        #        np.all(np.minimum(sub.p, subq) < emax, axis = 1) &
-        #        np.all(emin < np.maximum(sub.p, subq), axis = 1)
-        #        ]
-        #    for f in subj:
-        #        if (np.any(np.minimum(f['fp'], f['fp'] + f.fdp) > tol + efmax) or
-        #        np.any(efmin > tol + np.maximum(f['fp'], f['fp'] + f.fdp))):
-        #            self.edge_inter_bis(e, f)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Intersections bis"))
 
         bag_bis.sort(order=("x"))
@@ -1284,47 +1244,6 @@ class Surface:
             return e["l_idx"], e["e_idx"]
         else:  # sinon c'est q qui a le min de x.
             return e["l_idx"], e["e_idx"] + 1
-
-    def visibility(self, line, idx): # remplacé par "visibilite"
-        t0 = time.perf_counter()
-
-        # calcul de la visibilité des extrêmités des lignes, sachant que
-        # le point idx de la ligne line a la visibilité 0
-        t0 = time.perf_counter()
-        v = (
-            self.lines[line][idx]["v"]
-            if (idx == 0 or idx == len(self.lines[line]) - 1)
-            else 0
-        )
-        # print(' visibilities  ', v)
-        self.propagate(
-            line, idx, v
-        )  # inscrit dans visibilities la visibilité des extrêmités de line.
-
-        dic = defaultdict(set)
-        # dic[point] = tuple(indices des lignes dont le point est l'extrêmité, 0 si point est le début, -1 si point est la fin)
-        for i, l in enumerate(self.lines):
-            if i != line:  # on exclut la ligne initiale qui est déjà faite.
-                dic[tuple(l[0]["ixfp"])].add((i, 0))
-                dic[tuple(l[-1]["ixfp"])].add((i, -1))
-
-        # print(self.visibilities)
-        nodes = set([next(iter(self.visibilities.keys()))])
-        already_seen = set()
-        while nodes:
-            node = nodes.pop()
-            # print(dic[node])
-            already_seen.add(node)
-            for i, j in dic[node]:
-                pt = self.lines[i][-1 - j]["ixfp"]  # l'autre extremité de la ligne
-                if tuple(pt) not in already_seen:
-                    # j = 0 if i>= 0 else -1 # node est au début ou à la fin
-                    self.propagate(
-                        i, j, self.visibilities[node] + self.lines[i][j]["v"]
-                    )
-                    nodes.add(tuple(pt))
-                    dic[tuple(pt)].discard((i, j))
-        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Visibilité"))
 
     def visibilite(self, line, idx):
         # calcul de la visibilité des extrêmités des lignes, sachant que
@@ -1505,95 +1424,11 @@ class Surface:
 
         self.plot_lines(ax)
 
-        #visible_lines = []  # tracées en dernier
-
-        #for i, l in enumerate(self.lines):
-        #    type = "?"
-        #    if l[0]["type"] == "??":
-        #        continue
-        #    # if l[0].type[0] == 'v':
-        #    #    ax.scatter(*self.S(*l[0]['fp']), marker = 'x')
-        #    # if l[-1].type[0] == 'v':
-        #    #    ax.scatter(*self.S(*l[-1]['fp']), marker = 'x')
-        #    vis = l[0]["v"]
-        #    if tuple(l[0]["ixfp"]) in self.visibilities:
-        #        type = l[0]["type"][1]
-        #        vis += self.visibilities[tuple(l[0]["ixfp"])]
-
-        #    # des flèches a chaque début et fin de ligne qui indiquent un éventuel changement de visibilité
-        #    # if l[0]['v'] != 0:
-        #    #    color = 'green' if l[0]['v'] > 0 else 'red'
-        #    #    p, q = self.S(*l[0]['fp']), self.S(*l[1]['fp'])
-        #    #    #print(p,q,norm(q-p))
-        #    #    ax.quiver(*p, *(.02*(q - p)/norm(q-p)),  color=color)
-        #    # if l[-1]['v'] != 0:
-        #    #    color = 'green' if l[0]['v'] > 0 else 'red'
-        #    #    p, q = self.S(*l[-1]['fp']), self.S(*l[-2]['fp'])
-        #    #    #print(p,q,norm(q-p))
-        #    #    ax.quiver(*p, *(.02*(q - p)/norm(q-p)),  color=color)
-
-        #    line = []
-        #    for j in range(len(l) - 1):
-        #        p, q = l[j]["fp"], l[j + 1]["fp"]
-        #        line.append(p)
-        #        for s, v in self.line_bks[i][j]:
-        #            line.append((1 - s) * p + s * q)
-        #            # ax.scatter(*self.S(*line[-1]))
-        #            if vis == 0:
-        #                visible_lines.append(line)
-        #            else:
-        #                # if vis > 0:
-        #                #    plt.close(fig)
-        #                #    return 'fail'
-        #                plot_uv_line(
-        #                    ax, type, line, vis
-        #                )  # , 0 if type !='?' else 'navajowhite')
-        #            vis = vis + v
-        #            line = [line[-1]]
-        #    line.append(l[-1]["fp"])
-        #    if vis == 0:
-        #        visible_lines.append(line)
-        #    else:
-        #        # if vis > 0:
-        #        #    plt.close(fig)
-        #        #    return 'fail'
-        #        plot_uv_line(ax, type, line, vis)
-        #for line in visible_lines:
-        #    plot_uv_line(ax, type, line, 0)
-
-        # ax.quiver(*self.S(self.u_grid[0,0], self.v_grid[0,0]), *(axis*10), color='black') # flèche vers l'observateur
-
-        # ax.plot_surface(self.S_grid[0,0,:, :], self.S_grid[1,0,:, :], self.S_grid[2,0,:, :]) # la surface en facettes
-
-        # for i, p in enumerate(self.c_pts): # des flèches vers la surface
-        #    ax.quiver(*self.S(*p['fp'])[:,0], *(.03 * self.XYZ(p.d)), color='black')
-        # for i, e in enumerate(self.beds):
-        #    ax.quiver(*self.S(*e['fp'])[:,0], *(.02 * self.XYZ(self.dirint(e))),  color='black')
-
-        # for l in self.b_lines: # des gros points là où il y a changement de visibilité au bord
-        #    for i, idx in enumerate(l):
-        #        index = idx if idx >= 0 else len(self.beds) + idx
-        #        if index in self.breaks['b']:
-        #            for s, v in self.breaks['b'][index]:
-        #                point = (1 - s) * self.dom_pt(self.beds[idx].p) + s * self.dom_pt(self.beds[idx].q)
-        #                ax.scatter(*self.S(*point))
-
-        # for l in self.c_lines: # des gros points là où il y a changement de visibilité sur les contours
-        #    for i in range(len(l)-1):
-        #        if l[i] in self.breaks['c']:
-        #            for s, v in self.breaks['c'][l[i]]:
-        #                point = (1 - s) * self.c_pts[l[i]]['fp'] + s * self.c_pts[l[i+1]]['fp']
-        #                ax.scatter(*self.S(*point))
-
-
 
         limits = np.array([ax.get_xlim(), ax.get_ylim(), ax.get_zlim()])
         ax.set_box_aspect(aspect=np.ptp(limits, axis=1))
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
         self.print("[%0.3fs] %s" % (time.perf_counter() - T0, "Total"))
-        # plt.gca()
-        # plt.close(fig)
-        # return 'pass'
         plt.show()
 
     def json_out(self):
@@ -1634,7 +1469,6 @@ class Surface:
         p, dp, Nb = e["fp"], e["fdp"], e["dir"]  # segment dans le domaine
 
         p0 = p + s * dp  # le point où la visibilité peut changer
-        # p0 = (1-s) * p + s * q # le point où la visibilité peut changer
 
         ker = self.kerdS(*p0)[0]
         # on le dirige vers le pli supérieur, càd les z croissants
@@ -1642,8 +1476,6 @@ class Surface:
             ker = -ker
 
         Tb = dp / norm(dp)  # tangent au bord
-        # Tb = (q-p)/norm(q-p) # tangent au bord
-        # Nb = Tb.perp().dir(r-p) # normale pointant vers la surface
 
         Np = np.array(self.SD_jac(*p0, *self.axis))  # normale au pli
         if np.inner(Np, ker) < 0:
@@ -1732,32 +1564,6 @@ class Surface:
     ):  # l_idx: indice de la ligne dans self.lines, e_idx: indice du point p de l'arête dans la ligne, s: coord bary, v:chgt de visi
         bisect.insort(self.line_bks[l_idx][e_idx], (s, v))
 
-    def propagate(self, l_idx, idx, visib): 
-        # remplacé par "propagation"
-        # propage la visibilité sur une ligne l_idx à partir du point idx de visibilité visib
-        # attention, visib est la visibilité quand on est déjà dans la ligne
-        l = self.lines[l_idx]
-        visa = 0
-        for bks in self.line_bks[l_idx][
-            idx:
-        ]:  # attention, idx peut-être négatif, y faut pas utiliser range
-            for s, v in bks:
-                visa = visa + v
-        # on soustrait le changement de visi à l'extrêmité
-        self.visibilities[tuple(l[-1]["ixfp"])] = visib + visa - l[-1]["v"]
-        visb = 0
-        for bks in self.line_bks[l_idx][0:idx]:
-            for s, v in bks:
-                visb = visb + v
-        self.visibilities[tuple(l[0]["ixfp"])] = visib - visb - l[0]["v"]
-        # print('propagated: line %i, length %i, point %i with visibility %i. Result: start visibility %i, end visibility %i'%
-        #      (l_idx, len(self.lines[l_idx]), idx, visib, visib - visb - l[0]['v'], visib + visa - l[-1]['v']))
-        # string = ' visibility changes : ' + str(l[0]['v'])+' '
-        # for bks in self.line_bks[l_idx]:# attention, idx peut-être négatif, y faut pas utiliser range
-        #    for s,v in bks:
-        #        string += str(v) + ' '
-        # string += str(-l[-1]['v'])
-        # print(string)
     def propagation(self, l_idx, idx, visib):
         # propage la visibilité sur une ligne l_idx à partir du point idx de visibilité visib
         # dans le sens + si idx est <> -1, dans le sens - sinon. Renvoie la visibilité à l'extrêmité
