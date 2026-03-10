@@ -128,9 +128,9 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # 3. Tell Django where your SOURCE static files are
 # Make sure this matches your local folder name (e.g., 'static')
-STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, 'static'),
-]
+# STATICFILES_DIRS = [
+#    os.path.join(BASE_DIR, 'static'),
+#]
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.0/ref/settings/#default-auto-field
