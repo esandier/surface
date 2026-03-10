@@ -1,1 +1,0 @@
-web: gunicorn surfaces_project.wsgi
