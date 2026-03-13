@@ -1,1 +1,1 @@
-web: gunicorn surfaces_project.wsgi
+web: gunicorn surfaces_project.wsgi:application --bind 0.0.0.0:8080 --timeout 600
