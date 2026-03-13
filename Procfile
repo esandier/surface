@@ -1,1 +1,1 @@
-web: gunicorn surfaces.wsgi
+web: gunicorn surfaces_project.wsgi
