@@ -4,6 +4,7 @@ from django.urls import reverse_lazy
 from django.views.generic.edit import CreateView, DeleteView, UpdateView
 from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, redirect, render
+from django.conf import settings
 
 from collections import defaultdict
 
@@ -36,7 +37,7 @@ class SurfacePlayView(TemplateView):
     def post(self, request, pk):
         rec = get_object_or_404(SurfaceRecord, pk=pk)
         surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
-        surf.triangulate(300) # résolution assez importante pour la triangulation
+        surf.triangulate(settings.resolution)
 
         data = json.loads(request.body.decode())
         I = data['I']
