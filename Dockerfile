@@ -5,7 +5,8 @@ USER root
 
 # 1. Install the EPEL repository (where libspatialindex lives)
 RUN yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
-    yum install -y spatialindex && \
+    # Disable all repos, then only enable the ones we need to save RAM
+    yum install -y --disablerepo="*" --enablerepo="ubi-8-appstream-rpms" --enablerepo="ubi-8-baseos-rpms" --enablerepo="epel" libspatialindex && \
     yum clean all
 
 # 2. Switch back to the standard OpenShift user
