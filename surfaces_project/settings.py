@@ -138,4 +138,4 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Constantes de l'application
-resolution = 300 # résolution assez importante pour la triangulation
+RESOLUTION = 300 # résolution assez importante pour la triangulation

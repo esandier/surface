@@ -37,7 +37,7 @@ class SurfacePlayView(TemplateView):
     def post(self, request, pk):
         rec = get_object_or_404(SurfaceRecord, pk=pk)
         surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
-        surf.triangulate(settings.resolution)
+        surf.triangulate(settings.RESOLUTION)
 
         data = json.loads(request.body.decode())
         I = data['I']
