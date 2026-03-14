@@ -1,5 +1,5 @@
 # Start from the same Python image you are currently using
-FROM default-route-openshift-image-registry.apps.math.cnrs.fr/openshift/python:3.11-ubi8
+FROM python:3.11-ubi8
 USER root
 
 # 1. Install the EPEL repository (where libspatialindex lives)
