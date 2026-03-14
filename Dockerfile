@@ -1,20 +1,25 @@
 FROM python:3.11-ubi8
 
+# 1. Start as root to perform system-level changes
 USER root
-# 1. Install the system library
+
+# 2. Install the spatial library (Confirmed working name)
 RUN yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
     yum install -y spatialindex spatialindex-devel && \
     yum clean all
 
-# 2. Fix permissions so the S2I user (1001) can move files
-RUN chown -R 1001:0 /opt/app-root/src /tmp/src
+# 3. Copy your code into the temporary staging area while still root
+COPY . /tmp/src
 
-# 3. Switch back to the standard unprivileged user
+# 4. NOW that the files exist, give ownership to the OpenShift user (1001)
+# We also give ownership of the destination folder (/opt/app-root/src)
+RUN chown -R 1001:0 /tmp/src /opt/app-root/src
+
+# 5. Switch to the unprivileged user for safety and S2I compatibility
 USER 1001
 
-# 4. Standard S2I assembly
-COPY . /tmp/src
+# 6. Run the assembly script. Since 1001 owns /tmp/src, it can now move files.
 RUN /usr/libexec/s2i/assemble
 
-# 5. Set the default command
+# 7. Set the startup command
 CMD /usr/libexec/s2i/run
