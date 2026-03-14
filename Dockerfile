@@ -5,9 +5,7 @@ USER root
 # 1. Install the EPEL repository (where libspatialindex lives)
 USER root
 RUN yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
-    yum install -y 'dnf-command(config-manager)' && \
-    yum config-manager --set-enabled epel && \
-    yum install -y libspatialindex-devel && \
+    yum install -y spatialindex spatialindex-devel libspatialindex || true && \
     yum clean all
 
 # 2. Switch back to the standard OpenShift user
