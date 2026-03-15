@@ -52,6 +52,10 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware'
 ]
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://silhouettes-surfaces.apps.math.cnrs.fr",
+]
+
 ROOT_URLCONF = 'surfaces_project.urls'
 
 TEMPLATES = [
