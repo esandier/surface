@@ -1,0 +1,223 @@
+<!-- templates/home.html -->
+{% extends "base.html" %}
+{% load json_filter %}
+
+{% block content %}
+<!-- <div class=" d-flex vh-100 flex-column"> -->
+  <!-- I want this container to stretch to the height of the parent -->
+  <div class="container-fluid d-flex vh-100 flex-column">
+
+  <div class="row justify-content-between p-3 titre">
+    <h1>{{ surface.name }}</h1>
+    <h1>
+      <div id="spinner" class="spinner-border" style="visibility:hidden" role="status">
+        <span class="visually-hidden"></span>
+      </div>  
+      <a href="#" id="download-button" style = "visibility:hidden" class="glyph"><span style="vertical-align:middle" class="fa-regular fa-circle-down"></span></a>
+      <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph"><span style="vertical-align:middle"  class="far fa-pen-to-square"></span></a>
+      <a href="{% url 'surfaces' %}" class="glyph"><span style="vertical-align:middle"  class="fa-regular fa-rectangle-list"></span></a>
+    </h1>
+  </div>
+  <div class="row" style="flex-grow:1; position:relative">
+  <svg id="svgbox" style="position:absolute; height:100%; width:100%" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet">
+    <g id="svg" transform="translate(0) scale(1)" style="pointer-events:none"></g>
+  </svg>
+  <canvas id="canvas" style="position:absolute; height:100%; width:100%"></canvas>
+  </div>
+
+
+<script type="module">
+    const downloadButton = document.getElementById("download-button");
+    const spinner = document.getElementById("spinner");
+    spinner.remove();
+    const canvas = document.getElementById('canvas');
+    var svg = document.getElementById('svg');
+
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.121.1/build/three.module.js';
+    import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.121.1/examples/jsm/controls/OrbitControls.js';
+    import { TrackballControls } from 'https://cdn.jsdelivr.net/npm/three@0.121.1/examples/jsm/controls/TrackballControls.js';    
+    const scene = new THREE.Scene();
+
+    // const camera = new THREE.PerspectiveCamera( 75, 1, .5, 500000 );
+    const radius = {{ radius }};
+    const center = {{ center | tojson }};
+    const pk = {{ pk }};
+
+    // les arguments sont left, right, top, bottom, near, far
+    const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, 0, 4 * radius);
+    camera.zoom = 1;
+
+    camera.position.set(
+      center[0] + radius, 
+      center[1] + radius, 
+      center[2] + radius
+    );
+    camera.up.set(0,0,1);   // la position de la camera. l'axe qui va vers l'observateur est (1,1,1). le vecteur (0,0,1) est vertical dans le plan
+    camera.lookAt(...center);
+    camera.updateProjectionMatrix();
+    camera.aspect = canvas.clientWidth / canvas.clientHeight;
+
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas,   
+      alpha: true,
+      premultipliedAlpha: false,
+    });
+
+    const material = new THREE.MeshNormalMaterial();
+    material.side = THREE.DoubleSide;
+
+    // const controls = new OrbitControls(camera, canvas); 
+    const controls = new TrackballControls( camera, canvas );
+    controls.target.set(...center);
+    // canvas.addEventListener('pointerup',myMouseUp ,false);
+    // canvas.addEventListener('pointerdown',myMouseDown ,false);
+    controls.addEventListener('end',myMouseUp ,false);
+    controls.addEventListener('start',myMouseDown ,false);
+    controls.noPan = true;
+    controls.noZoom = true;
+    controls.staticMoving = true;
+    controls.update();
+
+    const positions = {{ positions | tojson }}
+    const normals = {{ normals | tojson }}
+    const faces = {{ faces | tojson }}
+    var geometry = new THREE.BufferGeometry();
+    const positionNumComponents = 3;
+    const normalNumComponents = 3;
+    geometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(positions), positionNumComponents));
+    geometry.setAttribute(
+        'normal',
+        new THREE.BufferAttribute(new Float32Array(normals), normalNumComponents));
+    geometry.setIndex( faces );
+    const surface = new THREE.Mesh( geometry, material );
+    scene.add( surface )
+
+    // const axesHelper = new THREE.AxesHelper( radius * 0.06);
+    // scene.add( axesHelper );
+
+
+    function resizeRendererToDisplaySize(renderer) {
+      // const canvas = renderer.domElement;
+      const pixelRatio = window.devicePixelRatio;
+      const width  = canvas.clientWidth  * pixelRatio | 0;
+      const height = canvas.clientHeight * pixelRatio | 0;
+      const needResize = canvas.width !== width || canvas.height !== height;
+      if (needResize) {
+        renderer.setSize(width, height, false);
+        if(width > height) {
+          renderer.setViewport((width-height)/2,0, Math.min(width, height), Math.min(width, height));//0,0,width/height,1)
+        }
+        else {
+          renderer.setViewport(0,(height - width)/2, Math.min(width, height), Math.min(width, height));//0,0,width/height,1)
+        }
+      }
+      return needResize;
+    }   
+    
+    function render(renderer, scene, camera) {
+      if (resizeRendererToDisplaySize(renderer)) {
+        // const canvas = renderer.domElement;
+        camera.aspect = canvas.clientWidth / canvas.clientHeight;
+      }
+      renderer.render(scene, camera);
+    }
+
+
+    function animate() {
+      render(renderer, scene, camera);
+      controls.update();
+      requestAnimationFrame(animate);
+    }
+
+    function myMouseUp(){  
+      downloadButton.replaceWith(spinner)
+      spinner.style.visibility = "visible";
+      controls.enabled = false;
+      controls.update();
+      camera.updateProjectionMatrix();
+
+
+
+      let url = "{% url 'surface-play' pk=pk %}";
+      let I = new THREE.Vector3( 1,0,-1 ).unproject( camera );// coordonnées du repère 2D dans l'espace 3D
+      let J = new THREE.Vector3( 0,1,-1 ).unproject( camera );
+      let O = new THREE.Vector3( 0,0,-1 ).unproject( camera );
+      let zoom = camera.zoom;
+
+      let data = {
+        'I': I.sub(O).toArray(),
+        'J': J.sub(O).toArray(),
+        'O': O.toArray(),
+      }
+
+      var request = new Request(url, {
+        method: 'POST',
+        body: JSON.stringify(data, null, '\t'),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      fetch(request)
+      .then(response => response.json())
+      .then(function(data) {
+        let origin = data.origin;
+        const lines = data.lines_by_visibility;
+
+        let scaleX = zoom / radius;  // la viewbox fait que les coord dans la boite sont [-1,1]X[-1,1]], y dirigé vers le bas
+        let scaleY = - zoom / radius; // signe moins pour que y soit dirigé vers le haut
+        let transX = - zoom * origin[0] / radius;
+        let transY =  zoom * origin[1] / radius;
+        svg.transform.baseVal.getItem(1).setScale(scaleX, scaleY);
+        svg.transform.baseVal.getItem(0).setTranslate(transX, transY);
+
+
+        let string = "";
+        for(var i = 0; i < lines.length; i++) {
+          for (const line of lines[i] ) {
+            if( i == lines.length - 1 ) {
+              string = string + "<polyline points = ' "+ line +" ' fill='none' vector-effect='non-scaling-stroke' stroke='black' stroke-width='1.5'/>\n";
+            }
+            else {
+              string = string + "<polyline stroke-dasharray='4' points = ' "+ line +" ' fill='none' vector-effect='non-scaling-stroke' stroke='lightgrey' stroke-width='1.5'/>\n";
+            }
+          }         
+        }
+
+        svg.innerHTML = string;
+        material.opacity = 0.2;
+        controls.enabled = true;
+        downloadButton.style.visibility = "visible";
+        spinner.replaceWith(downloadButton);
+        let fileName = "{{ surface.name }}.svg";
+        let svgData = exportSVG();
+        let hrefAttribute = 'data:image/svg+xml; charset=utf8, ' + encodeURIComponent(svgData.replace(/></g, '>\n\r<'));
+        downloadButton.setAttribute("href", hrefAttribute);
+        downloadButton.setAttribute("download", fileName);
+      })
+      .catch((error) => {
+        console.error('Error:', error);
+      });    
+    }
+    function myMouseDown(){
+      // console.log('down !')
+      svg.innerHTML = '';
+      downloadButton.style.visibility = "hidden";
+      material.opacity = 1;
+    }   
+    function exportSVG() {
+      let clone = document.getElementById('svgbox').cloneNode(true);
+      let svgDocType = document.implementation.createDocumentType('svg', "-//W3C//DTD SVG 1.1//EN", "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd");
+      let svgDoc = document.implementation.createDocument('http://www.w3.org/2000/svg', 'svg', svgDocType);
+      svgDoc.replaceChild(clone, svgDoc.documentElement);
+      var svgData = (new XMLSerializer()).serializeToString(svgDoc);
+      return(svgData)
+    }
+    resizeRendererToDisplaySize(renderer)       
+    requestAnimationFrame(animate);
+  </script>
+
+{% endblock content %}
