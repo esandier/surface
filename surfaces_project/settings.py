@@ -128,6 +128,11 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Add this block:
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, 'static'),
+]
+
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # 3. Tell Django where your SOURCE static files are
@@ -141,5 +146,8 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+
 # Constantes de l'application
 RESOLUTION = int(os.getenv('RESOLUTION', 300)) # résolution assez importante pour la triangulation
+
+
