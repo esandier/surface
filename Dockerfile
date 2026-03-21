@@ -1,14 +1,17 @@
-# On repart sur une base ultra-légère (ubi9-minimal)
-FROM image-registry.openshift-image-registry.svc:5000/openshift/python:3.12-ubi9-minimal
+FROM python:3.11-ubi8
 
 USER root
-# On installe juste le strict nécessaire
-RUN microdnf install -y gcc python3-devel openldap-devel shadow-utils && microdnf clean all
+# Install the library
+RUN yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
+    yum install -y spatialindex spatialindex-devel && \
+    yum clean all
 
+# Ditch the S2I 'assemble' script—it's too picky about permissions.
+# We will do a standard Python install ourselves.
 WORKDIR /opt/app-root/src
-COPY requirements.txt .
+COPY . .
+RUN chown -R 1001:0 /opt/app-root/src
+USER 1001
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-USER 1001
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8080"]
+CMD python manage.py runserver 0.0.0.0:8080
