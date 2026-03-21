@@ -1,25 +1,14 @@
-FROM python:3.11-ubi8
+# On repart sur une base ultra-légère (ubi9-minimal)
+FROM image-registry.openshift-image-registry.svc:5000/openshift/python:3.12-ubi9-minimal
 
-# 1. Start as root to perform system-level changes
 USER root
+# On installe juste le strict nécessaire
+RUN microdnf install -y gcc python3-devel openldap-devel shadow-utils && microdnf clean all
 
-# 2. Install the spatial library (Confirmed working name)
-RUN yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
-    yum install -y spatialindex spatialindex-devel && \
-    yum clean all
+WORKDIR /opt/app-root/src
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 3. Copy your code into the temporary staging area while still root
-COPY . /tmp/src
-
-# 4. NOW that the files exist, give ownership to the OpenShift user (1001)
-# We also give ownership of the destination folder (/opt/app-root/src)
-RUN chown -R 1001:0 /tmp/src /opt/app-root/src
-
-# 5. Switch to the unprivileged user for safety and S2I compatibility
+COPY . .
 USER 1001
-
-# 6. Run the assembly script. Since 1001 owns /tmp/src, it can now move files.
-RUN /usr/libexec/s2i/assemble
-
-# 7. Set the startup command
-CMD /usr/libexec/s2i/run
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8080"]

@@ -85,19 +85,78 @@
     geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(normals), 3));
     geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(faces), 1));
 
+    // Random 3D vector
+    const randomVec = () => ({
+        x: Math.random() * 2 - 1,
+        y: Math.random() * 2 - 1,
+        z: Math.random() * 2 - 1
+    });
+
+    // Helper to normalize a vector
+    const normalize = (v) => {
+        const mag = Math.sqrt(v.x**2 + v.y**2 + v.z**2);
+        return { x: v.x / mag, y: v.y / mag, z: v.z / mag };
+    }; 
+    
+    // Scalar product
+    const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+
+    // Two random orthogonal unit vectors
+    const e1 = normalize(randomVec());
+    var e2 = normalize(randomVec());
+    e2 = normalize({
+        x : e2.x - dot(e1,e2) * e1.x, 
+        y : e2.y - dot(e1,e2) * e1.y, 
+        z : e2.z - dot(e1,e2) * e1.z
+    });
+
     // Calculate Vertex Colors from Normals
+
     const colors = new Float32Array(normals.length);
-    for (let i = 0; i < normals.length; i++) {
-        colors[i] = normals[i] * 0.8 + 0.2; 
+
+    // Version 1
+    /*for (let i = 0; i < normals.length; i++) {
+        colors[i] = normals[i] * 0.5 + 0.5; 
     }
+    */
+
+    // Version 2
+    var i = 0;
+
+    while (i + 2 < normals.length) {
+        const normal = normalize({x : normals[i], y : normals[i + 1], z : normals[i + 2]});
+
+        const nx = dot(normal, e1);
+        const ny = dot(normal, e2);
+
+    
+        const color = new THREE.Color();
+
+        // 1. Get the angle in the XY plane (abs value)
+        const angle = Math.atan2(ny, nx);
+
+        // 2. Map angle to Hue (0.0 to 1.0)
+        const hue = .5 * angle/Math.PI + .5;
+
+        // 3. Set HSL: (Hue, Saturation, Lightness)
+        const lightness = .5;
+        color.setHSL(hue, .9, lightness);
+
+        colors[i] = color.r; 
+        colors[i + 1] = color.g; 
+        colors[i + 2] = color.b;
+        
+        i += 3
+    }
+    
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
     // MeshPhongMaterial provides the "punchy" highlights for the active state
     const material = new THREE.MeshPhongMaterial({
         vertexColors: true,
         side: THREE.DoubleSide,
-        shininess: 0,
-        specular: 0x444444,
+        shininess: 0.2,
+        specular: 0x000000,
         transparent: false 
     });
 
