@@ -1,1 +1,1 @@
-web: gunicorn surfaces_project.wsgi:application --bind 0.0.0.0:8080 --timeout 600
+web: python manage.py migrate --noinput && gunicorn surfaces_project.wsgi:application --bind 0.0.0.0:8080 --timeout 600
