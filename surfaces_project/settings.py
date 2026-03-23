@@ -87,7 +87,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.sqlite3',
         # DB_DIR can be set to a PersistentVolumeClaim mount point on OpenShift.
         # Defaults to /tmp (writable without a PVC, but ephemeral across pod restarts).
-        'NAME': Path(os.getenv('DB_DIR', '/tmp')) / 'db.sqlite3',
+        'NAME': Path(os.getenv('DB_DIR', BASE_DIR)) / 'db.sqlite3',
     }
 }
 
