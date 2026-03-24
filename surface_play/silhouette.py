@@ -815,17 +815,17 @@ class Surface:
                     1 if np.inner(self.dS(*p, *(q - p)), self.axis) > 0 else -1
                 )  # ça monte dans le sens p, q. donc la visibilité augmente
                 r = (p + q) / 2
-                # nu = np.array([-(q-p)[1], (q-p)[0]])
-                # for j in range(20): # bisection pour trouver le point précis, avec newton pour rester sur le contour
-                #    a, b = (p+q)/2 - nu/2, (p+q)/2 + nu/2
-                #    s = newton(NZbis, 0.5, args=(a[0], a[1], nu[0], nu[1]))
-                #    r = a + s * (b-a)
-                #    if np.inner(self.dirvec(p), self.dirvec(r)) < 0:
-                #        q = r
-                #    elif np.inner(self.dirvec(q), self.dirvec(r)) < 0:
-                #        p = r
-                #    else:
-                #        print('problème de cusp!!!')
+                nu = np.array([-(q-p)[1], (q-p)[0]])
+                for j in range(20): # bisection pour trouver le point précis, avec newton pour rester sur le contour
+                   a, b = (p+q)/2 - nu/2, (p+q)/2 + nu/2
+                   s = newton(NZbis, 0.5, args=(a[0], a[1], nu[0], nu[1]))
+                   r = a + s * (b-a)
+                   if np.inner(self.dirvec(p), self.dirvec(r)) < 0:
+                       q = r
+                   elif np.inner(self.dirvec(q), self.dirvec(r)) < 0:
+                       p = r
+                   else:
+                       print('problème de cusp!!!')
                 cusps.append((l[i], l[i + 1], 1 / 2, r))
                 # print(vis)
                 self.breaks["c"][l[i]] = (0.5, vis, len(cusps) - 1)
