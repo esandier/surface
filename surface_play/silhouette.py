@@ -24,7 +24,8 @@ from numpy.linalg import norm
 from numpy.core.records import fromrecords
 from numpy.core.records import fromarrays
 from numpy.linalg import svd
-from scipy.optimize import newton
+from scipy.optimize import newton, linprog
+from scipy.sparse import csc_matrix
 
 from sympy.utilities import lambdify
 from collections import namedtuple
@@ -1246,51 +1247,105 @@ class Surface:
             return e["l_idx"], e["e_idx"] + 1
 
     def visibilite(self, line, idx):
-        # calcul de la visibilité des extrêmités des lignes, sachant que
+        # calcul de la visibilité des extrêmités des lignes via minimisation L1
         # le point idx de la ligne line a la visibilité 0
         t0 = time.perf_counter()
+        self.visibilities = {}
 
-        ####### Initialisation
-        visited = set()
-        unseen = set()
-        lines_dic = defaultdict(set) # lignes par sommet, indice de ligne, et 0 si le sommet est l[0], -1 si sommet = l[-1]
-        for i, l in enumerate(self.lines):
-            p, q = tuple(l[0]["ixfp"]), tuple(l[-1]["ixfp"])
-            lines_dic[p].add((i, 0))
-            lines_dic[q].add((i, -1))
-            unseen.update([p,q])
+        m = len(self.lines)
+        if m == 0:
+            return
 
-        v = (
-            self.lines[line][idx]["v"]
-            if (idx == 0 or idx == len(self.lines[line]) - 1)
-            else 0
-        )
+        # Build node index: ixfp tuple → integer
+        nodes = {}
+        for l in self.lines:
+            for pt in [tuple(l[0]["ixfp"]), tuple(l[-1]["ixfp"])]:
+                if pt not in nodes:
+                    nodes[pt] = len(nodes)
+        n = len(nodes)
 
-        vis = self.propagation(line, idx, v)
-        p, q = self.lines[line][0], self.lines[line][-1]
-        point = q if idx == 0 else p
-        self.visibilities[tuple(point["ixfp"])] = vis
-        visited.add(tuple(point["ixfp"]))
-        unseen.discard(tuple(point["ixfp"]))
+        # Source/dest node index and Δ_i = V_q - V_p for each line
+        p_idx = [nodes[tuple(self.lines[i][0]["ixfp"])] for i in range(m)]
+        q_idx = [nodes[tuple(self.lines[i][-1]["ixfp"])] for i in range(m)]
+        deltas = [self.propagation(i, 0, self.lines[i][0]["v"]) for i in range(m)]
 
-        ####### Propagation
-        dic = defaultdict(set)
-        while visited :
-            pt = visited.pop()
-            for i, j in lines_dic[pt] :
-                l = self.lines[i]
-                qt = tuple(l[-1 - j]["ixfp"])
-                if qt in unseen :
-                    self.visibilities[qt] = self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"])
-                    if self.visibilities[qt]>0:
-                        self.print("visibilité > 0 !!!") # debug
-                    unseen.discard(qt)
-                    visited.add(qt)
-                    # lines_dic[qt].discard((i,-1-j))
-                elif self.visibilities[qt] != self.propagation(i, j, self.visibilities[pt] + self.lines[i][j]["v"]):
-                    self.print("inconsistency!!!!") # debug
-            visited.discard(pt)
-        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Visibilité"))
+        # Find connected components via ixfp adjacency
+        adj = defaultdict(list)
+        for i in range(m):
+            adj[p_idx[i]].append(i)
+            adj[q_idx[i]].append(i)
+        seen_lines = set()
+        components = []
+        for start in range(m):
+            if start in seen_lines:
+                continue
+            comp, stack = [], [start]
+            while stack:
+                li = stack.pop()
+                if li in seen_lines:
+                    continue
+                seen_lines.add(li)
+                comp.append(li)
+                for nb in adj[p_idx[li]] + adj[q_idx[li]]:
+                    if nb not in seen_lines:
+                        stack.append(nb)
+            components.append(comp)
+
+        # LP variables: [V_0..V_{n-1}, s_0..s_{m-1}]
+        # Minimize Σ s_i
+        c = np.zeros(n + m)
+        c[n:] = 1.0
+
+        # Inequality constraints
+        rows, cols, vals, b_ub_list = [], [], [], []
+        row = 0
+        for i in range(m):
+            # V_q - V_p - s_i ≤ Δ_i
+            rows += [row, row, row]; cols += [q_idx[i], p_idx[i], n+i]; vals += [1.0, -1.0, -1.0]
+            b_ub_list.append(float(deltas[i])); row += 1
+            # -V_q + V_p - s_i ≤ -Δ_i
+            rows += [row, row, row]; cols += [q_idx[i], p_idx[i], n+i]; vals += [-1.0, 1.0, -1.0]
+            b_ub_list.append(float(-deltas[i])); row += 1
+
+        A_ub = csc_matrix((vals, (rows, cols)), shape=(row, n + m)) if row > 0 else None
+        b_ub = np.array(b_ub_list) if row > 0 else None
+
+        # Derive anchor endpoint and its visibility (same logic as old BFS)
+        v_start = self.lines[line][idx]["v"] if (idx == 0 or idx == len(self.lines[line]) - 1) else 0
+        anchor_vis = self.propagation(line, idx, v_start)
+        anchor_endpoint = self.lines[line][-1] if idx == 0 else self.lines[line][0]
+        anchor_pt = tuple(anchor_endpoint["ixfp"])
+        anchor_main = nodes[anchor_pt]
+
+        # Equality constraints: one anchor per connected component
+        main_comp_lines = next(comp for comp in components if line in comp)
+        eq_rows, eq_cols, eq_vals, b_eq_list = [], [], [], []
+        for k, comp in enumerate(components):
+            if comp is main_comp_lines:
+                a, val = anchor_main, float(anchor_vis)
+            else:
+                a, val = p_idx[comp[0]], 0.0
+            eq_rows.append(k); eq_cols.append(a); eq_vals.append(1.0)
+            b_eq_list.append(val)
+
+        A_eq = csc_matrix((eq_vals, (eq_rows, eq_cols)), shape=(len(components), n + m))
+        b_eq = np.array(b_eq_list)
+
+        bounds = [(None, None)] * n + [(0, None)] * m
+
+        result = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                         bounds=bounds, method='highs')
+
+        if not result.success:
+            self.print("L1 visibility LP failed: " + result.message)
+            return
+
+        V = result.x[:n]
+        for pt, j in nodes.items():
+            self.visibilities[pt] = int(round(V[j]))
+
+        self.print("[%0.3fs] Visibilité L1 (n=%d, m=%d, %d composantes)" %
+                   (time.perf_counter() - t0, n, m, len(components)))
 
     def plot_for_browser(self):
         t0 = time.perf_counter()
