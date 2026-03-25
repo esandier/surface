@@ -1365,12 +1365,12 @@ class Surface:
                 line.append(self.XY(np.array(self.S(*p))))
                 for s, v in self.line_bks[i][j]:
                     line.append(self.XY(np.array(self.S(*((1 - s) * p + s * q)))))
-                    lines[vis].append(line)
+                    lines[min(vis, 0)].append(line)
                     vis = vis + v
                     line = [line[-1]] # coordonnées x,y du dernier point
             last_pt = l[-1]["fp"]
             line.append(self.XY(np.array(self.S(*last_pt))))
-            lines[vis].append(line)
+            lines[min(vis, 0)].append(line)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
 
         return lines 
