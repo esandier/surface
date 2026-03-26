@@ -11,6 +11,11 @@
             <a id="download-button" class="glyph" style="visibility:hidden">
                 <span class="fa-regular fa-circle-down"></span>
             </a>
+            <a id="copy-view-btn" class="glyph" style="cursor:pointer" title="Copy view / paste to restore">
+                <span class="fa-regular fa-clipboard"></span>
+            </a>
+            <input id="load-view-input" type="text" placeholder="paste view + Enter"
+                   style="width:0; padding:0 4px; border:1px solid #ccc; border-radius:4px; font-size:0.75em; overflow:hidden; transition:width 0.2s; vertical-align:middle">
             <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph">
                 <span class="far fa-pen-to-square"></span>
             </a>
@@ -223,7 +228,7 @@
         ambientLight.intensity = 0.8;
     }
 
-    function mouseUp() {
+    function computeSilhouette() {
         spinner.style.visibility = "visible";
         downloadButton.replaceWith(spinner);
         controls.enabled = false;
@@ -247,6 +252,34 @@
         .then(drawSVG)
         .catch(console.error);
     }
+
+    function mouseUp() { computeSilhouette(); }
+
+    /* ---------------- SAVE / LOAD VIEW ---------------- */
+    const copyViewBtn  = document.getElementById("copy-view-btn");
+    const loadViewInput = document.getElementById("load-view-input");
+
+    copyViewBtn.addEventListener("click", () => {
+        const q = camera.quaternion.toArray().map(x => +x.toFixed(8));
+        navigator.clipboard.writeText(JSON.stringify(q));
+        copyViewBtn.querySelector("span").className = "fa-solid fa-clipboard-check";
+        setTimeout(() => copyViewBtn.querySelector("span").className = "fa-regular fa-clipboard", 1500);
+        loadViewInput.style.width = "10em";
+        loadViewInput.focus();
+    });
+
+    loadViewInput.addEventListener("keydown", e => {
+        if (e.key !== "Enter") return;
+        try {
+            const q = JSON.parse(loadViewInput.value);
+            camera.quaternion.fromArray(q);
+            camera.updateMatrixWorld();
+            controls.update();
+            loadViewInput.style.width = "0";
+            loadViewInput.value = "";
+            computeSilhouette();
+        } catch(err) { console.error("Invalid view data:", err); }
+    });
 
     /* ---------------- SVG DRAWING ---------------- */
     function drawSVG(data) {
