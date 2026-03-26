@@ -26,6 +26,7 @@ from numpy.core.records import fromarrays
 from numpy.linalg import svd
 from scipy.optimize import newton, linprog
 from scipy.sparse import csc_matrix
+from scipy.spatial import cKDTree
 
 from sympy.utilities import lambdify
 from collections import namedtuple
@@ -1011,39 +1012,18 @@ class Surface:
             l_index[i] = np.concatenate(
                 [np.full((len(trim(self.lines[l])[0]),), l) for l in cc]
             )
-            # e_index[i] = np.concatenate([np.arange(len(self.lines[l])) for l in cc])
             e_index[i] = np.concatenate([trim(self.lines[l])[0] for l in cc])
-            bb = np.concatenate(
-                (
-                    np.concatenate([trim(self.lines[l])[1]["ixfp"] for l in cc]),
-                    np.concatenate([trim(self.lines[l])[1]["ixfp"] for l in cc]),
-                ),
-                axis=1,
-            )
-            trees[i] = rt.index.Index(
-                generator_function(bb), properties=rt.index.Property()
-            )
+            pts = np.concatenate([trim(self.lines[l])[1]["ixfp"] for l in cc])
+            trees[i] = cKDTree(pts)
             for j in range(i):
                 i_point, j_point = len(e_index[i]) // 2, len(e_index[j]) // 2
                 for k in range(2):
-                    j_point = list(
-                        trees[j].nearest(
-                            tuple(
-                                self.lines[l_index[i][i_point]][e_index[i][i_point]][
-                                    "ixfp"
-                                ]
-                            )
-                        )
-                    )[0]
-                    i_point = list(
-                        trees[i].nearest(
-                            tuple(
-                                self.lines[l_index[j][j_point]][e_index[j][j_point]][
-                                    "ixfp"
-                                ]
-                            )
-                        )
-                    )[0]
+                    j_point = trees[j].query(
+                        self.lines[l_index[i][i_point]][e_index[i][i_point]]["ixfp"]
+                    )[1]
+                    i_point = trees[i].query(
+                        self.lines[l_index[j][j_point]][e_index[j][j_point]]["ixfp"]
+                    )[1]
                 # print('ipoint %i jpoint %i' % (i_point, j_point))
                 il, ie, jl, je = (
                     l_index[i][i_point],
@@ -1239,18 +1219,107 @@ class Surface:
         )
         index_im = rt.index.Index(generator_function(bb_im), properties=p)
 
-        for i, e in enumerate(bag_bis):
-            box_im = [j for j in index_im.intersection(bb_im[i]) if j > i]
-            e_p, e_q = e["fp"], e["fp"] + e["fdp"]
-            efmax, efmin = np.maximum(e_p, e_q), np.minimum(e_p, e_q)
-            for j in box_im:
-                f = bag_bis[j]
-                f_p = self.close(e_p, f["fp"])
-                f_q = f_p + f["fdp"]
-                if np.any(np.minimum(f_p, f_q) > tol + efmax) or np.any(
-                    efmin > tol + np.maximum(f_p, f_q)
-                ):
-                    self.edge_intersect(e, f)
+        use_batch = (self.u_identify == "no" and self.v_identify == "no")
+        # Pre-extract contiguous arrays for fast fancy-indexing in the batch path
+        if use_batch:
+            bag_p_c   = np.ascontiguousarray(bag_bis["p"])
+            bag_dp_c  = np.ascontiguousarray(bag_bis["dp"])
+            bag_fp_c  = np.ascontiguousarray(bag_bis["fp"])
+            bag_fdp_c = np.ascontiguousarray(bag_bis["fdp"])
+            bag_d_c   = np.ascontiguousarray(bag_bis["d"])
+            bag_z     = bag_bis["z"]
+            bag_dz    = bag_bis["dz"]
+            bag_n     = bag_bis["n"]
+            bag_li    = bag_bis["l_idx"]
+            bag_ei    = bag_bis["e_idx"]
+
+        for i in range(len(bag_bis)):
+            box_im_raw = [j for j in index_im.intersection(bb_im[i]) if j > i]
+            if not box_im_raw:
+                continue
+
+            if not use_batch:
+                # Original per-pair loop (periodic surfaces)
+                e = bag_bis[i]
+                e_p_fp = e["fp"]
+                e_q_fp = e_p_fp + e["fdp"]
+                efmax = np.maximum(e_p_fp, e_q_fp)
+                efmin = np.minimum(e_p_fp, e_q_fp)
+                for j in box_im_raw:
+                    f = bag_bis[j]
+                    f_p = self.close(e_p_fp, f["fp"])
+                    f_q = f_p + f["fdp"]
+                    if np.any(np.minimum(f_p, f_q) > tol + efmax) or np.any(
+                        efmin > tol + np.maximum(f_p, f_q)
+                    ):
+                        self.edge_intersect(e, f)
+                continue
+
+            # --- Batch path (non-periodic) ---
+            js = np.array(box_im_raw, dtype=np.intp)
+
+            # Batch domain filter (replaces per-pair np.any calls)
+            e_fp  = bag_fp_c[i];  e_fq  = e_fp + bag_fdp_c[i]
+            efmax0 = e_fp[0] if e_fp[0] > e_fq[0] else e_fq[0]
+            efmax1 = e_fp[1] if e_fp[1] > e_fq[1] else e_fq[1]
+            efmin0 = e_fp[0] if e_fp[0] < e_fq[0] else e_fq[0]
+            efmin1 = e_fp[1] if e_fp[1] < e_fq[1] else e_fq[1]
+            f_fp  = bag_fp_c[js];  f_fq  = f_fp + bag_fdp_c[js]   # (k,2)
+            fmin  = np.minimum(f_fp, f_fq);  fmax = np.maximum(f_fp, f_fq)
+            domain_ok = (
+                (fmin[:, 0] > tol[0] + efmax0) | (fmin[:, 1] > tol[1] + efmax1) |
+                (efmin0 > tol[0] + fmax[:, 0]) | (efmin1 > tol[1] + fmax[:, 1])
+            )
+            js = js[domain_ok]
+            if len(js) == 0:
+                continue
+
+            # Batch intersection arithmetic (replaces per-pair edge_intersect calls)
+            e_pxy  = bag_p_c[i];   e_dpxy = bag_dp_c[i]
+            f_pxy  = bag_p_c[js];  f_dpxy = bag_dp_c[js]   # (k,2)
+            D   = e_dpxy[0] * f_dpxy[:, 1] - e_dpxy[1] * f_dpxy[:, 0]
+            nz  = D != 0
+            if not np.any(nz):
+                continue
+            D_s = np.where(nz, D, 1.0)
+            u   = e_pxy - f_pxy
+            s   = (f_dpxy[:, 0] * u[:, 1] - f_dpxy[:, 1] * u[:, 0]) / D_s
+            t   = (e_dpxy[0]    * u[:, 1] - e_dpxy[1]    * u[:, 0]) / D_s
+            hit = nz & (s > 0) & (s < 1) & (t > 0) & (t < 1)
+            if not np.any(hit):
+                continue
+
+            js2 = js[hit];  s2 = s[hit];  t2 = t[hit]
+            ze  = bag_z[i] + s2 * bag_dz[i]
+            zf  = bag_z[js2] + t2 * bag_dz[js2]
+            maxz = np.maximum(np.abs(ze), np.maximum(np.abs(zf),
+                   np.maximum(np.abs(bag_dz[i]), np.maximum(np.abs(bag_dz[js2]), 1e-10))))
+            near_eq = np.abs(ze - zf) <= 1e-4 * maxz
+            e_gt_f  = (~near_eq) & (ze > zf)
+            f_gt_e  = (~near_eq) & (zf > ze)
+
+            if np.any(e_gt_f):   # e above f: add breakpoint on f-lines
+                jj = js2[e_gt_f];  tt = t2[e_gt_f]
+                inner = bag_dp_c[jj, 0] * bag_d_c[i, 0] + bag_dp_c[jj, 1] * bag_d_c[i, 1]
+                vs = np.where(inner > 0, -bag_n[i], bag_n[i])
+                for k_idx in range(len(jj)):
+                    if vs[k_idx] != 0:
+                        self.add_line_bk(int(bag_li[jj[k_idx]]), int(bag_ei[jj[k_idx]]),
+                                         tt[k_idx], int(vs[k_idx]))
+
+            if np.any(f_gt_e):   # f above e: add breakpoint on e-line
+                jj2 = js2[f_gt_e];  ss2 = s2[f_gt_e]
+                inner2 = e_dpxy[0] * bag_d_c[jj2, 0] + e_dpxy[1] * bag_d_c[jj2, 1]
+                vs2 = np.where(inner2 > 0, -bag_n[jj2], bag_n[jj2])
+                e_li = int(bag_li[i]);  e_ei = int(bag_ei[i])
+                for k_idx in range(len(jj2)):
+                    if vs2[k_idx] != 0:
+                        self.add_line_bk(e_li, e_ei, ss2[k_idx], int(vs2[k_idx]))
+
+            if np.any(near_eq):  # rare: near-equal Z, re-evaluate with S
+                e_rec = bag_bis[i]
+                for k_idx in np.where(near_eq)[0]:
+                    self.edge_intersect(e_rec, bag_bis[js2[k_idx]])
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Intersections bis"))
 
