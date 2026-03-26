@@ -63,6 +63,7 @@ class SurfacePlayView(TemplateView):
         response = {}
         response['lines_by_visibility'] = lines_by_visibility
         response['origin'] = surf.XY(np.array(O)).tolist()
+        # response['domain'] = surf.domain_data()
 
         return HttpResponse(json.dumps(response), content_type='application/json')        
 

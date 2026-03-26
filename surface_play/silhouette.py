@@ -691,15 +691,15 @@ class Surface:
         self.line_bks = [[[] for j in range(len(l) - 1)] for l in self.lines]
         line, idx = self.intersections() # calcule les intersections/chgement de visi. Renvoie: point visible (long)
         # line, idx = 0, 0
-        for i, l in enumerate(self.lines): #debug
-           self.print("ligne:%i type:%s len:%i debut:[%0.2f,%0.2f] fin:[%0.2f,%0.2f]  chgt visi début:%i chgt visi fin:%i"%(i,l[0]['type'], 
-                                                                                                            len(l), *self.XY(np.array(self.S(*l['fp'][0]))), 
-                                                                                                            *self.XY(np.array(self.S(*l['fp'][-1]))), l['v'][0],  l['v'][-1]))
-           string = 'breaks : ['
-           for j in range(len(l) - 1):
-               for (s,v) in self.line_bks[i][j]:
-                   string+= "(%i, %i) "%(j,v)
-           self.print(string+']')
+        #for i, l in enumerate(self.lines): #debug
+        #   self.print("ligne:%i type:%s len:%i debut:[%0.2f,%0.2f] fin:[%0.2f,%0.2f]  chgt visi début:%i chgt visi fin:%i"%(i,l[0]['type'],
+        #                                                                                                        len(l), *self.XY(np.array(self.S(*l['fp'][0]))),
+        #                                                                                                        *self.XY(np.array(self.S(*l['fp'][-1]))), l['v'][0],  l['v'][-1]))
+        #   string = 'breaks : ['
+        #   for j in range(len(l) - 1):
+        #       for (s,v) in self.line_bks[i][j]:
+        #           string+= "(%i, %i) "%(j,v)
+        #   self.print(string+']')
         self.visibilities = {}
         # self.visibility(line, idx)  # propage la visibilité à toutes les lignes
         self.visibilite(line, idx)  # propage la visibilité à toutes les lignes
@@ -817,9 +817,16 @@ class Surface:
                 )  # ça monte dans le sens p, q. donc la visibilité augmente
                 r = (p + q) / 2
                 nu = np.array([-(q-p)[1], (q-p)[0]])
+                tol = (self.u_max - self.u_min + self.v_max - self.v_min) * 1e-7
                 for j in range(20): # bisection pour trouver le point précis, avec newton pour rester sur le contour
+                   if np.linalg.norm(q - p) < tol:
+                       break
                    a, b = (p+q)/2 - nu/2, (p+q)/2 + nu/2
-                   s = newton(NZbis, 0.5, args=(a[0], a[1], nu[0], nu[1]))
+                   try:
+                       s = newton(NZbis, 0.5, args=(a[0], a[1], nu[0], nu[1]), maxiter=50)
+                   except RuntimeError:
+                       self.print("Warning: Newton failed to converge in cusp bisection (iter %d)" % j)
+                       break
                    r = a + s * (b-a)
                    if np.inner(self.dirvec(p), self.dirvec(r)) < 0:
                        q = r
@@ -827,6 +834,14 @@ class Surface:
                        p = r
                    else:
                        print('problème de cusp!!!')
+                       break
+                vis_check = 1 if np.inner(self.dS(*r, *(q - p)), self.axis) > 0 else -1
+                if vis_check != vis:
+                    self.print("Warning: cusp vis sign flipped after Newton at [%0.4f, %0.4f], correcting" % (r[0], r[1]))
+                    vis = vis_check
+                if not (self.u_min <= r[0] <= self.u_max and self.v_min <= r[1] <= self.v_max):
+                    self.print("Warning: cusp at [%0.4f, %0.4f] outside domain [%0.2f,%0.2f]x[%0.2f,%0.2f]" % (
+                        r[0], r[1], self.u_min, self.u_max, self.v_min, self.v_max))
                 cusps.append((l[i], l[i + 1], 1 / 2, r))
                 # print(vis)
                 self.breaks["c"][l[i]] = (0.5, vis, len(cusps) - 1)
@@ -1247,16 +1262,18 @@ class Surface:
             return e["l_idx"], e["e_idx"] + 1
 
     def visibilite(self, line, idx):
-        # calcul de la visibilité des extrêmités des lignes via minimisation L1
-        # le point idx de la ligne line a la visibilité 0
+        # LP complet: V[j], cp[i], cq[i], b[k] variables libres; tcp, tcq, tb slacks L1.
+        # Toujours faisable (solution nulle satisfait toutes les contraintes).
+        # Minimize Σtcp + Σtcq + Σtb
         t0 = time.perf_counter()
         self.visibilities = {}
-
         m = len(self.lines)
+        self.opt_line_bks = self.line_bks
+        self.opt_cp = [float(self.lines[i][0]["v"]) for i in range(m)]
         if m == 0:
             return
 
-        # Build node index: ixfp tuple → integer
+        # Node index
         nodes = {}
         for l in self.lines:
             for pt in [tuple(l[0]["ixfp"]), tuple(l[-1]["ixfp"])]:
@@ -1264,12 +1281,30 @@ class Surface:
                     nodes[pt] = len(nodes)
         n = len(nodes)
 
-        # Source/dest node index and Δ_i = V_q - V_p for each line
         p_idx = [nodes[tuple(self.lines[i][0]["ixfp"])] for i in range(m)]
         q_idx = [nodes[tuple(self.lines[i][-1]["ixfp"])] for i in range(m)]
-        deltas = [self.propagation(i, 0, self.lines[i][0]["v"]) for i in range(m)]
 
-        # Find connected components via ixfp adjacency
+        orig_cp = [float(self.lines[i][0]["v"]) for i in range(m)]
+        orig_cq = [float(self.lines[i][-1]["v"]) for i in range(m)]
+
+        # Énumération globale des breakpoints
+        line_bps = [[] for _ in range(m)]
+        bp_vals = []
+        for i in range(m):
+            for j in range(len(self.lines[i]) - 1):
+                for s, v in self.line_bks[i][j]:
+                    line_bps[i].append(len(bp_vals))
+                    bp_vals.append(float(v))
+        B = len(bp_vals)
+
+        # Segments: (ligne i, nb de breakpoints dans le préfixe)
+        seg_info = []
+        for i in range(m):
+            for j in range(len(line_bps[i]) + 1):
+                seg_info.append((i, j))
+        nsegs = len(seg_info)
+
+        # Composantes connexes
         adj = defaultdict(list)
         for i in range(m):
             adj[p_idx[i]].append(i)
@@ -1291,71 +1326,123 @@ class Surface:
                         stack.append(nb)
             components.append(comp)
 
-        # LP variables: [V_0..V_{n-1}, s_0..s_{m-1}]
-        # Minimize Σ s_i
-        c = np.zeros(n + m)
-        c[n:] = 1.0
+        # Layout: [V(n), cp(m), cq(m), b(B), tcp(m), tcq(m), tb(B)]
+        i_V   = 0
+        i_cp  = n
+        i_cq  = n + m
+        i_b   = n + 2*m
+        i_tcp = n + 2*m + B
+        i_tcq = n + 3*m + B
+        i_tb  = n + 4*m + B
+        nvars = n + 4*m + 2*B
 
-        # Inequality constraints
-        rows, cols, vals, b_ub_list = [], [], [], []
-        row = 0
-        for i in range(m):
-            # V_q - V_p - s_i ≤ Δ_i
-            rows += [row, row, row]; cols += [q_idx[i], p_idx[i], n+i]; vals += [1.0, -1.0, -1.0]
-            b_ub_list.append(float(deltas[i])); row += 1
-            # -V_q + V_p - s_i ≤ -Δ_i
-            rows += [row, row, row]; cols += [q_idx[i], p_idx[i], n+i]; vals += [-1.0, 1.0, -1.0]
-            b_ub_list.append(float(-deltas[i])); row += 1
+        c_obj = np.zeros(nvars)
+        c_obj[i_tcp:i_tcp+m] = 1.0
+        c_obj[i_tcq:i_tcq+m] = 1.0
+        c_obj[i_tb:i_tb+B]   = 1.0
 
-        A_ub = csc_matrix((vals, (rows, cols)), shape=(row, n + m)) if row > 0 else None
-        b_ub = np.array(b_ub_list) if row > 0 else None
-
-        # Derive anchor endpoint and its visibility (same logic as old BFS)
-        v_start = self.lines[line][idx]["v"] if (idx == 0 or idx == len(self.lines[line]) - 1) else 0
-        anchor_vis = self.propagation(line, idx, v_start)
-        anchor_endpoint = self.lines[line][-1] if idx == 0 else self.lines[line][0]
-        anchor_pt = tuple(anchor_endpoint["ixfp"])
-        anchor_main = nodes[anchor_pt]
-
-        # Equality constraints: one anchor per connected component
-        main_comp_lines = next(comp for comp in components if line in comp)
+        # Égalités: delta + ancre
         eq_rows, eq_cols, eq_vals, b_eq_list = [], [], [], []
-        for k, comp in enumerate(components):
-            if comp is main_comp_lines:
-                a, val = anchor_main, float(anchor_vis)
-            else:
-                a, val = p_idx[comp[0]], 0.0
-            eq_rows.append(k); eq_cols.append(a); eq_vals.append(1.0)
-            b_eq_list.append(val)
+        eq_row = 0
 
-        A_eq = csc_matrix((eq_vals, (eq_rows, eq_cols)), shape=(len(components), n + m))
+        # (1) V[q] - V[p] - cp[i] + cq[i] - Σb[k on i] = 0
+        for i in range(m):
+            bk_cols = [i_b+k for k in line_bps[i]]
+            cr = [i_V+q_idx[i], i_V+p_idx[i], i_cp+i, i_cq+i] + bk_cols
+            vr = [1., -1., -1., 1.] + [-1.]*len(bk_cols)
+            eq_rows += [eq_row]*len(cr); eq_cols += cr; eq_vals += vr
+            b_eq_list.append(0.); eq_row += 1
+
+        # (2) Ancre: cp[line] + V[p_line] + Σ_prefix b[k] = 0
+        main_comp_lines = next(comp for comp in components if line in comp)
+        prefix_count = sum(len(self.line_bks[line][j]) for j in range(idx))
+        anchor_prefix_bks = [i_b+k for k in line_bps[line][:prefix_count]]
+        for comp in components:
+            if comp is main_comp_lines:
+                cr = [i_cp+line, i_V+p_idx[line]] + anchor_prefix_bks
+                vr = [1., 1.] + [1.]*len(anchor_prefix_bks)
+                eq_rows += [eq_row]*len(cr); eq_cols += cr; eq_vals += vr
+                b_eq_list.append(0.)
+            else:
+                eq_rows.append(eq_row); eq_cols.append(i_V+p_idx[comp[0]]); eq_vals.append(1.)
+                b_eq_list.append(0.)
+            eq_row += 1
+
+        A_eq = csc_matrix((eq_vals, (eq_rows, eq_cols)), shape=(eq_row, nvars))
         b_eq = np.array(b_eq_list)
 
-        bounds = [(None, None)] * n + [(0, None)] * m
+        # Inégalités: vis ≤ 0 (dures) + slacks L1
+        rows, cols, vals, b_ub_list = [], [], [], []
+        row = 0
 
-        result = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+        # (3) vis ≤ 0 par segment: cp[i] + V[p_i] + Σ_prefix b[k] ≤ 0
+        for seg_i, seg_j in seg_info:
+            prefix_bk = [i_b+k for k in line_bps[seg_i][:seg_j]]
+            cr = [i_cp+seg_i, i_V+p_idx[seg_i]] + prefix_bk
+            rows += [row]*len(cr); cols += cr; vals += [1., 1.] + [1.]*len(prefix_bk)
+            b_ub_list.append(0.); row += 1
+
+        # (4) Slacks L1 pour cp, cq, b
+        for i in range(m):
+            rows += [row,row]; cols += [i_cp+i, i_tcp+i]; vals += [1., -1.]
+            b_ub_list.append(orig_cp[i]); row += 1
+            rows += [row,row]; cols += [i_cp+i, i_tcp+i]; vals += [-1., -1.]
+            b_ub_list.append(-orig_cp[i]); row += 1
+            rows += [row,row]; cols += [i_cq+i, i_tcq+i]; vals += [1., -1.]
+            b_ub_list.append(orig_cq[i]); row += 1
+            rows += [row,row]; cols += [i_cq+i, i_tcq+i]; vals += [-1., -1.]
+            b_ub_list.append(-orig_cq[i]); row += 1
+        for k in range(B):
+            rows += [row,row]; cols += [i_b+k, i_tb+k]; vals += [1., -1.]
+            b_ub_list.append(bp_vals[k]); row += 1
+            rows += [row,row]; cols += [i_b+k, i_tb+k]; vals += [-1., -1.]
+            b_ub_list.append(-bp_vals[k]); row += 1
+
+        A_ub = csc_matrix((vals, (rows, cols)), shape=(row, nvars)) if row > 0 else None
+        b_ub = np.array(b_ub_list) if row > 0 else None
+
+        # V, cp, cq, b libres; tcp, tcq, tb ≥ 0
+        bounds = [(None, None)]*(n + 2*m + B) + [(0, None)]*(2*m + B)
+
+        result = linprog(c_obj, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
                          bounds=bounds, method='highs')
 
         if not result.success:
             self.print("L1 visibility LP failed: " + result.message)
             return
 
-        V = result.x[:n]
+        V      = result.x[i_V:i_V+n]
+        opt_cp = result.x[i_cp:i_cp+m]
+        opt_b  = result.x[i_b:i_b+B]
+
         for pt, j in nodes.items():
             self.visibilities[pt] = int(round(V[j]))
+        self.opt_cp = [round(float(opt_cp[i])) for i in range(m)]
 
-        self.print("[%0.3fs] Visibilité L1 (n=%d, m=%d, %d composantes)" %
-                   (time.perf_counter() - t0, n, m, len(components)))
+        # Reconstruire line_bks avec valeurs optimisées
+        self.opt_line_bks = [[[] for _ in range(len(self.lines[i]) - 1)] for i in range(m)]
+        bp_counter = 0
+        for i in range(m):
+            for j in range(len(self.lines[i]) - 1):
+                for s, v in self.line_bks[i][j]:
+                    self.opt_line_bks[i][j].append((s, round(opt_b[bp_counter])))
+                    bp_counter += 1
+
+        self.print("[%0.3fs] Visibilité LP (n=%d, m=%d, B=%d, segs=%d, %d comp)" %
+                   (time.perf_counter() - t0, n, m, B, nsegs, len(components)))
 
     def plot_for_browser(self):
         t0 = time.perf_counter()
 
+        bks = getattr(self, 'opt_line_bks', self.line_bks)
+        opt_cp = getattr(self, 'opt_cp', None)
         lines = defaultdict(list)  # clé = visibilité, valeur = liste de lignes. ligne = [x_1,y_1,x_2,y_2...]
         for i, l in enumerate(self.lines):
             type = "?"
             if l[0]["type"] == "??":
                 continue
-            vis = l[0]["v"]
+            cp = float(opt_cp[i]) if opt_cp is not None else float(l[0]["v"])
+            vis = cp
             if tuple(l[0]["ixfp"]) in self.visibilities:
                 type = l[0]["type"][1]
                 vis += self.visibilities[tuple(l[0]["ixfp"])]
@@ -1363,7 +1450,7 @@ class Surface:
             for j in range(len(l) - 1):
                 p, q = l[j]["fp"], l[j + 1]["fp"]
                 line.append(self.XY(np.array(self.S(*p))))
-                for s, v in self.line_bks[i][j]:
+                for s, v in bks[i][j]:
                     line.append(self.XY(np.array(self.S(*((1 - s) * p + s * q)))))
                     lines[min(vis, 0)].append(line)
                     vis = vis + v
@@ -1373,7 +1460,7 @@ class Surface:
             lines[min(vis, 0)].append(line)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
 
-        return lines 
+        return lines
 
     def plot_for_terminal(self, T0):
 
@@ -1465,13 +1552,12 @@ class Surface:
                 ax.set(proj_type="ortho")
                 ax.view_init(elev=ax.elev, azim=ax.azim)
                 ax.set_axis_off()
-                #ax.scatter(*self.S(*self.origine))# debug
                 self.plot_lines(ax)
-                #for i, l in enumerate(self.lines): # debug
-                #    for j in range(len(l) - 1):
-                #        for (s,v) in self.line_bks[i][j]:
-                #            p, q = l[j]["fp"], l[j + 1]["fp"]
-                #            ax.scatter(*self.S(*((1 - s) * p + s * q)))
+            if event.key == "d":
+                try:
+                    self.plot_domain()
+                except Exception as e:
+                    print("plot_domain error:", e)
             plt.show()
 
         # plt.rcParams['keymap.left'].remove('left')
@@ -1485,6 +1571,88 @@ class Surface:
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
         self.print("[%0.3fs] %s" % (time.perf_counter() - T0, "Total"))
         plt.show()
+
+    def plot_domain(self):
+        from matplotlib.collections import LineCollection
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.set_aspect('equal')
+        ax.set_title('Domaine (u,v)  —  rouge=contour  bleu=bord  gris=connexion  ★=cusp  ●=breakpoint')
+
+        # Maillage en gris clair (LineCollection pour la performance)
+        segs = np.stack([self.eds["fp"], self.eds["fp"] + self.eds["fdp"]], axis=1)
+        ax.add_collection(LineCollection(segs, colors='lightgray', linewidths=0.4, zorder=1))
+
+        # Lignes silhouette
+        line_colors = {'b': 'steelblue', 'c': 'crimson', '?': 'dimgray'}
+        for i, l in enumerate(self.lines):
+            fp = l["fp"]
+            t = l[0]["type"]
+            col = line_colors.get(t[1] if len(t) > 1 else '?', 'dimgray')
+            ax.plot(fp[:, 0], fp[:, 1], color=col, lw=1.5, zorder=3)
+
+            # Indice de ligne + changements de vis aux extrémités
+            mid = fp[len(fp) // 2]
+            ax.annotate(f'{i} ({l[0]["v"]},{l[-1]["v"]})', mid,
+                        fontsize=6, color=col, zorder=5,
+                        bbox=dict(boxstyle='round,pad=0.1', fc='white', alpha=0.5, ec='none'))
+
+            # Breakpoints
+            for j in range(len(l) - 1):
+                p, q = l[j]["fp"], l[j + 1]["fp"]
+                for s, v in self.line_bks[i][j]:
+                    bk = (1 - s) * p + s * q
+                    ax.scatter(bk[0], bk[1], s=25, color='darkorange', zorder=4)
+                    ax.annotate(f'{v:+d}', bk, fontsize=6, color='darkorange', zorder=5)
+
+        # Cusps
+        if hasattr(self, 'cusps') and len(self.cusps) > 0:
+            ax.scatter(self.cusps["fp"][:, 0], self.cusps["fp"][:, 1],
+                       s=80, color='magenta', marker='*', zorder=6, label='cusps')
+            ax.legend(fontsize=8)
+
+        # Extrémités des lignes (noeuds du graphe)
+        for l in self.lines:
+            for pt in [l[0]["fp"], l[-1]["fp"]]:
+                ax.scatter(pt[0], pt[1], s=15, color='black', zorder=5)
+
+        ax.set_xlabel('u'); ax.set_ylabel('v')
+        plt.tight_layout()
+        plt.show(block=False)
+
+    def domain_data(self):
+        # Données domaine (u,v) pour la vue de débogage dans le navigateur
+        border_edges = []
+        for e in self.beds:
+            border_edges.append([e["fp"].tolist(), (e["fp"] + e["fdp"]).tolist()])
+
+        lines = []
+        for i, l in enumerate(self.lines):
+            if l[0]["type"] == "??":
+                continue
+            pts = l["fp"].tolist()
+            bks = []
+            for j in range(len(l) - 1):
+                p, q = l[j]["fp"], l[j + 1]["fp"]
+                for s, v in self.line_bks[i][j]:
+                    bks.append({"pt": ((1 - s) * p + s * q).tolist(), "v": int(v)})
+            lines.append({
+                "idx": i,
+                "type": l[0]["type"],
+                "v0": int(l[0]["v"]),
+                "v1": int(l[-1]["v"]),
+                "pts": pts,
+                "bks": bks,
+            })
+
+        cusps = self.cusps["fp"].tolist() if hasattr(self, "cusps") and len(self.cusps) > 0 else []
+
+        return {
+            "bounds": [self.u_min, self.u_max, self.v_min, self.v_max],
+            "res": self.res,
+            "border_edges": border_edges,
+            "lines": lines,
+            "cusps": cusps,
+        }
 
     def json_out(self):
         pass
@@ -1530,18 +1698,26 @@ class Surface:
         if self.Z(self.dS(*p0, *ker)) < 0:
             ker = -ker
 
+        if np.inner(ker, Nb) <= 0:
+            return 0  # silhouette sortant du domaine, pas de changement de visibilité
+
         Tb = dp / norm(dp)  # tangent au bord
 
         Np = np.array(self.SD_jac(*p0, *self.axis))  # normale au pli
         if np.inner(Np, ker) < 0:
             Np = -Np  # dirigée vers le pli supérieur
 
-        if (
-            np.inner(ker, Nb) > 0
-        ):  # il y a changement de visibilité, la surface est vers le pli supérieur
-            v = 1 if np.inner(Tb, Np) > 0 else -1
-            return v
-        return 0
+        inner = np.inner(Tb, Np)
+        if abs(inner) > 0.05:  # cas non dégénéré : formule standard
+            return 1 if inner > 0 else -1
+
+        # Cas dégénéré (cusp proche du bord) : ker ≈ Tb donc Np ≈ ±Nb et Tb·Np ≈ 0.
+        # On évalue SN_axis en un point légèrement décalé le long de Tb pour capturer
+        # les termes d'ordre supérieur qui déterminent le signe.
+        eps = (self.u_max - self.u_min + self.v_max - self.v_min) / self.res
+        sn = self.SN_axis(*(p0 + eps * Tb), *self.axis)
+        self.print("Warning: near-degenerate border-contour crossing at [%0.4f,%0.4f] (Tb·Np=%.4f), using SN_axis offset (sn=%.4f)" % (p0[0], p0[1], inner, sn))
+        return 1 if sn > 0 else -1
 
     def vis_chge(
         self, p, dir
@@ -1597,14 +1773,22 @@ class Surface:
                 np.cross(dp, u) / D
             )  # coord barycentriques de l'intersection sur chacune des arêtes
             if s > 0 and s < 1 and t > 0 and t < 1:
-                if zp + s * dzp > zq + t * dzq:
+                ze_lin = zp + s * dzp
+                zf_lin = zq + t * dzq
+                z_tol = 1e-4 * max(abs(ze_lin), abs(zf_lin), abs(dzp), abs(dzq), 1e-10)
+                if abs(ze_lin - zf_lin) <= z_tol:
+                    # Z-difference too small for reliable comparison — evaluate actual surface Z
+                    ze = float(self.Z(np.array(self.S(*(e["fp"] + s * e["fdp"])))))
+                    zf = float(self.Z(np.array(self.S(*(f["fp"] + t * f["fdp"])))))
+                else:
+                    ze, zf = ze_lin, zf_lin
+                if ze > zf:
                     v = -e["n"] if np.inner(dq, e["d"]) > 0 else e["n"]
                     if v != 0:  # v= 0 pour les arêtes fictives
                         self.add_line_bk(
                             f["l_idx"], f["e_idx"], t, v
                         )  # e est audessus de f
-
-                elif zp + s * dzp < zq + t * dzq:
+                elif ze < zf:
                     v = -f["n"] if np.inner(dp, f["d"]) > 0 else f["n"]
                     if v != 0:
                         self.add_line_bk(
@@ -1693,12 +1877,15 @@ class Surface:
         return l
 
     def plot_lines(self, ax): # utilisé uniquement dans 'plot_for_terminal'
+        bks = getattr(self, 'opt_line_bks', self.line_bks)
+        opt_cp = getattr(self, 'opt_cp', None)
         visible_lines = []  # tracées en dernier
         for i, l in enumerate(self.lines):
             type = "?"
             # if l[0]["type"] == "??":
             #     continue
-            vis = l[0]["v"]
+            cp = float(opt_cp[i]) if opt_cp is not None else float(l[0]["v"])
+            vis = cp
             if tuple(l[0]["ixfp"]) in self.visibilities:
                 type = l[0]["type"][1]
                 vis += self.visibilities[tuple(l[0]["ixfp"])]
@@ -1706,7 +1893,7 @@ class Surface:
             for j in range(len(l) - 1):
                 p, q = l[j]["fp"], l[j + 1]["fp"]
                 line.append(p)
-                for s, v in self.line_bks[i][j]:
+                for s, v in bks[i][j]:
                     line.append((1 - s) * p + s * q)
                     if vis == 0:
                         visible_lines.append(line)

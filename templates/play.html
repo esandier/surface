@@ -17,6 +17,11 @@
             <a href="{% url 'surfaces' %}" class="glyph">
                 <span class="fa-regular fa-rectangle-list"></span>
             </a>
+            <!-- domain toggle (debugging only)
+            <a id="domain-toggle" class="glyph" style="cursor:pointer; opacity:0.3" title="Toggle domain view">
+                <span class="fa-regular fa-map"></span>
+            </a>
+            -->
         </h1>
     </div>
 
@@ -25,6 +30,13 @@
         <svg id="svgbox" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet" class="position-absolute w-100 h-100" style="overflow: visible; pointer-events:none">
             <g id="svg" transform="translate(0 0) scale(1 1)" style="pointer-events:none"></g>
         </svg>
+        <!-- domain panel (debugging only)
+        <div id="domain-panel" style="display:none; position:absolute; top:8px; right:8px; width:360px; height:360px; background:rgba(255,255,255,0.93); border:1px solid #bbb; border-radius:6px; overflow:hidden; z-index:10;">
+            <svg id="domain-svg" width="100%" height="100%" style="cursor:grab">
+                <g id="domain-g"></g>
+            </svg>
+        </div>
+        -->
     </div>
 
 </div>
@@ -279,6 +291,7 @@
         spinner.replaceWith(downloadButton);
         downloadButton.style.visibility = "visible";
         prepareDownload();
+        // if (data.domain) updateDomain(data.domain);
     }
 
     /* ---------------- SVG EXPORT ---------------- */
@@ -292,5 +305,143 @@
         downloadButton.href = href;
         downloadButton.download = "{{ surface.name }}.svg";
     }
+
+    /* ---------------- DOMAIN PANEL (debugging only — uncomment to enable) ----------------
+    const domainPanel = document.getElementById("domain-panel");
+    const domainSvg = document.getElementById("domain-svg");
+    const domainG = document.getElementById("domain-g");
+    const domainToggle = document.getElementById("domain-toggle");
+
+    let domainData = null;
+
+    // Pan/zoom state
+    let dpTx = 0, dpTy = 0, dpScale = 1;
+    let dpDragging = false, dpDx = 0, dpDy = 0;
+
+    domainToggle.addEventListener("click", () => {
+        if (domainPanel.style.display === "none") {
+            domainPanel.style.display = "block";
+            domainToggle.style.opacity = "1";
+            if (domainData) renderDomain();
+        } else {
+            domainPanel.style.display = "none";
+            domainToggle.style.opacity = "0.3";
+        }
+    });
+
+    domainSvg.addEventListener("wheel", e => {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.15 : 1/1.15;
+        const rect = domainSvg.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        dpTx = mx + factor * (dpTx - mx);
+        dpTy = my + factor * (dpTy - my);
+        dpScale *= factor;
+        applyDomainTransform();
+    }, {passive: false});
+
+    domainSvg.addEventListener("mousedown", e => {
+        dpDragging = true;
+        dpDx = e.clientX - dpTx;
+        dpDy = e.clientY - dpTy;
+        domainSvg.style.cursor = "grabbing";
+    });
+    window.addEventListener("mousemove", e => {
+        if (!dpDragging) return;
+        dpTx = e.clientX - dpDx;
+        dpTy = e.clientY - dpDy;
+        applyDomainTransform();
+    });
+    window.addEventListener("mouseup", () => {
+        dpDragging = false;
+        domainSvg.style.cursor = "grab";
+    });
+
+    function applyDomainTransform() {
+        domainG.setAttribute("transform", `translate(${dpTx},${dpTy}) scale(${dpScale})`);
+        const inv = 1 / dpScale;
+        for (const el of domainG.querySelectorAll("[data-base-fs]"))
+            el.setAttribute("font-size", (parseFloat(el.dataset.baseFs) * inv).toFixed(2));
+        for (const el of domainG.querySelectorAll("[data-base-r]"))
+            el.setAttribute("r", (parseFloat(el.dataset.baseR) * inv).toFixed(2));
+    }
+
+    function renderDomain() {
+        if (!domainData) return;
+        const d = domainData;
+        const W = domainSvg.clientWidth || 360;
+        const H = domainSvg.clientHeight || 360;
+        const pad = 24;
+        const [uMin, uMax, vMin, vMax] = d.bounds;
+        const du = uMax - uMin, dv = vMax - vMin;
+        const sx = (W - 2*pad) / du;
+        const sy = (H - 2*pad) / dv;
+
+        // Map domain coords to SVG pixel coords
+        const px = u => pad + (u - uMin) * sx;
+        const py = v => H - pad - (v - vMin) * sy;
+
+        // Reset transform
+        dpTx = 0; dpTy = 0; dpScale = 1;
+        applyDomainTransform();
+
+        let html = "";
+
+        // Triangle grid
+        if (d.res) {
+            const res = d.res;
+            const us = Array.from({length: res+1}, (_, i) => uMin + i * du / res);
+            const vs = Array.from({length: res+1}, (_, j) => vMin + j * dv / res);
+            // Horizontal lines
+            for (let j = 0; j <= res; j++) {
+                html += `<line x1="${px(us[0])}" y1="${py(vs[j])}" x2="${px(us[res])}" y2="${py(vs[j])}" stroke="#ddd" stroke-width="0.4" vector-effect="non-scaling-stroke"/>`;
+            }
+            // Vertical lines
+            for (let i = 0; i <= res; i++) {
+                html += `<line x1="${px(us[i])}" y1="${py(vs[0])}" x2="${px(us[i])}" y2="${py(vs[res])}" stroke="#ddd" stroke-width="0.4" vector-effect="non-scaling-stroke"/>`;
+            }
+            // Diagonals (bottom-left to top-right) — only at moderate resolution
+            if (res <= 80) {
+                for (let i = 0; i < res; i++) {
+                    for (let j = 0; j < res; j++) {
+                        html += `<line x1="${px(us[i])}" y1="${py(vs[j])}" x2="${px(us[i+1])}" y2="${py(vs[j+1])}" stroke="#ddd" stroke-width="0.4" vector-effect="non-scaling-stroke"/>`;
+                    }
+                }
+            }
+        }
+
+        // Lines
+        const typeColor = {"contour": "red", "border": "#3399ff", "??": "#aaa"};
+        for (const line of d.lines) {
+            const col = typeColor[line.type] || "#aaa";
+            // Draw the polyline
+            if (line.pts && line.pts.length > 0) {
+                const points = line.pts.map(p => `${px(p[0])},${py(p[1])}`).join(" ");
+                html += `<polyline points="${points}" fill="none" stroke="${col}" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`;
+            }
+            // Breakpoints
+            for (const bk of (line.bks || [])) {
+                const bx = px(bk.pt[0]), by = py(bk.pt[1]);
+                html += `<circle cx="${bx}" cy="${by}" r="3" fill="orange" stroke="none" data-base-r="3"/>`;
+                html += `<text x="${bx+4}" y="${by-3}" font-size="8" fill="orange" data-base-fs="8">${bk.v}</text>`;
+            }
+        }
+
+        // Cusps (magenta stars)
+        for (const cp of (d.cusps || [])) {
+            const cx = px(cp[0]), cy = py(cp[1]);
+            html += `<text x="${cx}" y="${cy}" font-size="12" fill="magenta" text-anchor="middle" dominant-baseline="middle" data-base-fs="12">★</text>`;
+        }
+
+        domainG.innerHTML = html;
+    }
+
+    // Called from drawSVG when data arrives
+    function updateDomain(d) {
+        domainData = d;
+        if (domainPanel.style.display !== "none") renderDomain();
+    }
+    ---------------- END DOMAIN PANEL ---------------- */
 </script>
 {% endblock %}
