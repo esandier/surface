@@ -12,22 +12,6 @@ from surface_play.models import SurfaceRecord
 from .silhouette import *
 import json
 
-_surf_cache = {}  # (formula fields, resolution) -> triangulated Surface object
-
-def _get_surf(rec, resolution):
-    key = (rec.X, rec.Y, rec.Z, rec.parameter_names,
-           rec.u_min, rec.u_max, rec.v_min, rec.v_max,
-           rec.u_identify, rec.v_identify, resolution)
-    if key not in _surf_cache:
-        if len(_surf_cache) > 8:
-            _surf_cache.clear()
-        surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names,
-                       bounds=(rec.u_min, rec.u_max, rec.v_min, rec.v_max),
-                       quotient=(rec.u_identify, rec.v_identify))
-        surf.triangulate(resolution)
-        _surf_cache[key] = surf
-    return _surf_cache[key]
-
 class SurfacePlayView(TemplateView):
     template_name = "play.html"
 
@@ -52,7 +36,8 @@ class SurfacePlayView(TemplateView):
         
     def post(self, request, pk):
         rec = get_object_or_404(SurfaceRecord, pk=pk)
-        surf = _get_surf(rec, settings.RESOLUTION)
+        surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
+        surf.triangulate(settings.RESOLUTION)
 
         data = json.loads(request.body.decode())
         I = data['I']

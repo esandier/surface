@@ -19,9 +19,6 @@ import sympy as sp
 import numpy as np
 import math
 import rtree as rt
-import jax
-import jax.numpy as jnp
-jax.config.update("jax_enable_x64", True)
 
 from numpy.linalg import norm
 from numpy.core.records import fromrecords
@@ -29,7 +26,6 @@ from numpy.core.records import fromarrays
 from numpy.linalg import svd
 from scipy.optimize import newton, linprog
 from scipy.sparse import csc_matrix
-from scipy.spatial import cKDTree
 
 from sympy.utilities import lambdify
 from collections import namedtuple
@@ -248,6 +244,10 @@ class Surface:
         # On perturbe S, et on fabrique les fonctions lambdifiées
         u, v = sp.symbols(param_names)
         d_u, d_v = self.u_max - self.u_min, self.v_max - self.v_min
+        ax_x, ax_y, ax_z = sp.symbols("ax_x ax_y ax_z")
+        ax = sp.Array([ax_x, ax_y, ax_z])
+        du, dv = sp.symbols("du dv")
+
         # Le choix de la perturbation est délicat. En gros il faut une dérivée suffisament grande 
         # (de l'ordre de dérivée de X divisé par resolution), amplitude petite pour que ça se voie pas, oscillation pas trop
         # grande pour pas perturber les cusps.
@@ -263,113 +263,50 @@ class Surface:
             ]
         )
 
-        # Build JAX functions via autodiff — no symbolic derivatives needed.
-        # Lambdify each component of S_sp individually (avoids SymPy Array wrapping issues).
-        _jax_mod = {
-            "sin": jnp.sin, "cos": jnp.cos, "tan": jnp.tan,
-            "exp": jnp.exp, "log": jnp.log, "sqrt": jnp.sqrt,
-            "pi": float(sp.pi), "E": float(sp.E),
-            "Abs": jnp.abs, "sign": jnp.sign,
-            "asin": jnp.arcsin, "acos": jnp.arccos, "atan": jnp.arctan,
-            "atan2": jnp.arctan2, "sinh": jnp.sinh, "cosh": jnp.cosh,
-            "tanh": jnp.tanh, "asinh": jnp.arcsinh, "acosh": jnp.arccosh,
-            "atanh": jnp.arctanh,
-        }
-        _Sx_lam = lambdify([u, v], S_sp[0], _jax_mod)
-        _Sy_lam = lambdify([u, v], S_sp[1], _jax_mod)
-        _Sz_lam = lambdify([u, v], S_sp[2], _jax_mod)
+        # dérivée de S.N dans la direction (du, dv)
+        # DS_axis_sp = sp.diff(S_sp,u).dot([ax_x,ax_y,ax_z]) * du + sp.diff(S_sp,v).dot([ax_x,ax_y,ax_z]) * dv
+        Su_sp = sp.diff(S_sp, u)  # dérivée par rapport à u, comme expression sympy
+        Sv_sp = sp.diff(S_sp, v)
+        Suu_sp = sp.diff(Su_sp, u)  # dérivée par rapport à u, comme expression sympy
+        Suv_sp = sp.diff(Su_sp, v)
+        Svv_sp = sp.diff(Sv_sp, v)  # dérivée par rapport à u, comme expression sympy
 
-        # Scalar function S: (float, float) → jnp.array of shape (3,)
-        def _S_s(u_, v_):
-            return jnp.stack([_Sx_lam(u_, v_), _Sy_lam(u_, v_), _Sz_lam(u_, v_)])
+        def cross(X, Y):
+            return sp.Array(
+                [
+                    X[1] * Y[2] - X[2] * Y[1],
+                    X[2] * Y[0] - X[0] * Y[2],
+                    X[0] * Y[1] - X[1] * Y[0],
+                ]
+            )
 
-        # All derivatives via JAX autodiff
-        _Su_s  = jax.jacobian(_S_s, argnums=0)   # ∂S/∂u → (3,)
-        _Sv_s  = jax.jacobian(_S_s, argnums=1)   # ∂S/∂v → (3,)
-        _Suu_s = jax.jacobian(_Su_s, argnums=0)  # ∂²S/∂u² → (3,)
-        _Suv_s = jax.jacobian(_Su_s, argnums=1)  # ∂²S/∂u∂v → (3,)
-        _Svv_s = jax.jacobian(_Sv_s, argnums=1)  # ∂²S/∂v² → (3,)
+        def dot(X, Y):
+            return X[0] * Y[0] + X[1] * Y[1] + X[2] * Y[2]
 
-        def _SN_s(u_, v_):
-            return jnp.cross(_Su_s(u_, v_), _Sv_s(u_, v_))
+        SN_sp = cross(
+            Su_sp, Sv_sp
+        )  # vecteur normal, non normé, comme expression sympy,
+        SN_axis_sp = dot(SN_sp, ax)  # produit scalaire du précédent avec un axe
+        SD_jac_sp = sp.Array(
+            [
+                dot(
+                    cross(Suu_sp, Sv_sp) + cross(Su_sp, Suv_sp), ax
+                ),  # grad du jacobien, orth aux contours
+                dot(cross(Suv_sp, Sv_sp) + cross(Su_sp, Svv_sp), ax),
+            ]
+        )
 
-        def _SN_axis_s(u_, v_, ax_x_, ax_y_, ax_z_):
-            return jnp.dot(_SN_s(u_, v_), jnp.array([ax_x_, ax_y_, ax_z_]))
+        self.S = lambdify([u, v], S_sp, "numpy")# applied to a numpy array, creates a list of three np.arrays of the same dimension
+        self.Su = lambdify([u, v], Su_sp, "numpy")
+        self.Sv = lambdify([u, v], Sv_sp, "numpy")
+        self.Suu = lambdify([u, v], Suu_sp, "numpy")
+        self.Suv = lambdify([u, v], Suv_sp, "numpy")
+        self.Svv = lambdify([u, v], Svv_sp, "numpy")
+        self.SN = lambdify([u, v], SN_sp, "numpy")
+        self.SN_axis = lambdify([u, v, ax_x, ax_y, ax_z], SN_axis_sp, "numpy")
+        self.SD_jac = lambdify([u, v, ax_x, ax_y, ax_z], SD_jac_sp, "numpy")
 
-        def _SD_jac_s(u_, v_, ax_x_, ax_y_, ax_z_):
-            grads = jax.grad(_SN_axis_s, argnums=(0, 1))(u_, v_, ax_x_, ax_y_, ax_z_)
-            return jnp.array(grads)
-
-        # JIT-compiled scalar versions (lazy: compiled on first call)
-        _S_jit       = jax.jit(_S_s)
-        _Su_jit      = jax.jit(_Su_s)
-        _Sv_jit      = jax.jit(_Sv_s)
-        _Suu_jit     = jax.jit(_Suu_s)
-        _Suv_jit     = jax.jit(_Suv_s)
-        _Svv_jit     = jax.jit(_Svv_s)
-        _SN_jit      = jax.jit(_SN_s)
-        _SN_axis_jit = jax.jit(_SN_axis_s)
-        _SD_jac_jit  = jax.jit(_SD_jac_s)
-
-        # Vectorized (vmap) + JIT versions
-        _S_vec       = jax.jit(jax.vmap(_S_s))
-        _Su_vec      = jax.jit(jax.vmap(_Su_s))
-        _Sv_vec      = jax.jit(jax.vmap(_Sv_s))
-        _Suu_vec     = jax.jit(jax.vmap(_Suu_s))
-        _Suv_vec     = jax.jit(jax.vmap(_Suv_s))
-        _Svv_vec     = jax.jit(jax.vmap(_Svv_s))
-        _SN_vec      = jax.jit(jax.vmap(_SN_s))
-        _SN_axis_vec = jax.jit(jax.vmap(_SN_axis_s, in_axes=(0, 0, None, None, None)))
-        _SD_jac_vec  = jax.jit(jax.vmap(_SD_jac_s, in_axes=(0, 0, None, None, None)))
-
-        # Backward-compatible wrappers: accept scalar/1D/2D numpy inputs,
-        # return list of 3 arrays [X, Y, Z] matching the old lambdify interface.
-        def _wrap3(jit_fn, vec_fn):
-            def f(u, v):
-                u_a = np.asarray(u, dtype=np.float64)
-                v_a = np.asarray(v, dtype=np.float64)
-                shape = u_a.shape
-                if shape == ():
-                    r = np.array(jit_fn(float(u_a), float(v_a)))  # (3,)
-                    return [r[0], r[1], r[2]]
-                r = np.array(vec_fn(jnp.array(u_a.ravel()), jnp.array(v_a.ravel())))  # (N,3)
-                r = r.reshape(shape + (3,))
-                return [r[..., 0], r[..., 1], r[..., 2]]
-            return f
-
-        def _wrap_scalar_out(jit_fn, vec_fn):
-            def f(u, v, *extra):
-                u_a = np.asarray(u, dtype=np.float64)
-                v_a = np.asarray(v, dtype=np.float64)
-                shape = u_a.shape
-                if shape == ():
-                    return float(jit_fn(float(u_a), float(v_a), *[float(e) for e in extra]))
-                r = np.array(vec_fn(jnp.array(u_a.ravel()), jnp.array(v_a.ravel()), *extra))
-                return r.reshape(shape)
-            return f
-
-        def _wrap_vec2_out(jit_fn, vec_fn):
-            def f(u, v, *extra):
-                u_a = np.asarray(u, dtype=np.float64)
-                v_a = np.asarray(v, dtype=np.float64)
-                shape = u_a.shape
-                if shape == ():
-                    return np.array(jit_fn(float(u_a), float(v_a), *[float(e) for e in extra]))  # (2,)
-                r = np.array(vec_fn(jnp.array(u_a.ravel()), jnp.array(v_a.ravel()), *extra))  # (N,2)
-                return r.reshape(shape + (2,))
-            return f
-
-        self.S       = _wrap3(_S_jit,   _S_vec)
-        self.Su      = _wrap3(_Su_jit,  _Su_vec)
-        self.Sv      = _wrap3(_Sv_jit,  _Sv_vec)
-        self.Suu     = _wrap3(_Suu_jit, _Suu_vec)
-        self.Suv     = _wrap3(_Suv_jit, _Suv_vec)
-        self.Svv     = _wrap3(_Svv_jit, _Svv_vec)
-        self.SN      = _wrap3(_SN_jit,  _SN_vec)
-        self.SN_axis = _wrap_scalar_out(_SN_axis_jit, _SN_axis_vec)
-        self.SD_jac  = _wrap_vec2_out(_SD_jac_jit,  _SD_jac_vec)
-
-        # Normal grid for for_3js (also warms up JIT for SN)
+        # finalement, on fabrique une grille de normales pour for_3js
         self.NX_grid, self.NY_grid, self.NZ_grid = self.SN(u_grid, v_grid)
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "init surface"))
@@ -1062,7 +999,6 @@ class Surface:
         # print('connect !!')
         # distances entre les composantes connexes, links dit quels points sont reliés : indice de ligne, indice dans la ligne
         trees = {}
-        pts   = {}
         l_index = {}
         e_index = {}
         links = np.empty(
@@ -1072,18 +1008,42 @@ class Surface:
         distances = np.empty((len(self.cc_s), len(self.cc_s)), "f")
         for i, cc in enumerate(self.cc_s):
             distances[i, i] = 0
-            trimmed = [trim(self.lines[l]) for l in cc]
             l_index[i] = np.concatenate(
-                [np.full((len(tr[0]),), l) for tr, l in zip(trimmed, cc)]
+                [np.full((len(trim(self.lines[l])[0]),), l) for l in cc]
             )
-            e_index[i] = np.concatenate([tr[0] for tr in trimmed])
-            pts[i]     = np.concatenate([tr[1]["ixfp"] for tr in trimmed])
-            trees[i]   = cKDTree(pts[i])
+            # e_index[i] = np.concatenate([np.arange(len(self.lines[l])) for l in cc])
+            e_index[i] = np.concatenate([trim(self.lines[l])[0] for l in cc])
+            bb = np.concatenate(
+                (
+                    np.concatenate([trim(self.lines[l])[1]["ixfp"] for l in cc]),
+                    np.concatenate([trim(self.lines[l])[1]["ixfp"] for l in cc]),
+                ),
+                axis=1,
+            )
+            trees[i] = rt.index.Index(
+                generator_function(bb), properties=rt.index.Property()
+            )
             for j in range(i):
-                # Exact closest pair between components i and j in domain space
-                dists, idx_j = trees[j].query(pts[i])
-                i_point = int(np.argmin(dists))
-                j_point = int(idx_j[i_point])
+                i_point, j_point = len(e_index[i]) // 2, len(e_index[j]) // 2
+                for k in range(2):
+                    j_point = list(
+                        trees[j].nearest(
+                            tuple(
+                                self.lines[l_index[i][i_point]][e_index[i][i_point]][
+                                    "ixfp"
+                                ]
+                            )
+                        )
+                    )[0]
+                    i_point = list(
+                        trees[i].nearest(
+                            tuple(
+                                self.lines[l_index[j][j_point]][e_index[j][j_point]][
+                                    "ixfp"
+                                ]
+                            )
+                        )
+                    )[0]
                 # print('ipoint %i jpoint %i' % (i_point, j_point))
                 il, ie, jl, je = (
                     l_index[i][i_point],
@@ -1268,6 +1228,8 @@ class Surface:
         )  # pas clair par quoi il faut multiplier, avec .O1 pose des problèmes en raccord cylindre
 
         p = rt.index.Property()
+        # p.leaf_capacity = 50
+        # p.fill_factor = 0.7
         bb_im = np.concatenate(
             (
                 np.minimum(bag_bis["p"], bag_bis["p"] + bag_bis["dp"]),
@@ -1277,83 +1239,18 @@ class Surface:
         )
         index_im = rt.index.Index(generator_function(bb_im), properties=p)
 
-        # Collect all candidate pairs (j > i) from rtree in one pass
-        pair_i, pair_j = [], []
-        for i in range(len(bag_bis)):
-            for j in index_im.intersection(bb_im[i]):
-                if j > i:
-                    pair_i.append(i)
-                    pair_j.append(j)
-
-        if pair_i:
-            I = np.array(pair_i, dtype=np.intp)
-            J = np.array(pair_j, dtype=np.intp)
-
-            # Domain proximity filter (vectorised) — exclude adjacent segments
-            e_fp  = bag_bis["fp"][I]
-            e_fdp = bag_bis["fdp"][I]
-            f_fp  = bag_bis["fp"][J].copy()
-            f_fdp = bag_bis["fdp"][J]
-            if self.u_identify != "no":
-                u_range = self.u_max - self.u_min
-                f_fp[:, 0] += np.round((e_fp[:, 0] - f_fp[:, 0]) / u_range) * u_range
-            if self.v_identify != "no":
-                v_range = self.v_max - self.v_min
-                f_fp[:, 1] += np.round((e_fp[:, 1] - f_fp[:, 1]) / v_range) * v_range
-            efmax = np.maximum(e_fp, e_fp + e_fdp)
-            efmin = np.minimum(e_fp, e_fp + e_fdp)
-            fmax  = np.maximum(f_fp, f_fp + f_fdp)
-            fmin  = np.minimum(f_fp, f_fp + f_fdp)
-            keep  = np.any(fmin > tol + efmax, axis=1) | np.any(efmin > tol + fmax, axis=1)
-            I, J  = I[keep], J[keep]
-
-            # Screen-space intersection test (vectorised)
-            p   = bag_bis["p"][I]
-            dp  = bag_bis["dp"][I]
-            q   = bag_bis["p"][J]
-            dq  = bag_bis["dp"][J]
-            uv  = p - q
-            D   = dp[:, 0]*dq[:, 1] - dp[:, 1]*dq[:, 0]
-            nz  = D != 0
-            Ds  = np.where(nz, D, 1.0)
-            s   = (dq[:, 0]*uv[:, 1] - dq[:, 1]*uv[:, 0]) / Ds
-            t   = (dp[:, 0]*uv[:, 1] - dp[:, 1]*uv[:, 0]) / Ds
-            valid = nz & (s > 0) & (s < 1) & (t > 0) & (t < 1)
-
-            # Precompute Z and visibility sign for all valid pairs
-            vk = np.where(valid)[0]
-            if len(vk):
-                Iv, Jv = I[vk], J[vk]
-                sv, tv = s[vk], t[vk]
-                ze_lin = bag_bis["z"][Iv] + sv * bag_bis["dz"][Iv]
-                zf_lin = bag_bis["z"][Jv] + tv * bag_bis["dz"][Jv]
-                dz_max = np.maximum(np.abs(bag_bis["dz"][Iv]), np.abs(bag_bis["dz"][Jv]))
-                z_tol  = 1e-4 * np.maximum(np.maximum(np.abs(ze_lin), np.abs(zf_lin)), np.maximum(dz_max, 1e-10))
-                needs_eval = np.abs(ze_lin - zf_lin) <= z_tol
-                ze, zf = ze_lin.copy(), zf_lin.copy()
-                # Precompute visibility sign decisions
-                d_I = bag_bis["d"][Iv]
-                d_J = bag_bis["d"][Jv]
-                n_I = bag_bis["n"][Iv]
-                n_J = bag_bis["n"][Jv]
-                inner_dq_eI = dq[vk, 0]*d_I[:, 0] + dq[vk, 1]*d_I[:, 1]
-                inner_dp_fJ = dp[vk, 0]*d_J[:, 0] + dp[vk, 1]*d_J[:, 1]
-                v_e_above = np.where(inner_dq_eI > 0, -n_I, n_I)
-                v_f_above = np.where(inner_dp_fJ > 0, -n_J, n_J)
-                l_I = bag_bis["l_idx"][Iv];  e_I = bag_bis["e_idx"][Iv]
-                l_J = bag_bis["l_idx"][Jv];  e_J = bag_bis["e_idx"][Jv]
-                for k in range(len(vk)):
-                    if needs_eval[k]:
-                        ze[k] = float(self.Z(np.array(self.S(*(bag_bis["fp"][Iv[k]] + sv[k] * bag_bis["fdp"][Iv[k]])))))
-                        zf[k] = float(self.Z(np.array(self.S(*(bag_bis["fp"][Jv[k]] + tv[k] * bag_bis["fdp"][Jv[k]])))))
-                    if ze[k] > zf[k]:
-                        v = int(v_e_above[k])
-                        if v != 0:
-                            self.add_line_bk(int(l_J[k]), int(e_J[k]), float(tv[k]), v)
-                    elif ze[k] < zf[k]:
-                        v = int(v_f_above[k])
-                        if v != 0:
-                            self.add_line_bk(int(l_I[k]), int(e_I[k]), float(sv[k]), v)
+        for i, e in enumerate(bag_bis):
+            box_im = [j for j in index_im.intersection(bb_im[i]) if j > i]
+            e_p, e_q = e["fp"], e["fp"] + e["fdp"]
+            efmax, efmin = np.maximum(e_p, e_q), np.minimum(e_p, e_q)
+            for j in box_im:
+                f = bag_bis[j]
+                f_p = self.close(e_p, f["fp"])
+                f_q = f_p + f["fdp"]
+                if np.any(np.minimum(f_p, f_q) > tol + efmax) or np.any(
+                    efmin > tol + np.maximum(f_p, f_q)
+                ):
+                    self.edge_intersect(e, f)
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Intersections bis"))
 
@@ -1374,9 +1271,6 @@ class Surface:
         self.opt_line_bks = self.line_bks
         self.opt_cp = [float(self.lines[i][0]["v"]) for i in range(m)]
         if m == 0:
-            return
-        if getattr(self, 'use_lp', True) is False:
-            self.print("[%0.3fs] Visibilité LP désactivée" % (time.perf_counter() - t0,))
             return
 
         # Node index
@@ -1542,57 +1436,30 @@ class Surface:
 
         bks = getattr(self, 'opt_line_bks', self.line_bks)
         opt_cp = getattr(self, 'opt_cp', None)
-
-        # Phase 1: collect all (u,v) evaluation points across all lines and breakpoints
-        fp_parts = []
-        per_line = []
-        idx = 0
+        lines = defaultdict(list)  # clé = visibilité, valeur = liste de lignes. ligne = [x_1,y_1,x_2,y_2...]
         for i, l in enumerate(self.lines):
+            type = "?"
             if l[0]["type"] == "??":
-                per_line.append(None)
                 continue
-            fp = np.array([pt["fp"] for pt in l])
-            n = len(l)
-            fp_parts.append(fp)
-            bp_info = []
-            for j in range(n - 1):
-                for s, v in bks[i][j]:
-                    bp_info.append((idx + n + len(bp_info), j, v))
-                    fp_parts.append(((1 - s) * fp[j] + s * fp[j + 1])[np.newaxis])
-            per_line.append((idx, n, bp_info))
-            idx += n + len(bp_info)
-
-        # Phase 2: one batch evaluation of S and XY
-        if fp_parts:
-            all_fp = np.concatenate(fp_parts, axis=0)
-            all_xy = self.XY(np.array(self.S(all_fp[:, 0], all_fp[:, 1]))).T
-
-        # Phase 3: reconstruct polylines using precomputed xy values
-        lines = defaultdict(list)
-        for i, l in enumerate(self.lines):
-            info = per_line[i]
-            if info is None:
-                continue
-            start, n, bp_info = info
             cp = float(opt_cp[i]) if opt_cp is not None else float(l[0]["v"])
             vis = cp
             if tuple(l[0]["ixfp"]) in self.visibilities:
+                type = l[0]["type"][1]
                 vis += self.visibilities[tuple(l[0]["ixfp"])]
-            bp_by_seg = defaultdict(list)
-            for bp_idx, seg_j, v in bp_info:
-                bp_by_seg[seg_j].append((bp_idx, v))
             line = []
-            for j in range(n - 1):
-                line.append(all_xy[start + j])
-                for bp_idx, v in bp_by_seg[j]:
-                    line.append(all_xy[bp_idx])
+            for j in range(len(l) - 1):
+                p, q = l[j]["fp"], l[j + 1]["fp"]
+                line.append(self.XY(np.array(self.S(*p))))
+                for s, v in bks[i][j]:
+                    line.append(self.XY(np.array(self.S(*((1 - s) * p + s * q)))))
                     lines[min(vis, 0)].append(line)
-                    vis += v
-                    line = [line[-1]]
-            line.append(all_xy[start + n - 1])
+                    vis = vis + v
+                    line = [line[-1]] # coordonnées x,y du dernier point
+            last_pt = l[-1]["fp"]
+            line.append(self.XY(np.array(self.S(*last_pt))))
             lines[min(vis, 0)].append(line)
-
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
+
         return lines
 
     def plot_for_terminal(self, T0):
