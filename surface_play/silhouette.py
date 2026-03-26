@@ -32,7 +32,6 @@ from collections import namedtuple
 from collections import deque
 from collections import defaultdict
 import bisect
-import numba
 
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
@@ -127,112 +126,6 @@ bagtype_bis = np.dtype(
         ("fdp", "f8", 2),
     ]
 )
-
-@numba.njit(cache=True)
-def _intersect_kernel(
-    p, dp, z, dz, n, d, l_idx, e_idx, fp, fdp,
-    pair_i, pair_j,
-    tol_u, tol_v,
-    out_l, out_e, out_s, out_v,
-    need_S_ij, need_S_st,
-):
-    """
-    Process all candidate edge pairs (from rtree) with pure arithmetic.
-    For non-periodic surfaces only (simple_close = identity).
-
-    Outputs (l_idx, e_idx, s, v) for each visibility change to add.
-    Flags pairs whose Z comparison needs surface evaluation into need_S_*.
-    Returns (k, k_S): count of outputs and count of S-fallback pairs.
-    """
-    k = 0
-    k_S = 0
-    N = len(pair_i)
-    for m in range(N):
-        i = pair_i[m]
-        j = pair_j[m]
-
-        # Domain (parameter space) overlap check — same as Python loop
-        epi0 = fp[i, 0]; epi1 = fp[i, 1]
-        eqi0 = epi0 + fdp[i, 0]; eqi1 = epi1 + fdp[i, 1]
-        fpj0 = fp[j, 0]; fpj1 = fp[j, 1]
-        fqj0 = fpj0 + fdp[j, 0]; fqj1 = fpj1 + fdp[j, 1]
-
-        efmax0 = epi0 if epi0 > eqi0 else eqi0
-        efmax1 = epi1 if epi1 > eqi1 else eqi1
-        efmin0 = epi0 if epi0 < eqi0 else eqi0
-        efmin1 = epi1 if epi1 < eqi1 else eqi1
-        fmin0 = fpj0 if fpj0 < fqj0 else fqj0
-        fmin1 = fpj1 if fpj1 < fqj1 else fqj1
-        fmax0 = fpj0 if fpj0 > fqj0 else fqj0
-        fmax1 = fpj1 if fpj1 > fqj1 else fqj1
-
-        # Mirror Python: call edge_intersect only when domain ranges are disjoint
-        # (np.any(fmin > tol+efmax) or np.any(efmin > tol+fmax))
-        if not (fmin0 > tol_u + efmax0 or fmin1 > tol_v + efmax1 or
-                efmin0 > tol_u + fmax0 or efmin1 > tol_v + fmax1):
-            continue
-
-        # Intersection arithmetic (image plane: p, dp)
-        pi0 = p[i, 0]; pi1 = p[i, 1]
-        dpi0 = dp[i, 0]; dpi1 = dp[i, 1]
-        pj0 = p[j, 0]; pj1 = p[j, 1]
-        dpj0 = dp[j, 0]; dpj1 = dp[j, 1]
-
-        D = dpi0 * dpj1 - dpi1 * dpj0
-        if D == 0.0:
-            continue
-        ux = pi0 - pj0
-        uy = pi1 - pj1
-        s = (dpj0 * uy - dpj1 * ux) / D
-        t = (dpi0 * uy - dpi1 * ux) / D
-        if s <= 0.0 or s >= 1.0 or t <= 0.0 or t >= 1.0:
-            continue
-
-        # Z comparison
-        ze = z[i] + s * dz[i]
-        zf = z[j] + t * dz[j]
-        az1 = ze if ze > 0.0 else -ze
-        az2 = zf if zf > 0.0 else -zf
-        az3 = dz[i] if dz[i] > 0.0 else -dz[i]
-        az4 = dz[j] if dz[j] > 0.0 else -dz[j]
-        maxz = az1 if az1 > az2 else az2
-        if az3 > maxz: maxz = az3
-        if az4 > maxz: maxz = az4
-        if maxz < 1e-10: maxz = 1e-10
-        z_tol = 1e-4 * maxz
-
-        diff = ze - zf
-        if diff < 0.0: diff = -diff
-        if diff <= z_tol:
-            # Needs surface eval — flag for Python fallback
-            need_S_ij[k_S, 0] = i
-            need_S_ij[k_S, 1] = j
-            need_S_st[k_S, 0] = s
-            need_S_st[k_S, 1] = t
-            k_S += 1
-            continue
-
-        if ze > zf:
-            inner = dpj0 * d[i, 0] + dpj1 * d[i, 1]
-            v = -n[i] if inner > 0.0 else n[i]
-            if v != 0:
-                out_l[k] = l_idx[j]
-                out_e[k] = e_idx[j]
-                out_s[k] = t
-                out_v[k] = v
-                k += 1
-        else:
-            inner = dpi0 * d[j, 0] + dpi1 * d[j, 1]
-            v = -n[j] if inner > 0.0 else n[j]
-            if v != 0:
-                out_l[k] = l_idx[i]
-                out_e[k] = e_idx[i]
-                out_s[k] = s
-                out_v[k] = v
-                k += 1
-
-    return k, k_S
-
 
 def make_lines(
     ps, qs, blocks=set()
@@ -1346,77 +1239,18 @@ class Surface:
         )
         index_im = rt.index.Index(generator_function(bb_im), properties=p)
 
-        use_numba = (self.u_identify == "no" and self.v_identify == "no")
-        if use_numba:
-            # Extract flat contiguous arrays from bag_bis for Numba
-            p_arr   = np.ascontiguousarray(bag_bis["p"],    dtype=np.float64)
-            dp_arr  = np.ascontiguousarray(bag_bis["dp"],   dtype=np.float64)
-            z_arr   = np.ascontiguousarray(bag_bis["z"],    dtype=np.float64)
-            dz_arr  = np.ascontiguousarray(bag_bis["dz"],   dtype=np.float64)
-            n_arr   = np.ascontiguousarray(bag_bis["n"],    dtype=np.int64)
-            d_arr   = np.ascontiguousarray(bag_bis["d"],    dtype=np.float64)
-            li_arr  = np.ascontiguousarray(bag_bis["l_idx"],dtype=np.int64)
-            ei_arr  = np.ascontiguousarray(bag_bis["e_idx"],dtype=np.int64)
-            fp_arr  = np.ascontiguousarray(bag_bis["fp"],   dtype=np.float64)
-            fdp_arr = np.ascontiguousarray(bag_bis["fdp"],  dtype=np.float64)
-
-            # Collect candidate pairs from rtree (Python — can't avoid)
-            pair_i_list, pair_j_list = [], []
-            for i in range(len(bag_bis)):
-                for j in index_im.intersection(bb_im[i]):
-                    if j > i:
-                        pair_i_list.append(i)
-                        pair_j_list.append(j)
-            pair_i = np.array(pair_i_list, dtype=np.int64)
-            pair_j = np.array(pair_j_list, dtype=np.int64)
-
-            N = len(pair_i)
-            out_l      = np.empty(N, dtype=np.int64)
-            out_e      = np.empty(N, dtype=np.int64)
-            out_s      = np.empty(N, dtype=np.float64)
-            out_v      = np.empty(N, dtype=np.int64)
-            need_S_ij  = np.empty((N, 2), dtype=np.int64)
-            need_S_st  = np.empty((N, 2), dtype=np.float64)
-
-            k, k_S = _intersect_kernel(
-                p_arr, dp_arr, z_arr, dz_arr, n_arr, d_arr,
-                li_arr, ei_arr, fp_arr, fdp_arr,
-                pair_i, pair_j, tol[0], tol[1],
-                out_l, out_e, out_s, out_v, need_S_ij, need_S_st,
-            )
-
-            for m in range(k):
-                self.add_line_bk(int(out_l[m]), int(out_e[m]), out_s[m], int(out_v[m]))
-
-            # Python fallback for rare near-equal-Z cases
-            for m in range(k_S):
-                ii, jj = int(need_S_ij[m, 0]), int(need_S_ij[m, 1])
-                s_val, t_val = need_S_st[m, 0], need_S_st[m, 1]
-                ee, ff = bag_bis[ii], bag_bis[jj]
-                ze = float(self.Z(np.array(self.S(*(ee["fp"] + s_val * ee["fdp"])))))
-                zf = float(self.Z(np.array(self.S(*(ff["fp"] + t_val * ff["fdp"])))))
-                if ze > zf:
-                    v = -ee["n"] if np.inner(ff["dp"], ee["d"]) > 0 else ee["n"]
-                    if v != 0:
-                        self.add_line_bk(int(ff["l_idx"]), int(ff["e_idx"]), t_val, v)
-                elif ze < zf:
-                    v = -ff["n"] if np.inner(ee["dp"], ff["d"]) > 0 else ff["n"]
-                    if v != 0:
-                        self.add_line_bk(int(ee["l_idx"]), int(ee["e_idx"]), s_val, v)
-        else:
-            # Original Python loop (periodic surfaces — close() is non-trivial)
-            for i, e in enumerate(bag_bis):
-                box_im = [j for j in index_im.intersection(bb_im[i]) if j > i]
-                e_p, e_q = e["fp"], e["fp"] + e["fdp"]
-                efmax, efmin = np.maximum(e_p, e_q), np.minimum(e_p, e_q)
-                for j in box_im:
-                    f = bag_bis[j]
-                    f_p = self.close(e_p, f["fp"])
-                    f_q = f_p + f["fdp"]
-                    if np.any(np.minimum(f_p, f_q) > tol + efmax) or np.any(
-                        efmin > tol + np.maximum(f_p, f_q)
-                    ):
-                        self.edge_intersect(e, f)
+        for i, e in enumerate(bag_bis):
+            box_im = [j for j in index_im.intersection(bb_im[i]) if j > i]
+            e_p, e_q = e["fp"], e["fp"] + e["fdp"]
+            efmax, efmin = np.maximum(e_p, e_q), np.minimum(e_p, e_q)
+            for j in box_im:
+                f = bag_bis[j]
+                f_p = self.close(e_p, f["fp"])
+                f_q = f_p + f["fdp"]
+                if np.any(np.minimum(f_p, f_q) > tol + efmax) or np.any(
+                    efmin > tol + np.maximum(f_p, f_q)
+                ):
+                    self.edge_intersect(e, f)
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Intersections bis"))
 
