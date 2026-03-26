@@ -855,6 +855,26 @@ class Surface:
     def break_lines(self):
         t0 = time.perf_counter()
 
+        # Precompute dirint for all beds at s=0 (p endpoint) and s=1 (q endpoint), vectorized.
+        # dirint_pre[s, k] = 2D direction for beds[k] evaluated at parameter s.
+        if len(self.beds) > 0:
+            dirint_pre = np.empty((2, len(self.beds), 2))
+            nu_u  = self.beds["dir"][:, 0];  nu_v  = self.beds["dir"][:, 1]
+            fdp_u = self.beds["fdp"][:, 0];  fdp_v = self.beds["fdp"][:, 1]
+            for si, fp_arr in enumerate([self.beds["fp"],
+                                         self.beds["fp"] + self.beds["fdp"]]):
+                u, v   = fp_arr[:, 0], fp_arr[:, 1]
+                Su_v   = np.array(self.Su(u, v))             # (3, N)
+                Sv_v   = np.array(self.Sv(u, v))             # (3, N)
+                dS_nu  = Su_v * nu_u  + Sv_v * nu_v          # (3, N)
+                dS_fdp = Su_v * fdp_u + Sv_v * fdp_v         # (3, N)
+                vec_xy = self.XY(dS_nu)                      # (2, N)
+                t_xy   = self.XY(dS_fdp)                     # (2, N)
+                t_n    = t_xy / np.sqrt((t_xy**2).sum(axis=0))
+                inner  = (vec_xy * t_n).sum(axis=0)
+                vp     = vec_xy - inner * t_n
+                dirint_pre[si] = (vp / np.sqrt((vp**2).sum(axis=0))).T  # (N, 2)
+
         for l in self.b_lines:
             lines = [[]]  # chaque b_line est découpée
             for index, i in enumerate(l):
@@ -869,7 +889,7 @@ class Surface:
                 fq = e["fp"] if i < 0 else e["fp"] + e["fdp"]
 
                 lines[-1].append(
-                    ("bb", e_idx + self.b_index, 0, self.dirint(e, sens), fp, fp)
+                    ("bb", e_idx + self.b_index, 0, dirint_pre[sens, e_idx], fp, fp)
                 )  # la direction intérieure est calculée au point.
                 if index == len(l) - 1:
                     continue  # le dernier point est à part, il sert juste à fermer
@@ -908,7 +928,7 @@ class Surface:
                             "bb",
                             e_idx + self.b_index,
                             0,
-                            self.dirint(e, 1 - sens),
+                            dirint_pre[1 - sens, e_idx],
                             fq,
                             fq,
                         )
@@ -929,7 +949,21 @@ class Surface:
                 self.lines.append(np_l)
 
         for l in self.c_lines:
-            lines = [[]]  # chaque b_line est découpée
+            # Fast path: no cusps on this line → direct vectorized construction
+            if not any(i in self.breaks["c"] for i in l[:-1]):
+                idxs = np.asarray(l, dtype=np.intp)
+                pts  = self.c_pts[idxs]
+                np_l = np.empty(len(idxs), dtype=line_pt_type)
+                np_l["type"]  = "cc"
+                np_l["e"]     = pts["e"]
+                np_l["v"]     = 0
+                np_l["d"]     = pts["d"]
+                np_l["fp"]    = pts["fp"]
+                np_l["ixfp"]  = pts["fp"]
+                self.lines.append(np_l)
+                continue
+
+            lines = [[]]  # chaque b_line est découpée (cusps present)
 
             for index, i in enumerate(l):
                 point = self.c_pts[i]
@@ -1207,9 +1241,6 @@ class Surface:
             [u_tol, v_tol]
         )  # pas clair par quoi il faut multiplier, avec .O1 pose des problèmes en raccord cylindre
 
-        p = rt.index.Property()
-        # p.leaf_capacity = 50
-        # p.fill_factor = 0.7
         bb_im = np.concatenate(
             (
                 np.minimum(bag_bis["p"], bag_bis["p"] + bag_bis["dp"]),
@@ -1217,10 +1248,8 @@ class Surface:
             ),
             axis=1,
         )
-        index_im = rt.index.Index(generator_function(bb_im), properties=p)
 
         use_batch = (self.u_identify == "no" and self.v_identify == "no")
-        # Pre-extract contiguous arrays for fast fancy-indexing in the batch path
         if use_batch:
             bag_p_c   = np.ascontiguousarray(bag_bis["p"])
             bag_dp_c  = np.ascontiguousarray(bag_bis["dp"])
@@ -1233,13 +1262,109 @@ class Surface:
             bag_li    = bag_bis["l_idx"]
             bag_ei    = bag_bis["e_idx"]
 
-        for i in range(len(bag_bis)):
-            box_im_raw = [j for j in index_im.intersection(bb_im[i]) if j > i]
-            if not box_im_raw:
-                continue
+            # Fully vectorized sweep-line pair collection — no Python loop over edges.
+            # Sort edges by x_min; for each sorted edge i find all j>i with x_min[j]<=x_max[i]
+            # (x-overlap guaranteed by construction), then filter y-overlap.
+            n = len(bag_bis)
+            order   = np.argsort(bb_im[:, 0])
+            xmin_s  = bb_im[order, 0];  xmax_s = bb_im[order, 2]
+            ymin_s  = bb_im[order, 1];  ymax_s = bb_im[order, 3]
+            end_idx = np.searchsorted(xmin_s, xmax_s, side='right')
+            counts  = np.maximum(0, end_idx - np.arange(1, n + 1)).astype(np.intp)
+            total_pairs = int(counts.sum())
 
-            if not use_batch:
-                # Original per-pair loop (periodic surfaces)
+            if total_pairs > 0:
+                offsets = np.empty(n + 1, dtype=np.intp)
+                offsets[0] = 0
+                np.cumsum(counts, out=offsets[1:])
+                i_s = np.repeat(np.arange(n, dtype=np.intp), counts)
+                j_s = i_s + 1 + (np.arange(total_pairs, dtype=np.intp) - offsets[i_s])
+
+                # y-overlap filter
+                y_ok = (ymin_s[j_s] <= ymax_s[i_s]) & (ymin_s[i_s] <= ymax_s[j_s])
+                i_s = i_s[y_ok];  j_s = j_s[y_ok]
+
+                if len(i_s) > 0:
+                    # Map sorted → original indices, enforce lo < hi
+                    i_orig = order[i_s];  j_orig = order[j_s]
+                    lo = np.minimum(i_orig, j_orig);  hi = np.maximum(i_orig, j_orig)
+
+                    # Domain filter: keep pairs whose param-space intervals are disjoint
+                    e_fp_d = bag_fp_c[lo];  e_fq_d = e_fp_d + bag_fdp_c[lo]
+                    f_fp_d = bag_fp_c[hi];  f_fq_d = f_fp_d + bag_fdp_c[hi]
+                    emax_d = np.maximum(e_fp_d, e_fq_d)
+                    emin_d = np.minimum(e_fp_d, e_fq_d)
+                    fmax_d = np.maximum(f_fp_d, f_fq_d)
+                    fmin_d = np.minimum(f_fp_d, f_fq_d)
+                    dom_ok = (
+                        (fmin_d[:, 0] > tol[0] + emax_d[:, 0]) |
+                        (fmin_d[:, 1] > tol[1] + emax_d[:, 1]) |
+                        (emin_d[:, 0] > tol[0] + fmax_d[:, 0]) |
+                        (emin_d[:, 1] > tol[1] + fmax_d[:, 1])
+                    )
+                    ip = lo[dom_ok];  jp = hi[dom_ok]
+
+                    if len(ip) > 0:
+                        # Batch intersection arithmetic
+                        e_pxy  = bag_p_c[ip];  e_dpxy = bag_dp_c[ip]
+                        f_pxy  = bag_p_c[jp];  f_dpxy = bag_dp_c[jp]
+                        D   = e_dpxy[:, 0] * f_dpxy[:, 1] - e_dpxy[:, 1] * f_dpxy[:, 0]
+                        nz  = D != 0
+                        D_s = np.where(nz, D, 1.0)
+                        uv  = e_pxy - f_pxy
+                        s   = (f_dpxy[:, 0] * uv[:, 1] - f_dpxy[:, 1] * uv[:, 0]) / D_s
+                        t   = (e_dpxy[:, 0] * uv[:, 1] - e_dpxy[:, 1] * uv[:, 0]) / D_s
+                        hit = nz & (s > 0) & (s < 1) & (t > 0) & (t < 1)
+
+                        if np.any(hit):
+                            ip_h = ip[hit];  jp_h = jp[hit]
+                            s_h  = s[hit];   t_h  = t[hit]
+                            ze   = bag_z[ip_h] + s_h * bag_dz[ip_h]
+                            zf   = bag_z[jp_h] + t_h * bag_dz[jp_h]
+                            maxz = np.maximum(np.abs(ze),
+                                   np.maximum(np.abs(zf),
+                                   np.maximum(np.abs(bag_dz[ip_h]),
+                                   np.maximum(np.abs(bag_dz[jp_h]), 1e-10))))
+                            near_eq = np.abs(ze - zf) <= 1e-4 * maxz
+                            e_gt_f  = (~near_eq) & (ze > zf)
+                            f_gt_e  = (~near_eq) & (zf > ze)
+
+                            if np.any(e_gt_f):  # ip above jp: breakpoint on jp-line at t
+                                ip_egt = ip_h[e_gt_f];  jp_egt = jp_h[e_gt_f]
+                                tt_egt = t_h[e_gt_f]
+                                inner = (bag_dp_c[jp_egt, 0] * bag_d_c[ip_egt, 0] +
+                                         bag_dp_c[jp_egt, 1] * bag_d_c[ip_egt, 1])
+                                vs = np.where(inner > 0, -bag_n[ip_egt], bag_n[ip_egt])
+                                for k_idx in range(len(jp_egt)):
+                                    if vs[k_idx] != 0:
+                                        self.add_line_bk(int(bag_li[jp_egt[k_idx]]),
+                                                         int(bag_ei[jp_egt[k_idx]]),
+                                                         tt_egt[k_idx], int(vs[k_idx]))
+
+                            if np.any(f_gt_e):  # jp above ip: breakpoint on ip-line at s
+                                ip_fgt = ip_h[f_gt_e];  jp_fgt = jp_h[f_gt_e]
+                                ss_fgt = s_h[f_gt_e]
+                                inner2 = (bag_dp_c[ip_fgt, 0] * bag_d_c[jp_fgt, 0] +
+                                          bag_dp_c[ip_fgt, 1] * bag_d_c[jp_fgt, 1])
+                                vs2 = np.where(inner2 > 0, -bag_n[jp_fgt], bag_n[jp_fgt])
+                                for k_idx in range(len(ip_fgt)):
+                                    if vs2[k_idx] != 0:
+                                        self.add_line_bk(int(bag_li[ip_fgt[k_idx]]),
+                                                         int(bag_ei[ip_fgt[k_idx]]),
+                                                         ss_fgt[k_idx], int(vs2[k_idx]))
+
+                            if np.any(near_eq):  # rare: near-equal Z, re-evaluate with S
+                                for k_idx in np.where(near_eq)[0]:
+                                    self.edge_intersect(bag_bis[ip_h[k_idx]],
+                                                        bag_bis[jp_h[k_idx]])
+        else:
+            # Periodic surfaces: rtree + per-pair loop (close() needed for wrap-around)
+            rt_prop  = rt.index.Property()
+            index_im = rt.index.Index(generator_function(bb_im), properties=rt_prop)
+            for i in range(len(bag_bis)):
+                box_im_raw = [j for j in index_im.intersection(bb_im[i]) if j > i]
+                if not box_im_raw:
+                    continue
                 e = bag_bis[i]
                 e_p_fp = e["fp"]
                 e_q_fp = e_p_fp + e["fdp"]
@@ -1253,73 +1378,6 @@ class Surface:
                         efmin > tol + np.maximum(f_p, f_q)
                     ):
                         self.edge_intersect(e, f)
-                continue
-
-            # --- Batch path (non-periodic) ---
-            js = np.array(box_im_raw, dtype=np.intp)
-
-            # Batch domain filter (replaces per-pair np.any calls)
-            e_fp  = bag_fp_c[i];  e_fq  = e_fp + bag_fdp_c[i]
-            efmax0 = e_fp[0] if e_fp[0] > e_fq[0] else e_fq[0]
-            efmax1 = e_fp[1] if e_fp[1] > e_fq[1] else e_fq[1]
-            efmin0 = e_fp[0] if e_fp[0] < e_fq[0] else e_fq[0]
-            efmin1 = e_fp[1] if e_fp[1] < e_fq[1] else e_fq[1]
-            f_fp  = bag_fp_c[js];  f_fq  = f_fp + bag_fdp_c[js]   # (k,2)
-            fmin  = np.minimum(f_fp, f_fq);  fmax = np.maximum(f_fp, f_fq)
-            domain_ok = (
-                (fmin[:, 0] > tol[0] + efmax0) | (fmin[:, 1] > tol[1] + efmax1) |
-                (efmin0 > tol[0] + fmax[:, 0]) | (efmin1 > tol[1] + fmax[:, 1])
-            )
-            js = js[domain_ok]
-            if len(js) == 0:
-                continue
-
-            # Batch intersection arithmetic (replaces per-pair edge_intersect calls)
-            e_pxy  = bag_p_c[i];   e_dpxy = bag_dp_c[i]
-            f_pxy  = bag_p_c[js];  f_dpxy = bag_dp_c[js]   # (k,2)
-            D   = e_dpxy[0] * f_dpxy[:, 1] - e_dpxy[1] * f_dpxy[:, 0]
-            nz  = D != 0
-            if not np.any(nz):
-                continue
-            D_s = np.where(nz, D, 1.0)
-            u   = e_pxy - f_pxy
-            s   = (f_dpxy[:, 0] * u[:, 1] - f_dpxy[:, 1] * u[:, 0]) / D_s
-            t   = (e_dpxy[0]    * u[:, 1] - e_dpxy[1]    * u[:, 0]) / D_s
-            hit = nz & (s > 0) & (s < 1) & (t > 0) & (t < 1)
-            if not np.any(hit):
-                continue
-
-            js2 = js[hit];  s2 = s[hit];  t2 = t[hit]
-            ze  = bag_z[i] + s2 * bag_dz[i]
-            zf  = bag_z[js2] + t2 * bag_dz[js2]
-            maxz = np.maximum(np.abs(ze), np.maximum(np.abs(zf),
-                   np.maximum(np.abs(bag_dz[i]), np.maximum(np.abs(bag_dz[js2]), 1e-10))))
-            near_eq = np.abs(ze - zf) <= 1e-4 * maxz
-            e_gt_f  = (~near_eq) & (ze > zf)
-            f_gt_e  = (~near_eq) & (zf > ze)
-
-            if np.any(e_gt_f):   # e above f: add breakpoint on f-lines
-                jj = js2[e_gt_f];  tt = t2[e_gt_f]
-                inner = bag_dp_c[jj, 0] * bag_d_c[i, 0] + bag_dp_c[jj, 1] * bag_d_c[i, 1]
-                vs = np.where(inner > 0, -bag_n[i], bag_n[i])
-                for k_idx in range(len(jj)):
-                    if vs[k_idx] != 0:
-                        self.add_line_bk(int(bag_li[jj[k_idx]]), int(bag_ei[jj[k_idx]]),
-                                         tt[k_idx], int(vs[k_idx]))
-
-            if np.any(f_gt_e):   # f above e: add breakpoint on e-line
-                jj2 = js2[f_gt_e];  ss2 = s2[f_gt_e]
-                inner2 = e_dpxy[0] * bag_d_c[jj2, 0] + e_dpxy[1] * bag_d_c[jj2, 1]
-                vs2 = np.where(inner2 > 0, -bag_n[jj2], bag_n[jj2])
-                e_li = int(bag_li[i]);  e_ei = int(bag_ei[i])
-                for k_idx in range(len(jj2)):
-                    if vs2[k_idx] != 0:
-                        self.add_line_bk(e_li, e_ei, ss2[k_idx], int(vs2[k_idx]))
-
-            if np.any(near_eq):  # rare: near-equal Z, re-evaluate with S
-                e_rec = bag_bis[i]
-                for k_idx in np.where(near_eq)[0]:
-                    self.edge_intersect(e_rec, bag_bis[js2[k_idx]])
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "Intersections bis"))
 
@@ -1503,32 +1561,54 @@ class Surface:
     def plot_for_browser(self):
         t0 = time.perf_counter()
 
-        bks = getattr(self, 'opt_line_bks', self.line_bks)
+        bks    = getattr(self, 'opt_line_bks', self.line_bks)
         opt_cp = getattr(self, 'opt_cp', None)
-        lines = defaultdict(list)  # clé = visibilité, valeur = liste de lignes. ligne = [x_1,y_1,x_2,y_2...]
+        lines  = defaultdict(list)
+
+        # --- Phase 1: batch-evaluate S and XY for all stored line points ---
+        # Concatenate all l["fp"] arrays; line i starts at line_offsets[i].
+        all_fp = np.concatenate([l["fp"] for l in self.lines], axis=0)  # (total, 2)
+        line_offsets = np.zeros(len(self.lines) + 1, dtype=np.intp)
         for i, l in enumerate(self.lines):
-            type = "?"
+            line_offsets[i + 1] = line_offsets[i] + len(l)
+        xy_pts = self.XY(np.array(self.S(all_fp[:, 0], all_fp[:, 1])))  # (2, total)
+
+        # Collect all interpolated breakpoint positions (non-?? lines only)
+        bk_pts_list = []
+        for i, l in enumerate(self.lines):
             if l[0]["type"] == "??":
                 continue
-            cp = float(opt_cp[i]) if opt_cp is not None else float(l[0]["v"])
-            vis = cp
+            for j in range(len(l) - 1):
+                p, q = l[j]["fp"], l[j + 1]["fp"]
+                for s, v in bks[i][j]:
+                    bk_pts_list.append((1.0 - s) * p + s * q)
+
+        if bk_pts_list:
+            bk_pts = np.array(bk_pts_list)  # (K, 2)
+            xy_bk  = self.XY(np.array(self.S(bk_pts[:, 0], bk_pts[:, 1])))  # (2, K)
+        bk_idx = 0
+
+        # --- Phase 2: reconstruct lines dict using precomputed projections ---
+        for i, l in enumerate(self.lines):
+            if l[0]["type"] == "??":
+                continue
+            base = int(line_offsets[i])
+            cp   = float(opt_cp[i]) if opt_cp is not None else float(l[0]["v"])
+            vis  = cp
             if tuple(l[0]["ixfp"]) in self.visibilities:
-                type = l[0]["type"][1]
                 vis += self.visibilities[tuple(l[0]["ixfp"])]
             line = []
             for j in range(len(l) - 1):
-                p, q = l[j]["fp"], l[j + 1]["fp"]
-                line.append(self.XY(np.array(self.S(*p))))
+                line.append(xy_pts[:, base + j])
                 for s, v in bks[i][j]:
-                    line.append(self.XY(np.array(self.S(*((1 - s) * p + s * q)))))
+                    line.append(xy_bk[:, bk_idx]);  bk_idx += 1
                     lines[min(vis, 0)].append(line)
-                    vis = vis + v
-                    line = [line[-1]] # coordonnées x,y du dernier point
-            last_pt = l[-1]["fp"]
-            line.append(self.XY(np.array(self.S(*last_pt))))
+                    vis  = vis + v
+                    line = [line[-1]]
+            line.append(xy_pts[:, base + len(l) - 1])
             lines[min(vis, 0)].append(line)
-        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
 
+        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "préparation du dessin"))
         return lines
 
     def plot_for_terminal(self, T0):
