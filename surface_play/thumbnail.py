@@ -29,8 +29,8 @@ def compute_thumbnail(rec):
     vis_keys = sorted(lines)
     for idx, vis in enumerate(vis_keys):
         visible = idx == len(vis_keys) - 1
-        stroke = 'black' if visible else '#aaa'
-        dash = ' stroke-dasharray="0.04 0.04"' if not visible else ''
+        opacity = '1' if visible else '0.35'
+        dash = ' stroke-dasharray="0.05 0.05"' if not visible else ''
         for l in lines[vis]:
             pts = ' '.join(
                 f'{(p[0] - origin[0]) / r:.4f},{-(p[1] - origin[1]) / r:.4f}'
@@ -38,8 +38,8 @@ def compute_thumbnail(rec):
             )
             if pts:
                 parts.append(
-                    f'<polyline points="{pts}" fill="none" stroke="{stroke}"'
-                    f' stroke-width="0.018"{dash}/>'
+                    f'<polyline points="{pts}" fill="none" stroke="steelblue"'
+                    f' stroke-width="0.025" stroke-opacity="{opacity}"{dash}/>'
                 )
 
     return (
