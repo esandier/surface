@@ -1,5 +1,6 @@
 FROM image-registry.openshift-image-registry.svc:5000/openshift/python:3.11-ubi8
 
+USER root
 WORKDIR /opt/app-root/src
 
 # Copy requirements first so the pip layer is cached on code-only changes
