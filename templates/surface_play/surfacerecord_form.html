@@ -4,22 +4,150 @@
 
 {% block content %}
 <div class="container-fluid d-flex min-vh-100 flex-column">
-	<!-- I want this container to stretch to the height of the parent -->
-	<div class="row d-flex justify-content-between p-3 titre">
-    <h1>{{ surface.name }}</h1>
-		<h1>
-			<a href="{% url 'surfaces' %}" class="glyph"><i class="fa-regular fa-rectangle-list"></i></a>
-		</h1>
+    <div class="row d-flex justify-content-between p-3 titre" style="position:sticky; top:0; z-index:100;">
+        <h1>{% if surface %}{{ surface.name }}{% else %}New surface{% endif %}</h1>
+        <h1>
+            <a href="{% url 'surfaces' %}" class="glyph"><i class="fa-regular fa-rectangle-list"></i></a>
+        </h1>
+    </div>
+    <div class="row p-4">
+        <div class="col-md-10 col-lg-8 col-xl-6">
+            <form method="post" novalidate>
+                {% csrf_token %}
 
-  </div>
-  <div class="row p-4">
-    <form action="" method="post">
-      {% csrf_token %}
-      <table>
-        {{ form.as_table }}
-      </table>
-      <input type="submit" value="Submit">
-    </form>
-  </div>
+                <!-- Name -->
+                <div class="form-group">
+                    <label for="id_name">Name</label>
+                    <input type="text" name="name" id="id_name"
+                        class="form-control{% if form.name.errors %} is-invalid{% endif %}"
+                        value="{{ form.name.value|default:'' }}" maxlength="100" autofocus>
+                    {% for e in form.name.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                </div>
+
+                <!-- Parameters -->
+                <div class="form-group">
+                    <label for="id_parameter_names">Parameters</label>
+                    <input type="text" name="parameter_names" id="id_parameter_names"
+                        class="form-control{% if form.parameter_names.errors %} is-invalid{% endif %}"
+                        value="{{ form.parameter_names.value|default:'u v' }}" maxlength="30"
+                        placeholder="u v" style="font-family:monospace; width:12em;">
+                    <small class="form-text text-muted">Two variable names separated by a space</small>
+                    {% for e in form.parameter_names.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                </div>
+
+                <!-- X Y Z -->
+                <div class="form-row">
+                    <div class="form-group col-4">
+                        <label for="id_X">X</label>
+                        <input type="text" name="X" id="id_X"
+                            class="form-control{% if form.X.errors %} is-invalid{% endif %}"
+                            value="{{ form.X.value|default:'u' }}" maxlength="400"
+                            placeholder="u" style="font-family:monospace;">
+                        {% for e in form.X.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                    </div>
+                    <div class="form-group col-4">
+                        <label for="id_Y">Y</label>
+                        <input type="text" name="Y" id="id_Y"
+                            class="form-control{% if form.Y.errors %} is-invalid{% endif %}"
+                            value="{{ form.Y.value|default:'v' }}" maxlength="400"
+                            placeholder="v" style="font-family:monospace;">
+                        {% for e in form.Y.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                    </div>
+                    <div class="form-group col-4">
+                        <label for="id_Z">Z</label>
+                        <input type="text" name="Z" id="id_Z"
+                            class="form-control{% if form.Z.errors %} is-invalid{% endif %}"
+                            value="{{ form.Z.value|default:'0' }}" maxlength="400"
+                            placeholder="0" style="font-family:monospace;">
+                        {% for e in form.Z.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                    </div>
+                </div>
+                <small class="form-text text-muted" style="margin-top:-10px;">SymPy expressions in the parameter variables</small>
+
+                <details class="mt-2 mb-3">
+                    <summary style="font-size:0.82rem; color:#888; cursor:pointer; user-select:none;">Supported functions &amp; constants</summary>
+                    <div style="font-family:monospace; font-size:0.8rem; line-height:1.8; background:#f8f9fa; border:1px solid #dee2e6; border-radius:4px; padding:8px 12px; margin-top:4px;">
+                        <div><span style="color:#888;">trig &nbsp;&nbsp;&nbsp;&nbsp;</span> sin, cos, tan, cot, sec, csc</div>
+                        <div><span style="color:#888;">inverse &nbsp;</span> asin, acos, atan, atan2, acot</div>
+                        <div><span style="color:#888;">hyperbolic</span> sinh, cosh, tanh, asinh, acosh, atanh</div>
+                        <div><span style="color:#888;">exp/log &nbsp;</span> exp, log, log2, log10, sqrt, Abs</div>
+                        <div><span style="color:#888;">misc &nbsp;&nbsp;&nbsp;&nbsp;</span> sign, floor, ceiling, Min, Max, Piecewise</div>
+                        <div><span style="color:#888;">constants </span> pi, E</div>
+                        <div><span style="color:#888;">operators </span> + &nbsp;- &nbsp;* &nbsp;/ &nbsp;** &nbsp;( )</div>
+                    </div>
+                </details>
+
+                <!-- Domain -->
+                <fieldset class="mt-4">
+                    <legend style="font-size:1rem; font-weight:600; border-bottom:1px solid #dee2e6; padding-bottom:4px;">Domain</legend>
+                    <table class="table table-borderless table-sm mb-0" style="width:auto;">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th class="text-center" style="width:90px;">min</th>
+                                <th></th>
+                                <th class="text-center" style="width:90px;">max</th>
+                                <th class="text-center pl-3">identify</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="align-middle pr-3" style="font-family:monospace;"><em>u</em></td>
+                                <td>
+                                    <input type="number" name="u_min" id="id_u_min" step="any"
+                                        class="form-control form-control-sm{% if form.u_min.errors %} is-invalid{% endif %}"
+                                        value="{{ form.u_min.value|default:'0' }}" style="font-family:monospace;">
+                                </td>
+                                <td class="align-middle px-2 text-muted small">to</td>
+                                <td>
+                                    <input type="number" name="u_max" id="id_u_max" step="any"
+                                        class="form-control form-control-sm{% if form.u_max.errors %} is-invalid{% endif %}"
+                                        value="{{ form.u_max.value|default:'1' }}" style="font-family:monospace;">
+                                </td>
+                                <td class="pl-3">
+                                    <select name="u_identify" id="id_u_identify" class="form-control form-control-sm">
+                                        <option value="no" {% if form.u_identify.value == 'no' %}selected{% endif %}>none</option>
+                                        <option value="cy" {% if form.u_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
+                                        <option value="mo" {% if form.u_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
+                                    </select>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td class="align-middle pr-3" style="font-family:monospace;"><em>v</em></td>
+                                <td>
+                                    <input type="number" name="v_min" id="id_v_min" step="any"
+                                        class="form-control form-control-sm{% if form.v_min.errors %} is-invalid{% endif %}"
+                                        value="{{ form.v_min.value|default:'0' }}" style="font-family:monospace;">
+                                </td>
+                                <td class="align-middle px-2 text-muted small">to</td>
+                                <td>
+                                    <input type="number" name="v_max" id="id_v_max" step="any"
+                                        class="form-control form-control-sm{% if form.v_max.errors %} is-invalid{% endif %}"
+                                        value="{{ form.v_max.value|default:'1' }}" style="font-family:monospace;">
+                                </td>
+                                <td class="pl-3">
+                                    <select name="v_identify" id="id_v_identify" class="form-control form-control-sm">
+                                        <option value="no" {% if form.v_identify.value == 'no' %}selected{% endif %}>none</option>
+                                        <option value="cy" {% if form.v_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
+                                        <option value="mo" {% if form.v_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
+                                    </select>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    {% for e in form.u_min.errors %}<div class="text-danger small">u min: {{ e }}</div>{% endfor %}
+                    {% for e in form.u_max.errors %}<div class="text-danger small">u max: {{ e }}</div>{% endfor %}
+                    {% for e in form.v_min.errors %}<div class="text-danger small">v min: {{ e }}</div>{% endfor %}
+                    {% for e in form.v_max.errors %}<div class="text-danger small">v max: {{ e }}</div>{% endfor %}
+                </fieldset>
+
+                <!-- Submit -->
+                <div class="mt-4 d-flex justify-content-end">
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+
+            </form>
+        </div>
+    </div>
 </div>
 {% endblock content %}

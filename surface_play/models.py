@@ -29,7 +29,8 @@ class SurfaceRecord(models.Model):
         max_length=2,
         choices=Identify.choices,
         default=Identify.NONE,
-    )    
+    )
+    thumbnail = models.TextField(blank=True, default='')
 
     def __str__(self):
         return self.name

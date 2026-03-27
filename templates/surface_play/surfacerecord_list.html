@@ -5,16 +5,19 @@
 
 <div class="container-fluid d-flex min-vh-100 flex-column">
 	<!-- I want this container to stretch to the height of the parent -->
-	<div class="row d-flex justify-content-between p-3 titre">
+	<div class="row d-flex justify-content-between p-3 titre" style="position:sticky; top:0; z-index:100;">
 	  <h1>Surface/Silhouette</h1>
 	  <h1><a class = 'glyph' href="{% url 'surface-add' %}"><span class="fa fa-plus"></span></a></h1>
 	</div>
   
 	<div class="row">
-		<div class="col"  id = 'liste-surfaces'>
+		<div class="col" id="liste-surfaces">
 			{% for surface in surfaces %}
-			<div class = 'list-group-item item-liste'>
-				<h3>
+			<div class="list-group-item item-liste" style="break-inside: avoid; overflow: hidden; display:flex; align-items:center; padding:6px 12px;">
+				<a href="{% url 'surface-play' pk=surface.pk %}" style="display:block; width:60px; height:60px; flex-shrink:0; margin-right:12px;">
+					{% if surface.thumbnail %}{{ surface.thumbnail|safe }}{% else %}<div style="width:60px; height:60px; background:#f0f0f0; border-radius:4px;"></div>{% endif %}
+				</a>
+				<h3 style="margin:0;">
 					<a href="{% url 'surface-update' pk=surface.pk %}" class="list-glyph">
 						<span class="far fa-pen-to-square"></span>
 					</a>
@@ -29,5 +32,10 @@
 			{% endfor %}
 		</div>
 	</div>
+	<style>
+		#liste-surfaces { columns: 1; column-gap: 0; }
+		@media (min-width: 768px)  { #liste-surfaces { columns: 2; } }
+		@media (min-width: 1200px) { #liste-surfaces { columns: 3; } }
+	</style>
 </div>
 {% endblock content %}

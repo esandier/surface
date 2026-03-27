@@ -9,8 +9,12 @@ from django.conf import settings
 from collections import defaultdict
 
 from surface_play.models import SurfaceRecord
+from surface_play.forms import SurfaceRecordForm
+from surface_play.thumbnail import compute_thumbnail
 from .silhouette import *
 import json
+
+_surface_cache = {}  # pk -> (cache_key, triangulated Surface)
 
 class SurfacePlayView(TemplateView):
     template_name = "play.html"
@@ -36,8 +40,14 @@ class SurfacePlayView(TemplateView):
         
     def post(self, request, pk):
         rec = get_object_or_404(SurfaceRecord, pk=pk)
-        surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
-        surf.triangulate(settings.RESOLUTION)
+        cache_key = (rec.X, rec.Y, rec.Z, rec.parameter_names,
+                     rec.u_min, rec.u_max, rec.v_min, rec.v_max,
+                     rec.u_identify, rec.v_identify, settings.RESOLUTION)
+        if _surface_cache.get(pk, (None,))[0] != cache_key:
+            surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
+            surf.triangulate(settings.RESOLUTION)
+            _surface_cache[pk] = (cache_key, surf)
+        surf = _surface_cache[pk][1]
 
         data = json.loads(request.body.decode())
         I = data['I']
@@ -75,13 +85,31 @@ class SurfaceRecordListView(ListView):
 
 class SurfaceRecordCreateView(CreateView):
     model = SurfaceRecord
-    fields = ['name', 'X', 'Y', 'Z', 'parameter_names', 'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify']
+    form_class = SurfaceRecordForm
     context_object_name = 'surface'
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        try:
+            self.object.thumbnail = compute_thumbnail(self.object)
+            self.object.save(update_fields=['thumbnail'])
+        except Exception:
+            pass
+        return response
 
 class SurfaceRecordUpdateView(UpdateView):
     model = SurfaceRecord
-    fields = ['name', 'X', 'Y', 'Z', 'parameter_names', 'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify']
+    form_class = SurfaceRecordForm
     context_object_name = 'surface'
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        try:
+            self.object.thumbnail = compute_thumbnail(self.object)
+            self.object.save(update_fields=['thumbnail'])
+        except Exception:
+            pass
+        return response
 
 class SurfaceRecordDeleteView(DeleteView):
     model = SurfaceRecord

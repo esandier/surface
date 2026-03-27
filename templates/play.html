@@ -27,9 +27,11 @@
 
     <div class="row flex-grow-1 position-relative">
         <canvas id="canvas" class="position-absolute w-100 h-100"></canvas>
-        <svg id="svgbox" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet" class="position-absolute w-100 h-100" style="overflow: visible; pointer-events:none">
-            <g id="svg" transform="translate(0 0) scale(1 1)" style="pointer-events:none"></g>
-        </svg>
+        <div style="position:absolute; inset:0; overflow:hidden; pointer-events:none;">
+            <svg id="svgbox" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet" style="width:100%; height:100%; overflow:visible; pointer-events:none;">
+                <g id="svg" transform="translate(0 0) scale(1 1)" style="pointer-events:none"></g>
+            </svg>
+        </div>
         <!-- domain panel (debugging only)
         <div id="domain-panel" style="display:none; position:absolute; top:8px; right:8px; width:360px; height:360px; background:rgba(255,255,255,0.93); border:1px solid #bbb; border-radius:6px; overflow:hidden; z-index:10;">
             <svg id="domain-svg" width="100%" height="100%" style="cursor:grab">
@@ -37,6 +39,38 @@
             </svg>
         </div>
         -->
+
+        <!-- rotation controls panel -->
+        <div id="controls-panel" style="position:absolute; bottom:16px; left:16px; z-index:10; background:rgba(255,255,255,0.88); border-radius:10px; padding:12px 14px; display:flex; flex-direction:column; gap:8px; min-width:210px; box-shadow:0 2px 8px rgba(0,0,0,0.15);">
+            <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:68px; font-size:12px; color:#555;">Azimuth</span>
+                <input type="range" id="azimuth-slider" min="-180" max="180" step="1" value="45" style="flex:1; cursor:pointer;">
+                <span id="azimuth-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">45°</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:68px; font-size:12px; color:#555;">Elevation</span>
+                <input type="range" id="elevation-slider" min="-89" max="89" step="1" value="35" style="flex:1; cursor:pointer;">
+                <span id="elevation-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">35°</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:68px; font-size:12px; color:#555;">In-plane</span>
+                <svg id="dial" width="40" height="40" style="cursor:grab; flex-shrink:0; user-select:none;">
+                    <circle cx="20" cy="20" r="16" fill="#f0f0f0" stroke="#bbb" stroke-width="1.5"/>
+                    <circle cx="20" cy="20" r="2.5" fill="#999"/>
+                    <line id="dial-line" x1="20" y1="20" x2="20" y2="5" stroke="#555" stroke-width="2" stroke-linecap="round"/>
+                    <circle id="dial-handle" cx="20" cy="5" r="4" fill="#555"/>
+                </svg>
+                <span id="inplane-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">0°</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:68px; font-size:12px; color:#555;">Zoom</span>
+                <input type="range" id="zoom-slider" min="20" max="500" step="1" value="100" style="flex:1; cursor:pointer;">
+                <span id="zoom-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">100%</span>
+            </div>
+            <div style="display:flex; justify-content:flex-end;">
+                <button id="reset-btn" class="btn btn-sm btn-outline-secondary" style="font-size:12px; padding:2px 12px;">Reset</button>
+            </div>
+        </div>
     </div>
 
 </div>
@@ -182,7 +216,7 @@
     controls.enableZoom = false;
     controls.staticMoving = true;
     controls.addEventListener("start", mouseDown);
-    controls.addEventListener("end", mouseUp);
+    controls.addEventListener("end", () => mouseUp(false));
 
     /* ---------------- RESIZE ---------------- */
     function resizeRenderer() {
@@ -191,12 +225,16 @@
         const height = canvas.clientHeight * pixelRatio | 0;
         if (canvas.width !== width || canvas.height !== height) {
             renderer.setSize(width, height, false);
-            const size = Math.min(width, height);
-            if (width > height) {
-                renderer.setViewport((width - height) / 2, 0, size, size);
+            renderer.setViewport(0, 0, width, height);
+            const aspect = width / height;
+            if (aspect >= 1) {
+                camera.left = -radius * aspect; camera.right = radius * aspect;
+                camera.top = radius; camera.bottom = -radius;
             } else {
-                renderer.setViewport(0, (height - width) / 2, size, size);
+                camera.left = -radius; camera.right = radius;
+                camera.top = radius / aspect; camera.bottom = -radius / aspect;
             }
+            camera.updateProjectionMatrix();
         }
     }
 
@@ -223,7 +261,13 @@
         ambientLight.intensity = 0.8;
     }
 
-    function mouseUp() {
+    let isRequesting = false;
+
+    function mouseUp(fromControls = false) {
+        if (isRequesting) return;
+        if (!fromControls) updateSlidersFromAngles(readAnglesFromCamera());
+
+        isRequesting = true;
         spinner.style.visibility = "visible";
         downloadButton.replaceWith(spinner);
         controls.enabled = false;
@@ -249,18 +293,20 @@
     }
 
     /* ---------------- SVG DRAWING ---------------- */
-    function drawSVG(data) {
-        const origin = data.origin;
-        const lines = data.lines_by_visibility;
+    let lastOrigin = [0, 0];
+
+    function updateSVGTransform() {
         const zoom = camera.zoom;
+        svg.transform.baseVal.getItem(1).setScale(zoom / radius, -zoom / radius);
+        svg.transform.baseVal.getItem(0).setTranslate(-zoom * lastOrigin[0] / radius, zoom * lastOrigin[1] / radius);
+    }
 
-        const scaleX = zoom / radius;
-        const scaleY = -zoom / radius;
-        const transX = -zoom * origin[0] / radius;
-        const transY = zoom * origin[1] / radius;
+    function drawSVG(data) {
+        isRequesting = false;
+        lastOrigin = data.origin;
+        const lines = data.lines_by_visibility;
 
-        svg.transform.baseVal.getItem(1).setScale(scaleX, scaleY);
-        svg.transform.baseVal.getItem(0).setTranslate(transX, transY);
+        updateSVGTransform();
 
         let html = "";
         lines.forEach((group, i) => {
@@ -305,6 +351,173 @@
         downloadButton.href = href;
         downloadButton.download = "{{ surface.name }}.svg";
     }
+
+    /* ---------------- ROTATION CONTROLS ---------------- */
+    const azimuthSlider  = document.getElementById("azimuth-slider");
+    const elevationSlider = document.getElementById("elevation-slider");
+    const azimuthVal     = document.getElementById("azimuth-val");
+    const elevationVal   = document.getElementById("elevation-val");
+    const inplaneVal     = document.getElementById("inplane-val");
+    const dial           = document.getElementById("dial");
+    const dialHandle     = document.getElementById("dial-handle");
+    const dialLine       = document.getElementById("dial-line");
+    const resetBtn       = document.getElementById("reset-btn");
+
+    const DEFAULT_ANGLES = { elev: 35, azim: 45, inPlane: 0 };
+    let inPlaneAngle = 0;
+
+    function dialAngleToXY(deg) {
+        const rad = (deg - 90) * Math.PI / 180;
+        return { x: 20 + 15 * Math.cos(rad), y: 20 + 15 * Math.sin(rad) };
+    }
+
+    function updateDialDisplay() {
+        const { x, y } = dialAngleToXY(inPlaneAngle);
+        dialHandle.setAttribute("cx", x);
+        dialHandle.setAttribute("cy", y);
+        dialLine.setAttribute("x2", x);
+        dialLine.setAttribute("y2", y);
+        inplaneVal.textContent = Math.round(inPlaneAngle) + "°";
+    }
+
+    function setCameraFromAngles(elev, azim, inPlane) {
+        const phi   = elev   * Math.PI / 180;
+        const theta = azim   * Math.PI / 180;
+        const psi   = inPlane * Math.PI / 180;
+        const R = radius * Math.sqrt(3);
+
+        camera.position.set(
+            center[0] + R * Math.cos(phi) * Math.cos(theta),
+            center[1] + R * Math.cos(phi) * Math.sin(theta),
+            center[2] + R * Math.sin(phi)
+        );
+        camera.up.set(0, 0, 1);
+        camera.lookAt(...center);
+
+        if (psi !== 0) {
+            const viewDir = new THREE.Vector3(...center).sub(camera.position).normalize();
+            const cross = new THREE.Vector3().crossVectors(viewDir, camera.up);
+            camera.up.set(
+                camera.up.x * Math.cos(psi) + cross.x * Math.sin(psi),
+                camera.up.y * Math.cos(psi) + cross.y * Math.sin(psi),
+                camera.up.z * Math.cos(psi) + cross.z * Math.sin(psi)
+            ).normalize();
+            camera.lookAt(...center);
+        }
+
+        camera.updateProjectionMatrix();
+        controls.update();
+    }
+
+    function readAnglesFromCamera() {
+        const pos = camera.position.clone().sub(new THREE.Vector3(...center));
+        const R   = pos.length();
+        const elev = Math.asin(Math.max(-1, Math.min(1, pos.z / R))) * 180 / Math.PI;
+        const azim = Math.atan2(pos.y, pos.x) * 180 / Math.PI;
+
+        const viewDir = pos.clone().normalize().negate();
+        const worldZ  = new THREE.Vector3(0, 0, 1);
+        const projZ   = worldZ.clone().sub(viewDir.clone().multiplyScalar(worldZ.dot(viewDir)));
+        let inPlane = 0;
+        if (projZ.length() > 1e-6) {
+            projZ.normalize();
+            const projUp = camera.up.clone().sub(viewDir.clone().multiplyScalar(camera.up.dot(viewDir)));
+            if (projUp.length() > 1e-6) {
+                projUp.normalize();
+                const cosA  = Math.max(-1, Math.min(1, projUp.dot(projZ)));
+                const cross = new THREE.Vector3().crossVectors(projZ, projUp);
+                inPlane = Math.atan2(cross.dot(viewDir), cosA) * 180 / Math.PI;
+            }
+        }
+        return { elev: Math.round(elev), azim: Math.round(azim), inPlane: Math.round(inPlane) };
+    }
+
+    function updateSlidersFromAngles({ elev, azim, inPlane }) {
+        azimuthSlider.value  = azim;
+        elevationSlider.value = elev;
+        azimuthVal.textContent  = azim  + "°";
+        elevationVal.textContent = elev + "°";
+        inPlaneAngle = inPlane;
+        updateDialDisplay();
+    }
+
+    // Slider interactions
+    azimuthSlider.addEventListener("input", () => {
+        azimuthVal.textContent = azimuthSlider.value + "°";
+        mouseDown();
+        setCameraFromAngles(+elevationSlider.value, +azimuthSlider.value, inPlaneAngle);
+    });
+    azimuthSlider.addEventListener("change", () => mouseUp(true));
+
+    elevationSlider.addEventListener("input", () => {
+        elevationVal.textContent = elevationSlider.value + "°";
+        mouseDown();
+        setCameraFromAngles(+elevationSlider.value, +azimuthSlider.value, inPlaneAngle);
+    });
+    elevationSlider.addEventListener("change", () => mouseUp(true));
+
+    // Dial interactions
+    let dialDragging = false;
+    dial.addEventListener("mousedown", e => {
+        dialDragging = true;
+        dial.style.cursor = "grabbing";
+        mouseDown();
+        e.preventDefault();
+    });
+    window.addEventListener("mousemove", e => {
+        if (!dialDragging) return;
+        const rect = dial.getBoundingClientRect();
+        const dx = e.clientX - (rect.left + rect.width  / 2);
+        const dy = e.clientY - (rect.top  + rect.height / 2);
+        inPlaneAngle = Math.atan2(dx, -dy) * 180 / Math.PI;
+        updateDialDisplay();
+        setCameraFromAngles(+elevationSlider.value, +azimuthSlider.value, inPlaneAngle);
+    });
+    window.addEventListener("mouseup", e => {
+        if (!dialDragging) return;
+        dialDragging = false;
+        dial.style.cursor = "grab";
+        mouseUp(true);
+    });
+
+    // Zoom slider
+    const zoomSlider = document.getElementById("zoom-slider");
+    const zoomVal    = document.getElementById("zoom-val");
+
+    function applyZoom(z) {
+        camera.zoom = Math.max(0.2, Math.min(5, z));
+        camera.updateProjectionMatrix();
+        zoomSlider.value = Math.round(camera.zoom * 100);
+        zoomVal.textContent = Math.round(camera.zoom * 100) + "%";
+        updateSVGTransform();
+    }
+
+    zoomSlider.addEventListener("input", () => {
+        mouseDown();
+        applyZoom(zoomSlider.value / 100);
+    });
+    zoomSlider.addEventListener("change", () => mouseUp(true));
+
+    let wheelTimer = null;
+    canvas.addEventListener("wheel", e => {
+        e.preventDefault();
+        mouseDown();
+        applyZoom(camera.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+        clearTimeout(wheelTimer);
+        wheelTimer = setTimeout(() => mouseUp(true), 400);
+    }, { passive: false });
+
+    // Reset
+    resetBtn.addEventListener("click", () => {
+        mouseDown();
+        updateSlidersFromAngles(DEFAULT_ANGLES);
+        setCameraFromAngles(DEFAULT_ANGLES.elev, DEFAULT_ANGLES.azim, DEFAULT_ANGLES.inPlane);
+        applyZoom(1);
+        mouseUp(true);
+    });
+
+    // Initialise sliders from actual camera state
+    updateSlidersFromAngles(readAnglesFromCamera());
 
     /* ---------------- DOMAIN PANEL (debugging only — uncomment to enable) ----------------
     const domainPanel = document.getElementById("domain-panel");
