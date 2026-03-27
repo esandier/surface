@@ -1,10 +1,5 @@
 FROM image-registry.openshift-image-registry.svc:5000/openshift/python:3.11-ubi8
 
-USER root
-RUN yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
-    yum install -y spatialindex spatialindex-devel && \
-    yum clean all
-
 WORKDIR /opt/app-root/src
 
 # Copy requirements first so the pip layer is cached on code-only changes

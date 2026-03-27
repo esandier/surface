@@ -14,7 +14,6 @@ Pillow==11.2.1
 pybind11==2.10.3
 pyparsing==3.0.9
 python-dateutil==2.8.2
-Rtree==1.0.0
 scipy==1.11.3
 scs==3.2.2
 six==1.16.0

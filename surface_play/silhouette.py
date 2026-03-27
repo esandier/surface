@@ -18,7 +18,6 @@
 import sympy as sp
 import numpy as np
 import math
-import rtree as rt
 
 from numpy.linalg import norm
 from numpy.core.records import fromrecords
@@ -195,9 +194,6 @@ def vect_prod(p, q):
         [p[i % 3] * q[(i + 1) % 3] - p[(i + 1) % 3] * q[i % 3] for i in range(1, 4)]
     )
 
-def generator_function(data):
-    for i, obj in enumerate(data):
-        yield (i, (obj[0], obj[1], obj[2], obj[3]), 42)
 
 class Surface:
     def print(self, s):
@@ -1328,19 +1324,22 @@ class Surface:
                                     self.edge_intersect(bag_bis[ip_h[k_idx]],
                                                         bag_bis[jp_h[k_idx]])
         else:
-            # Periodic surfaces: rtree + per-pair loop (close() needed for wrap-around)
-            rt_prop  = rt.index.Property()
-            index_im = rt.index.Index(generator_function(bb_im), properties=rt_prop)
-            for i in range(len(bag_bis)):
-                box_im_raw = [j for j in index_im.intersection(bb_im[i]) if j > i]
-                if not box_im_raw:
+            # Periodic surfaces: numpy bbox overlap check (close() needed for wrap-around)
+            xmin = bb_im[:, 0]; xmax = bb_im[:, 2]
+            ymin = bb_im[:, 1]; ymax = bb_im[:, 3]
+            for i in range(len(bag_bis) - 1):
+                js = np.where(
+                    (xmin[i+1:] <= xmax[i]) & (xmin[i] <= xmax[i+1:]) &
+                    (ymin[i+1:] <= ymax[i]) & (ymin[i] <= ymax[i+1:])
+                )[0] + (i + 1)
+                if not len(js):
                     continue
                 e = bag_bis[i]
                 e_p_fp = e["fp"]
                 e_q_fp = e_p_fp + e["fdp"]
                 efmax = np.maximum(e_p_fp, e_q_fp)
                 efmin = np.minimum(e_p_fp, e_q_fp)
-                for j in box_im_raw:
+                for j in js:
                     f = bag_bis[j]
                     f_p = self.close(e_p_fp, f["fp"])
                     f_q = f_p + f["fdp"]
