@@ -768,8 +768,7 @@ class Surface:
         pts_num = np.array(vec["fp"] + vec_s.reshape(len(vec_s), 1) * vec["fdp"])
 
         u_vec, v_vec = pts_num[:, 0], pts_num[:, 1]
-        dir_vec = self.kerdS(u_vec, v_vec)[1]
-        # print(dir_vec)
+        _, dir_vec = self.kerdS(u_vec, v_vec)
 
         self.print(
             "[%0.3fs] %s" % (time.perf_counter() - t0, "direction orth au contour")
@@ -805,46 +804,17 @@ class Surface:
         cusps = []
 
         for l in self.c_lines:
+            # ancienne version
             directions = dir_vec[:, l]
             signes = np.sum(directions[:, 0:-1] * directions[:, 1:], axis=0)
+
             indices = np.where(signes < 0)[0]
             for i in indices:
-                p, q = np.array([u_vec[l[i]], v_vec[l[i]]]), (
-                    [u_vec[l[i + 1]], v_vec[l[i + 1]]]
-                )
-                q = self.close(p, q)
-                vis = (
-                    1 if np.inner(self.dS(*p, *(q - p)), self.axis) > 0 else -1
-                )  # ça monte dans le sens p, q. donc la visibilité augmente
+                p = np.array([u_vec[l[i]], v_vec[l[i]]])
+                q = self.close(p, [u_vec[l[i + 1]], v_vec[l[i + 1]]])
                 r = (p + q) / 2
-                nu = np.array([-(q-p)[1], (q-p)[0]])
-                tol = (self.u_max - self.u_min + self.v_max - self.v_min) * 1e-7
-                for j in range(20): # bisection pour trouver le point précis, avec newton pour rester sur le contour
-                   if np.linalg.norm(q - p) < tol:
-                       break
-                   a, b = (p+q)/2 - nu/2, (p+q)/2 + nu/2
-                   try:
-                       s = newton(NZbis, 0.5, args=(a[0], a[1], nu[0], nu[1]), maxiter=50)
-                   except RuntimeError:
-                       self.print("Warning: Newton failed to converge in cusp bisection (iter %d)" % j)
-                       break
-                   r = a + s * (b-a)
-                   if np.inner(self.dirvec(p), self.dirvec(r)) < 0:
-                       q = r
-                   elif np.inner(self.dirvec(q), self.dirvec(r)) < 0:
-                       p = r
-                   else:
-                       print('problème de cusp!!!')
-                       break
-                vis_check = 1 if np.inner(self.dS(*r, *(q - p)), self.axis) > 0 else -1
-                if vis_check != vis:
-                    self.print("Warning: cusp vis sign flipped after Newton at [%0.4f, %0.4f], correcting" % (r[0], r[1]))
-                    vis = vis_check
-                if not (self.u_min <= r[0] <= self.u_max and self.v_min <= r[1] <= self.v_max):
-                    self.print("Warning: cusp at [%0.4f, %0.4f] outside domain [%0.2f,%0.2f]x[%0.2f,%0.2f]" % (
-                        r[0], r[1], self.u_min, self.u_max, self.v_min, self.v_max))
+                vis = 1 if np.inner(self.dS(*p, *(q - p)), self.axis) > 0 else -1
                 cusps.append((l[i], l[i + 1], 1 / 2, r))
-                # print(vis)
                 self.breaks["c"][l[i]] = (0.5, vis, len(cusps) - 1)
 
         self.cusps = fromrecords(cusps, dtype=cusp_type)
@@ -1893,10 +1863,12 @@ class Surface:
         ux, s, vh = svd(A)
         # vecteur correspondant à la dernière val sing, on transpose pour avoir le format [u, v]
         ker = vh[..., -1, :].T
+
         diff2 = self.XY(self.d2S(u, v, ker[0], ker[1]))
         im = self.XY(self.dS(u, v, -ker[1], ker[0]))
         diff2 = diff2 - np.sum(diff2 * im, axis=0) * im / np.sum(im * im, axis=0)
         dir_vec = diff2 / norm(diff2, axis=0)
+
         # ker = noyau de (dS projeté sur le plan de vision), dir_vec = dérivée seconde dans la direction du noyau, projetée sur la coimage
         return ker, dir_vec
 
