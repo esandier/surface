@@ -39,7 +39,7 @@ def compute_thumbnail(rec):
             if pts:
                 parts.append(
                     f'<polyline points="{pts}" fill="none" stroke="steelblue"'
-                    f' stroke-width="0.025" stroke-opacity="{opacity}"{dash}/>'
+                    f' stroke-width="0.04" stroke-opacity="{opacity}"{dash}/>'
                 )
 
     return (
