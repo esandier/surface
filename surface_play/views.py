@@ -44,6 +44,7 @@ class SurfacePlayView(TemplateView):
         context['initial_azim']    = rec.initial_azim
         context['initial_inplane'] = rec.initial_inplane
         context['initial_zoom']    = rec.initial_zoom
+        context['debug_ui']        = settings.DEBUG
 
         return render(request, self.template_name, context)
         
