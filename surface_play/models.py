@@ -11,6 +11,19 @@ class SurfaceRecord(models.Model):
         MOEBIUS = 'mo'
         CYLINDRE = 'cy'
         NONE = 'no'
+
+    class DomainType(models.TextChoices):
+        RECTANGLE = 'rect'
+        DISK = 'disk'
+
+    class CoordType(models.TextChoices):
+        CARTESIAN = 'ca'
+        POLAR = 'po'
+
+    class OutputType(models.TextChoices):
+        CARTESIAN = 'ca'
+        CYLINDRICAL = 'cy'
+
     name = models.CharField(max_length = 100)
     X = models.CharField(max_length=400, default = 'u') 
     Y = models.CharField(max_length=400, default = 'v')
@@ -30,7 +43,28 @@ class SurfaceRecord(models.Model):
         choices=Identify.choices,
         default=Identify.NONE,
     )
+    domain_type = models.CharField(
+        max_length=4,
+        choices=DomainType.choices,
+        default=DomainType.RECTANGLE,
+    )
+    coord_type = models.CharField(
+        max_length=2,
+        choices=CoordType.choices,
+        default=CoordType.CARTESIAN,
+    )
+    r_min = models.FloatField(default=0.0)
+    r_max = models.FloatField(default=1.0)
+    output_type = models.CharField(
+        max_length=2,
+        choices=OutputType.choices,
+        default=OutputType.CARTESIAN,
+    )
     thumbnail = models.TextField(blank=True, default='')
+    initial_elev   = models.FloatField(default=35.0)
+    initial_azim   = models.FloatField(default=45.0)
+    initial_inplane = models.FloatField(default=0.0)
+    initial_zoom   = models.FloatField(default=1.0)
 
     def __str__(self):
         return self.name

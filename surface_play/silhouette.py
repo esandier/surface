@@ -18,6 +18,7 @@
 import sympy as sp
 import numpy as np
 import math
+import triangle as tr
 
 from numpy.linalg import norm
 from numpy.core.records import fromrecords
@@ -61,8 +62,8 @@ f_type = np.dtype([("p", "uint", 2), ("q", "uint", 2), ("r", "uint", 2)])
 # arêtes, les indices des 2 points, des faces (g=-1 s'il n'y a qu'une face), coord dans le domaine du point, du vecteur, et de la direction intérieure
 e_type = np.dtype(
     [
-        ("p", "uint", 2),
-        ("q", "uint", 2),
+        ("p", "uint"),
+        ("q", "uint"),
         ("f", "i4"),
         ("g", "i4"),
         ("fp", "f8", 2),
@@ -194,49 +195,100 @@ def vect_prod(p, q):
         [p[i % 3] * q[(i + 1) % 3] - p[(i + 1) % 3] * q[i % 3] for i in range(1, 4)]
     )
 
+def _eval_vec(fn, u, v):
+    """Call a lambdified vector function and return a (3, N) float64 array.
+    Handles the case where one or more components are Python scalars (constant
+    expressions) by broadcasting them to the size of u."""
+    raw = fn(u, v)
+    n = u.size
+    return np.row_stack([
+        np.full(n, c, dtype=np.float64) if np.ndim(c) == 0 else np.asarray(c, dtype=np.float64)
+        for c in raw
+    ])
+
+def _center_radius(S_vals):
+    """Bounding-sphere center and radius from a (3, N) array of surface points."""
+    xmin, xmax = float(S_vals[0].min()), float(S_vals[0].max())
+    ymin, ymax = float(S_vals[1].min()), float(S_vals[1].max())
+    zmin, zmax = float(S_vals[2].min()), float(S_vals[2].max())
+    center = [(xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2]
+    radius = np.sqrt((xmax-xmin)**2 + (ymax-ymin)**2 + (zmax-zmin)**2) / 2
+    return center, float(radius)
+
 
 class Surface:
     def print(self, s):
         # pass
         print(s)
 
-    def __init__(self, X="x", Y="y", Z="x*y", param_names="x y", bounds = (0,1,0,1) , quotient=("no", "no")):
+    def __init__(self, X="x", Y="y", Z="x*y", param_names="x y", bounds=(0,1,0,1),
+                 quotient=("no", "no"), domain_type="rect", coord_type="ca", r_min=0.0, r_max=1.0,
+                 output_type="ca"):
         t0 = time.perf_counter()
         self.low_res = 80
+        self.domain_type = domain_type
+        self.r_min = r_min
+        self.r_max = r_max
 
         self.u_min, self.u_max, self.v_min, self.v_max = (
-            bounds[0],
-            bounds[1],
-            bounds[2],
-            bounds[3],
+            bounds[0], bounds[1], bounds[2], bounds[3],
         )
         self.u_identify = quotient[0]
         self.v_identify = quotient[1]
 
+        if domain_type == 'disk':
+            # For disk domains, override bounds to bounding square and clear identifications
+            self.u_min, self.u_max = -r_max, r_max
+            self.v_min, self.v_max = -r_max, r_max
+            self.u_identify = 'no'
+            self.v_identify = 'no'
+
+        # Polar → cartesian substitution for disk domain
+        if domain_type == 'disk' and coord_type == 'po':
+            var_syms = sp.symbols(param_names)   # (r_sym, t_sym)
+            x_s, y_s = sp.symbols('_x_ _y_')
+            subs = [(var_syms[0], sp.sqrt(x_s**2 + y_s**2)),
+                    (var_syms[1], sp.atan2(y_s, x_s))]
+            X = str(sp.sympify(X).subs(subs))
+            Y = str(sp.sympify(Y).subs(subs))
+            Z = str(sp.sympify(Z).subs(subs))
+            param_names = '_x_ _y_'
+
+        # Cylindrical output → cartesian: X=R, Y=Θ, Z stays
+        if output_type == 'cy':
+            R_expr = sp.sympify(X)
+            T_expr = sp.sympify(Y)
+            Z_expr = sp.sympify(Z)
+            X = str(R_expr * sp.cos(T_expr))
+            Y = str(R_expr * sp.sin(T_expr))
+            Z = str(Z_expr)
+
         u, v = sp.symbols(param_names)
 
-        # On détermine la bounding box (avec résolution low_res) pour perturber S, ça sert aussi dans for_3js
+        # S_pur: unperturbed surface expression (truc_nul trick forces SymPy to keep array structure)
         with sp.evaluate(False) :
             truc_nul = u*sp.sin(sp.pi)
         S_pur = sp.Array(sp.sympify([X, Y, Z])) + sp.Array([truc_nul,truc_nul,truc_nul])
-        Slambda = lambdify([u, v], S_pur, "numpy")
-        u_grid, v_grid = np.meshgrid(
-            np.linspace(self.u_min, self.u_max, self.low_res+1), 
-            np.linspace(self.v_min, self.v_max, self.low_res+1),
-            indexing="ij"
-        )
-        self.X_grid, self.Y_grid, self.Z_grid = Slambda(u_grid, v_grid)
-        self.bbox = (
-            np.amin(self.X_grid), 
-            np.amax(self.X_grid), 
-            np.amin(self.Y_grid), 
-            np.amax(self.Y_grid), 
-            np.amin(self.Z_grid), 
-            np.amax(self.Z_grid)
-        )
-        self.center = [(self.bbox[0]+self.bbox[1])/2, (self.bbox[2]+self.bbox[3])/2, (self.bbox[4]+self.bbox[5])/2]
-        dX, dY, dZ = self.bbox[1] - self.bbox[0], self.bbox[3] - self.bbox[2], self.bbox[5] - self.bbox[4]
-        self.radius = np.sqrt(dX**2 + dY**2 + dZ**2)/2
+
+        # Coarse sampling to estimate bounding-box extents for the perturbation amplitude.
+        # (for_3js and triangulate do their own full sampling later.)
+        _Slambda = lambdify([u, v], S_pur, "numpy")
+        _bb_res = 20
+        if domain_type == 'disk':
+            _r = np.linspace(max(r_min, r_max / 100), r_max, _bb_res)
+            _t = np.linspace(0, 2 * np.pi, _bb_res)
+            _rg, _tg = np.meshgrid(_r, _t, indexing='ij')
+            _ug, _vg = _rg * np.cos(_tg), _rg * np.sin(_tg)
+        else:
+            _ug, _vg = np.meshgrid(
+                np.linspace(self.u_min, self.u_max, _bb_res),
+                np.linspace(self.v_min, self.v_max, _bb_res),
+                indexing='ij'
+            )
+        _Sg = _eval_vec(_Slambda, _ug.flatten(), _vg.flatten())
+        dX = float(_Sg[0].max() - _Sg[0].min()) or 1.0
+        dY = float(_Sg[1].max() - _Sg[1].min()) or 1.0
+        dZ = float(_Sg[2].max() - _Sg[2].min()) or 1.0
 
         # On perturbe S, et on fabrique les fonctions lambdifiées
         u, v = sp.symbols(param_names)
@@ -245,18 +297,17 @@ class Surface:
         ax = sp.Array([ax_x, ax_y, ax_z])
         du, dv = sp.symbols("du dv")
 
-        # Le choix de la perturbation est délicat. En gros il faut une dérivée suffisament grande 
+        # Le choix de la perturbation est délicat. En gros il faut une dérivée suffisament grande
         # (de l'ordre de dérivée de X divisé par resolution), amplitude petite pour que ça se voie pas, oscillation pas trop
         # grande pour pas perturber les cusps.
-        
         freq_u = 2 if self.u_identify != "mo" else 1
         freq_v = 2 if self.v_identify != "mo" else 1
-         
+
         S_sp = S_pur + (sp.sin((u - self.u_min) * freq_u * sp.pi / d_u) * sp.sin((v - self.v_min) * freq_v * sp.pi / d_v)) * sp.Array(
             [
-                0.0005 * dX * .346,  
-                0.0005 * dY * .632,  
-                0.0005 * dZ * .693,  
+                0.0005 * dX * .346,
+                0.0005 * dY * .632,
+                0.0005 * dZ * .693,
             ]
         )
 
@@ -283,13 +334,24 @@ class Surface:
         SN_sp = cross(
             Su_sp, Sv_sp
         )  # vecteur normal, non normé, comme expression sympy,
-        SN_axis_sp = dot(SN_sp, ax)  # produit scalaire du précédent avec un axe
+        # Orthographic silhouette condition: N · axis = 0
+        SN_axis_sp = dot(SN_sp, ax)
         SD_jac_sp = sp.Array(
             [
                 dot(
                     cross(Suu_sp, Sv_sp) + cross(Su_sp, Suv_sp), ax
                 ),  # grad du jacobien, orth aux contours
                 dot(cross(Suv_sp, Sv_sp) + cross(Su_sp, Svv_sp), ax),
+            ]
+        )
+
+        # Perspective silhouette condition: N · (S - E) = 0  (ax = eye position E)
+        # Note: N · Su = N · Sv = 0 always, so the gradient simplifies to the same structure
+        SN_axis_persp_sp = dot(SN_sp, S_sp - ax)
+        SD_jac_persp_sp = sp.Array(
+            [
+                dot(cross(Suu_sp, Sv_sp) + cross(Su_sp, Suv_sp), S_sp - ax),
+                dot(cross(Suv_sp, Sv_sp) + cross(Su_sp, Svv_sp), S_sp - ax),
             ]
         )
 
@@ -300,208 +362,328 @@ class Surface:
         self.Suv = lambdify([u, v], Suv_sp, "numpy")
         self.Svv = lambdify([u, v], Svv_sp, "numpy")
         self.SN = lambdify([u, v], SN_sp, "numpy")
-        self.SN_axis = lambdify([u, v, ax_x, ax_y, ax_z], SN_axis_sp, "numpy")
-        self.SD_jac = lambdify([u, v, ax_x, ax_y, ax_z], SD_jac_sp, "numpy")
-
-        # finalement, on fabrique une grille de normales pour for_3js
-        self.NX_grid, self.NY_grid, self.NZ_grid = self.SN(u_grid, v_grid)
+        self.SN_axis_ortho = lambdify([u, v, ax_x, ax_y, ax_z], SN_axis_sp, "numpy")
+        self.SD_jac_ortho  = lambdify([u, v, ax_x, ax_y, ax_z], SD_jac_sp, "numpy")
+        self.SN_axis_persp = lambdify([u, v, ax_x, ax_y, ax_z], SN_axis_persp_sp, "numpy")
+        self.SD_jac_persp  = lambdify([u, v, ax_x, ax_y, ax_z], SD_jac_persp_sp, "numpy")
+        self.SN_axis = self.SN_axis_ortho  # default; overridden by set_axis
+        self.SD_jac  = self.SD_jac_ortho
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "init surface"))
 
     def set_axis(
-        self, I = [1,0,0], J = [0,0,1]
+        self, I=[1,0,0], J=[0,0,1], eye=None
     ):  # definit l'axe et les fonctions self.XY et self.Z
         vecI, vecJ = np.array(I), np.array(J)
         vecI, vecJ = vecI/norm(vecI), vecJ/norm(vecJ)
-        self.axis = np.cross(vecI, vecJ)  
+        self.axis = np.cross(vecI, vecJ)
         self.axis = self.axis/norm(self.axis) # coordonnées x,y,z de la normale au plan de vision
-        def XY(vec):  # renvoie coordonnées d'un point de l'espace dans le repère I,J
-            return np.array([np.inner(vecI, vec.T), np.inner(vecJ, vec.T)]) # le .T est pour le cas d'appel vectoriel. Pour 1 vecteur, ça change rien
 
-        def Z(vec):  # renvoie coordonnées d'un point de l'espace sur l'axe 'axis'
+        if eye is None:
+            # Orthographic
+            self.SN_axis  = self.SN_axis_ortho
+            self.SD_jac   = self.SD_jac_ortho
+            self.ax_param = self.axis  # passed as (ax_x, ax_y, ax_z) to lambdify calls
+            def XY(vec):  # renvoie coordonnées d'un point de l'espace dans le repère I,J
+                return np.array([np.inner(vecI, vec.T), np.inner(vecJ, vec.T)])
+            def proj_vec(u, v, T):  # project a tangent vector T at (u,v) — linear for ortho
+                return np.array([np.inner(vecI, T.T), np.inner(vecJ, T.T)])
+            def ker_param(u, v):  # kernel of orthographic projection Jacobian in parameter space
+                du = vect_prod(self.Su(u, v), self.axis)
+                dv = vect_prod(self.Sv(u, v), self.axis)
+                A = np.stack((du.T, dv.T), axis=-1)
+                _, _, vh = svd(A)
+                return vh[..., -1, :].T
+        else:
+            # Perspective: silhouette is N·(S−E)=0, XY uses perspective division
+            eye = np.array(eye)
+            self.SN_axis  = self.SN_axis_persp
+            self.SD_jac   = self.SD_jac_persp
+            self.ax_param = eye  # passed as (ax_x, ax_y, ax_z) = eye position
+            def XY(vec):
+                vec = np.asarray(vec)
+                d = vec - (eye[:, np.newaxis] if vec.ndim == 2 else eye)
+                depth = -np.inner(self.axis, d.T)  # axis points from surface toward eye, so d·axis < 0; negate for positive depth
+                return np.array([np.inner(vecI, d.T) / depth, np.inner(vecJ, d.T) / depth])
+            def proj_vec(u, v, T):  # project a tangent vector T at (u,v) using the perspective Jacobian
+                # d(XY)/dt = (inner(vecI/J, T) + xy * inner(axis, T)) / depth
+                T = np.asarray(T)
+                S_pt = np.asarray(self.S(u, v))
+                d = S_pt - (eye[:, np.newaxis] if S_pt.ndim == 2 else eye)
+                depth = -np.inner(self.axis, d.T)
+                xy = np.array([np.inner(vecI, d.T) / depth, np.inner(vecJ, d.T) / depth])
+                axis_T = np.inner(self.axis, T.T)
+                return np.array([(np.inner(vecI, T.T) + xy[0] * axis_T) / depth,
+                                 (np.inner(vecJ, T.T) + xy[1] * axis_T) / depth])
+            def ker_param(u, v):  # kernel of perspective projection Jacobian in parameter space (2×2 SVD)
+                Su_a = np.array(self.Su(u, v)); Sv_a = np.array(self.Sv(u, v))
+                S_pt = np.asarray(self.S(u, v))
+                scalar = S_pt.ndim == 1
+                if scalar:
+                    Su_a = Su_a[:, np.newaxis]; Sv_a = Sv_a[:, np.newaxis]; S_pt = S_pt[:, np.newaxis]
+                d = S_pt - eye[:, np.newaxis]
+                depth = -np.inner(self.axis, d.T)
+                xy = np.array([np.inner(vecI, d.T) / depth, np.inner(vecJ, d.T) / depth])
+                aSu = np.inner(self.axis, Su_a.T); aSv = np.inner(self.axis, Sv_a.T)
+                # 2×2 perspective Jacobian: rows are vecI, vecJ; cols are u, v directions
+                J = np.array([[np.inner(vecI, Su_a.T) + xy[0] * aSu, np.inner(vecI, Sv_a.T) + xy[0] * aSv],
+                              [np.inner(vecJ, Su_a.T) + xy[1] * aSu, np.inner(vecJ, Sv_a.T) + xy[1] * aSv]])
+                # J shape (2, 2, N) → (N, 2, 2) for batched SVD
+                _, _, vh = svd(J.transpose(2, 0, 1))  # transpose axes to (N, 2, 2) without transposing the matrix itself
+                ker = vh[:, -1, :].T  # (2, N)
+                return ker[:, 0] if scalar else ker
+
+        def Z(vec):  # depth along view axis — relative ordering valid for both ortho and persp
             return np.inner(self.axis, vec.T)
 
         def XYZ(vec):  # renvoie le vecteur dont les coord. sur (I,J) sont 'vec'
             return vec[0] * vecI + vec[1] * vecJ
 
         self.XY = XY
+        self.proj_vec = proj_vec
+        self.ker_param = ker_param
         self.Z = Z
         self.XYZ = XYZ
 
     def for_3js(self) :
+        if self.domain_type == 'disk':
+            return self._for_3js_disk()
         res = self.low_res
-        # liste 1d  x_1,y_1,z_1,x_2,y_2,z_2,... des positions/normales. l'indice du point (i,j) de la grille est i*(res+1) + j
-        positions = np.transpose(np.array([self.X_grid.flatten(), self.Y_grid.flatten(), self.Z_grid.flatten()])).flatten() 
-        normals = np.transpose(np.array([self.NX_grid.flatten(), self.NY_grid.flatten(), self.NZ_grid.flatten()])).flatten()
-        # index(i,j) = indice du point p(i,j)
-        index = np.reshape(np.arange((res+1)*(res+1)), (res+1, res+1))
-        a = index[:-1,:-1]
-        b = index[:-1,1:]
-        c = index[1:,:-1]
-        d = index[1:,1:]
-        faces = np.concatenate((np.transpose(np.array([a,c,b])).flatten(), np.transpose(np.array([c,d,b])).flatten()))
-        
-        return positions.tolist(), normals.tolist(), faces.tolist(), self.center, self.radius    
+        u_grid, v_grid = np.meshgrid(
+            np.linspace(self.u_min, self.u_max, res + 1),
+            np.linspace(self.v_min, self.v_max, res + 1),
+            indexing="ij"
+        )
+        u_flat, v_flat = u_grid.flatten(), v_grid.flatten()
+        S_vals  = _eval_vec(self.S,  u_flat, v_flat)   # (3, N)
+        SN_vals = _eval_vec(self.SN, u_flat, v_flat)   # (3, N)
+        positions = S_vals.T.flatten()
+        normals   = SN_vals.T.flatten()
+        center, radius = _center_radius(S_vals)
+        index = np.reshape(np.arange((res + 1) ** 2), (res + 1, res + 1))
+        a = index[:-1, :-1]; b = index[:-1, 1:]
+        c = index[1:, :-1];  d = index[1:, 1:]
+        faces = np.concatenate((np.transpose(np.array([a,c,b])).flatten(),
+                                np.transpose(np.array([c,d,b])).flatten()))
+        return positions.tolist(), normals.tolist(), faces.tolist(), center, radius
 
-    def triangulate(
-        self, res
-    ):  
+    def _for_3js_disk(self):
+        res = self.low_res
+        n_bnd = max(64, res)
+        theta_bnd = np.linspace(0, 2 * np.pi, n_bnd, endpoint=False)
+        outer = np.column_stack([self.r_max * np.cos(theta_bnd),
+                                  self.r_max * np.sin(theta_bnd)])
+        outer_segs = np.column_stack([np.arange(n_bnd), (np.arange(n_bnd) + 1) % n_bnd])
+        if self.r_min > 0:
+            inner = np.column_stack([self.r_min * np.cos(theta_bnd),
+                                      self.r_min * np.sin(theta_bnd)])
+            inner_segs = np.column_stack([n_bnd + np.arange(n_bnd),
+                                           n_bnd + (np.arange(n_bnd) + 1) % n_bnd])
+            verts = np.vstack([outer, inner])
+            segs  = np.vstack([outer_segs, inner_segs])
+            mesh_in = {'vertices': verts, 'segments': segs, 'holes': np.array([[0.0, 0.0]])}
+        else:
+            mesh_in = {'vertices': outer, 'segments': outer_segs}
+        disk_area = np.pi * (self.r_max**2 - self.r_min**2)
+        target_area = disk_area / (res * res)
+        mesh = tr.triangulate(mesh_in, f'pYq30a{target_area:.15f}')
+        u_flat = mesh['vertices'][:, 0]
+        v_flat = mesh['vertices'][:, 1]
+        tris   = mesh['triangles'].astype(np.int32)
+        S_vals  = _eval_vec(self.S,  u_flat, v_flat)   # (3, N)
+        SN_vals = _eval_vec(self.SN, u_flat, v_flat)   # (3, N)
+        positions = S_vals.T.flatten()
+        normals   = SN_vals.T.flatten()
+        faces     = tris.flatten()
+        center, radius = _center_radius(S_vals)
+        return positions.tolist(), normals.tolist(), faces.tolist(), center, radius
+
+    def triangulate(self, res):
         t0 = time.perf_counter()
         self.res = res
-        
-        d_u, d_v = self.u_max - self.u_min, self.v_max - self.v_min
 
-        u_list = np.linspace(self.u_min, self.u_max, res + 1)  # res = number of squares
+        if self.domain_type == 'disk':
+            self._triangulate_disk(res, t0)
+        else:
+            self._triangulate_rect(res, t0)
+
+    def _triangulate_disk(self, res, t0):
+        """Triangulate a disk/annulus domain using the triangle library."""
+        n_bnd = max(64, res)
+        theta_bnd = np.linspace(0, 2 * np.pi, n_bnd, endpoint=False)
+
+        outer = np.column_stack([self.r_max * np.cos(theta_bnd),
+                                  self.r_max * np.sin(theta_bnd)])
+        outer_segs = np.column_stack([np.arange(n_bnd), (np.arange(n_bnd) + 1) % n_bnd])
+
+        if self.r_min > 0:
+            inner = np.column_stack([self.r_min * np.cos(theta_bnd),
+                                      self.r_min * np.sin(theta_bnd)])
+            inner_segs = np.column_stack([n_bnd + np.arange(n_bnd),
+                                           n_bnd + (np.arange(n_bnd) + 1) % n_bnd])
+            verts = np.vstack([outer, inner])
+            segs  = np.vstack([outer_segs, inner_segs])
+            mesh_in = {'vertices': verts, 'segments': segs, 'holes': np.array([[0.0, 0.0]])}
+        else:
+            mesh_in = {'vertices': outer, 'segments': outer_segs}
+
+        disk_area = np.pi * (self.r_max**2 - self.r_min**2)
+        target_area = disk_area / (res * res)
+        mesh = tr.triangulate(mesh_in, f'pYq30a{target_area:.15f}')
+
+        u_flat = mesh['vertices'][:, 0]
+        v_flat = mesh['vertices'][:, 1]
+        tris   = mesh['triangles'].astype(np.int32)   # (M, 3)
+        N_tris = len(tris)
+
+        self.S_grid  = _eval_vec(self.S,  u_flat, v_flat)
+        self.SN_grid = _eval_vec(self.SN, u_flat, v_flat)
+        self.center, self.radius = _center_radius(self.S_grid)
+        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "calcul grid (disk)"))
+        t0 = time.perf_counter()
+
+        mean_edge = np.sqrt(disk_area / N_tris)
+        self.uv_vector = np.array([5.0 / mean_edge, 5.0 / mean_edge])
+
+        # Build edge → face map
+        edge_to_faces = defaultdict(list)
+        for f_idx, (va, vb, vc) in enumerate(tris):
+            for p_v, q_v in [(va, vb), (vb, vc), (vc, va)]:
+                edge_to_faces[(min(p_v, q_v), max(p_v, q_v))].append((f_idx, p_v, q_v))
+
+        int_ps, int_qs, int_fs, int_gs = [], [], [], []
+        int_fps, int_fdps, int_dirs, int_flips = [], [], [], []
+        bnd_ps, bnd_qs, bnd_fs, bnd_gs = [], [], [], []
+        bnd_fps, bnd_fdps, bnd_dirs, bnd_flips = [], [], [], []
+
+        for (mn, mx), face_list in edge_to_faces.items():
+            fp_c  = np.array([u_flat[mn], v_flat[mn]])
+            fdp_c = np.array([u_flat[mx] - u_flat[mn], v_flat[mx] - v_flat[mn]])
+            if len(face_list) == 2:
+                int_ps.append(mn); int_qs.append(mx)
+                int_fs.append(face_list[0][0]); int_gs.append(face_list[1][0])
+                int_fps.append(fp_c); int_fdps.append(fdp_c)
+                int_dirs.append(np.array([1.0, 0.0])); int_flips.append(1)
+            else:
+                f_idx = face_list[0][0]
+                edge_len = norm(fdp_c)
+                edge_dir = fdp_c / (edge_len + 1e-30)
+                inward = np.array([-edge_dir[1], edge_dir[0]])
+                centroid = np.array([u_flat[tris[f_idx]].mean(), v_flat[tris[f_idx]].mean()])
+                if np.dot(inward, centroid - fp_c) < 0:
+                    inward = -inward
+                bnd_ps.append(mn); bnd_qs.append(mx)
+                bnd_fs.append(f_idx); bnd_gs.append(-1)
+                bnd_fps.append(fp_c); bnd_fdps.append(fdp_c)
+                bnd_dirs.append(inward); bnd_flips.append(1)
+
+        def _make_eds(ps, qs, fs, gs, fps, fdps, dirs, flips):
+            if not ps:
+                return np.array([], dtype=e_type)
+            return fromarrays(
+                (np.array(ps, dtype=np.uint32),
+                 np.array(qs, dtype=np.uint32),
+                 np.array(fs, dtype=np.int32),
+                 np.array(gs, dtype=np.int32),
+                 np.array(fps, dtype=np.float64),
+                 np.array(fdps, dtype=np.float64),
+                 np.array(dirs, dtype=np.float64),
+                 np.array(flips, dtype=np.int16)),
+                dtype=e_type,
+            )
+
+        i_eds = _make_eds(int_ps, int_qs, int_fs, int_gs, int_fps, int_fdps, int_dirs, int_flips)
+        b_eds = _make_eds(bnd_ps, bnd_qs, bnd_fs, bnd_gs, bnd_fps, bnd_fdps, bnd_dirs, bnd_flips)
+        self.b_index = len(i_eds)
+        self.eds  = np.concatenate([i_eds, b_eds]).view(e_type)
+        self.ieds = self.eds[:self.b_index]
+        self.beds = self.eds[self.b_index:]
+        self.corners = set()
+        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "triangulation (disk)"))
+
+        t0 = time.perf_counter()
+        self.b_lines = make_lines(self.beds["p"], self.beds["q"], self.corners)
+        self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "make boundary lines"))
+
+        def simple_close(pt, qt):
+            return qt
+        self.close = simple_close
+        self.generator_u = lambda pt, i: pt
+        self.generator_v = lambda pt, i: pt
+
+    def _triangulate_rect(self, res, t0):
+        """Triangulate a rectangular domain using a structured grid (flat vertex indices)."""
+        u_list = np.linspace(self.u_min, self.u_max, res + 1)
         v_list = np.linspace(self.v_min, self.v_max, res + 1)
 
         self.uv_vector = 5 * np.array(
             [res / (self.u_max - self.u_min), res / (self.v_max - self.v_min)]
-        )  # multiplié par la longueur, donne le nombre de subdivision. Grand = plus de subdivisions.
+        )
 
-        u_grid, v_grid = np.meshgrid(
-            u_list, v_list, indexing="ij"
-        )  # matrix indexing: u est l'indice de ligne, v l'indice de colonne
-        self.S_grid = self.S(u_grid, v_grid)
-        self.SN_grid = self.SN(u_grid, v_grid)
+        u_grid, v_grid = np.meshgrid(u_list, v_list, indexing="ij")
+        u_flat, v_flat = u_grid.flatten(), v_grid.flatten()
+        self.S_grid  = _eval_vec(self.S,  u_flat, v_flat)
+        self.SN_grid = _eval_vec(self.SN, u_flat, v_flat)
+        self.center, self.radius = _center_radius(self.S_grid)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "calcul grid"))
-
         t0 = time.perf_counter()
 
-        ############ listes d'indices
-        points = np.array(np.meshgrid(np.arange(res + 1), np.arange(res + 1))).T
-        fpoints = np.array(
-            np.meshgrid(u_list, v_list)
-        ).T  # transposé fait que u = ligne, v = colonne, et que le dernier axe = point
+        # Flat vertex index: vertex (i,j) → i*(res+1)+j
+        points = np.arange((res + 1) * (res + 1)).reshape(res + 1, res + 1)
+        fpoints = np.array(np.meshgrid(u_list, v_list)).T  # (res+1,res+1,2), u=row, v=col
 
         if self.u_identify == "cy":
             points[res, :] = points[0, :]
         if self.v_identify == "cy":
             points[:, res] = points[:, 0]
         if self.u_identify == "mo":
-            points[res, :] = points[0, ::-1]  # reverse order
+            points[res, :] = points[0, ::-1]
         if self.v_identify == "mo":
             points[:, res] = points[::-1, 0]
 
-        # les sommets du carré: b au dessus de a, d au dessus de c, c à droite de a
         a = points[:res, :res]
-        b = points[:res, 1 : res + 1]
-        c = points[1 : res + 1, :res]
-        d = points[1 : res + 1, 1 : res + 1]
+        b = points[:res, 1:res + 1]
+        c = points[1:res + 1, :res]
+        d = points[1:res + 1, 1:res + 1]
 
-        # en coordonnées u,v
         fa = fpoints[:res, :res]
-        fb = fpoints[:res, 1 : res + 1]
-        fc = fpoints[1 : res + 1, :res]
-        fd = fpoints[1 : res + 1, 1 : res + 1]
-        # on ne fait pas d'identifications pour les raccord cyl et moebius, sinon les arêtes ont des extremités trop éloignées.
+        fb = fpoints[:res, 1:res + 1]
+        fc = fpoints[1:res + 1, :res]
+        fd = fpoints[1:res + 1, 1:res + 1]
 
-        # Les faces : devenu inutile depuis qu'on utilise plus "other", la face est juste un numéro
-        # up_faces = fromarrays((a,b,d), dtype = f_type).flatten()
-        # dn_faces = fromarrays((a,d,c), dtype = f_type).flatten()
-        # self.faces = np.array(np.concatenate((up_faces, dn_faces)), dtype = f_type)
+        f = np.reshape(np.arange(res * res), (res, res))          # up faces
+        g = np.reshape(np.arange(res * res, 2 * res * res), (res, res))  # dn faces
+        o = np.full((res,), -1)
 
-        # les indexs des faces (down et up), dans un tableau indicé par les coord. du point bas gauche du carré
-        f = np.reshape(np.arange(res * res), (res, res))  # f = up faces
-        g = np.reshape(np.arange(res * res, 2 * res * res), (res, res))  # g = dn faces
-        o = np.full(
-            (res,), -1
-        )  # l'indice -1 signifie qu'il n'y a pas de face (pour le bord)
-
-        # les directions (n'ont un sens que pour les arêtes de bord)
         drte = np.array([1, 0])
         gche = np.array([-1, 0])
         haut = np.array([0, 1])
-        bas = np.array([0, -1])
-        # haut = direction vers le haut. C'est la normale aux arêtes en bas. Idem pour les autres
+        bas  = np.array([0, -1])
 
-        # le champ 'flip'
         flip_square_no = np.full((res, res), 1)
-        flip_line_no = np.full((res,), 1)
+        flip_line_no   = np.full((res,), 1)
 
-        # arêtes de bord
-        dn_eds = fromarrays(
-            (
-                a[:, 0],
-                c[:, 0],
-                g[:, 0],
-                o,
-                fa[:, 0],
-                fc[:, 0] - fa[:, 0],
-                np.tile(haut, (res, 1)),
-                flip_line_no,
-            ),
-            dtype=e_type,
-        )  # left
-        up_eds = fromarrays(
-            (
-                b[:, -1],
-                d[:, -1],
-                f[:, -1],
-                o,
-                fb[:, -1],
-                fd[:, -1] - fb[:, -1],
-                np.tile(bas, (res, 1)),
-                flip_line_no,
-            ),
-            dtype=e_type,
-        )  # right
-        lf_eds = fromarrays(
-            (
-                a[0, :],
-                b[0, :],
-                f[0, :],
-                o,
-                fa[0, :],
-                fb[0, :] - fa[0, :],
-                np.tile(drte, (res, 1)),
-                flip_line_no,
-            ),
-            dtype=e_type,
-        )  # up
-        rt_eds = fromarrays(
-            (
-                c[-1, :],
-                d[-1, :],
-                g[-1, :],
-                o,
-                fc[-1, :],
-                fd[-1, :] - fc[-1, :],
-                np.tile(gche, (res, 1)),
-                flip_line_no,
-            ),
-            dtype=e_type,
-        )  # down
-        # arêtes intérieures
-        dg_eds = fromarrays(
-            (a, d, f, g, fa, fd - fa, np.tile(drte, (res, res, 1)), flip_square_no),
-            dtype=e_type,
-        )  # diagonales
-        hr_eds = fromarrays(
-            (
-                a[:, 1:],
-                c[:, 1:],
-                g[:, 1:],
-                f[:, :-1],
-                fa[:, 1:],
-                fc[:, 1:] - fa[:, 1:],
-                np.tile(drte, (res, res - 1, 1)),
-                flip_square_no[:, 1:],
-            ),
-            dtype=e_type,
-        )  # horiz
-        vr_eds = fromarrays(
-            (
-                a[1:, :],
-                b[1:, :],
-                f[1:, :],
-                g[:-1, :],
-                fa[1:, :],
-                fb[1:, :] - fa[1:, :],
-                np.tile(drte, (res - 1, res, 1)),
-                flip_square_no[1:, :],
-            ),
-            dtype=e_type,
-        )  # vertic
+        dn_eds = fromarrays((a[:, 0], c[:, 0], g[:, 0], o,
+                              fa[:, 0], fc[:, 0] - fa[:, 0],
+                              np.tile(haut, (res, 1)), flip_line_no), dtype=e_type)  # left
+        up_eds = fromarrays((b[:, -1], d[:, -1], f[:, -1], o,
+                              fb[:, -1], fd[:, -1] - fb[:, -1],
+                              np.tile(bas, (res, 1)), flip_line_no), dtype=e_type)   # right
+        lf_eds = fromarrays((a[0, :], b[0, :], f[0, :], o,
+                              fa[0, :], fb[0, :] - fa[0, :],
+                              np.tile(drte, (res, 1)), flip_line_no), dtype=e_type)  # bottom
+        rt_eds = fromarrays((c[-1, :], d[-1, :], g[-1, :], o,
+                              fc[-1, :], fd[-1, :] - fc[-1, :],
+                              np.tile(gche, (res, 1)), flip_line_no), dtype=e_type)  # top
+        dg_eds = fromarrays((a, d, f, g, fa, fd - fa,
+                              np.tile(drte, (res, res, 1)), flip_square_no), dtype=e_type)
+        hr_eds = fromarrays((a[:, 1:], c[:, 1:], g[:, 1:], f[:, :-1],
+                              fa[:, 1:], fc[:, 1:] - fa[:, 1:],
+                              np.tile(drte, (res, res - 1, 1)), flip_square_no[:, 1:]), dtype=e_type)
+        vr_eds = fromarrays((a[1:, :], b[1:, :], f[1:, :], g[:-1, :],
+                              fa[1:, :], fb[1:, :] - fa[1:, :],
+                              np.tile(drte, (res - 1, res, 1)), flip_square_no[1:, :]), dtype=e_type)
+
         if self.u_identify == "cy":
             lf_eds["g"] = g[-1, :]
         if self.v_identify == "cy":
@@ -510,117 +692,38 @@ class Surface:
             lf_eds["g"] = np.flip(g[-1, :], 0)
             dg_eds["flip"][-1, :] = -1
             hr_eds["flip"][-1, :] = -1
-            dn_eds["flip"][-1] = up_eds["flip"][
-                -1
-            ] = (
-                -1
-            )  # indique que la normale calculée avec NZ grid donne une orientation incohérente aux extremites de l'arete
+            dn_eds["flip"][-1] = up_eds["flip"][-1] = -1
         if self.v_identify == "mo":
             dg_eds["flip"][:, -1] = -1
             dn_eds["g"] = np.flip(f[:, -1], 0)
             vr_eds["flip"][:, -1] = -1
             lf_eds["flip"][-1] = rt_eds["flip"][-1] = -1
 
-        # tous ensemble
-        if (self.u_identify == "cy" or self.u_identify == "mo") and self.v_identify == "no":
-            self.eds = np.array(
-                np.concatenate(
-                    (
-                        dg_eds.flatten(),
-                        hr_eds.flatten(),
-                        vr_eds.flatten(),
-                        lf_eds,
-                        dn_eds,
-                        up_eds,
-                    )
-                ),
-                dtype=e_type,
-            )
-            self.b_index = (
-                res * res + 2 * (res - 1) * res + res
-            )  # diagonales + 2* verticales intérieures + verticale gauche
-            self.ieds = self.eds[
-                : self.b_index
-            ]  # a view of the edges containing only the interior edges
-            self.beds = self.eds[
-                self.b_index :
-            ]  # a view of the edges containing only the boundary edges
-        elif self.u_identify == "no" and (self.v_identify == "cy" or self.v_identify == "mo"):
-            self.eds = np.array(
-                np.concatenate(
-                    (
-                        dg_eds.flatten(),
-                        hr_eds.flatten(),
-                        vr_eds.flatten(),
-                        dn_eds,
-                        lf_eds,
-                        rt_eds,
-                    )
-                ),
-                dtype=e_type,
-            )
+        if (self.u_identify in ("cy", "mo")) and self.v_identify == "no":
+            self.eds = np.array(np.concatenate((dg_eds.flatten(), hr_eds.flatten(),
+                                                 vr_eds.flatten(), lf_eds, dn_eds, up_eds)), dtype=e_type)
             self.b_index = res * res + 2 * (res - 1) * res + res
-            self.ieds = self.eds[
-                : self.b_index
-            ]  # a view of the edges containing only the interior edges
-            self.beds = self.eds[
-                self.b_index :
-            ]  # a view of the edges containing only the boundary edges
+        elif self.u_identify == "no" and self.v_identify in ("cy", "mo"):
+            self.eds = np.array(np.concatenate((dg_eds.flatten(), hr_eds.flatten(),
+                                                 vr_eds.flatten(), dn_eds, lf_eds, rt_eds)), dtype=e_type)
+            self.b_index = res * res + 2 * (res - 1) * res + res
         elif self.u_identify != "no" and self.v_identify != "no":
-            self.eds = np.array(
-                np.concatenate(
-                    (
-                        dg_eds.flatten(),
-                        hr_eds.flatten(),
-                        vr_eds.flatten(),
-                        lf_eds,
-                        dn_eds,
-                    )
-                ),
-                dtype=e_type,
-            )
+            self.eds = np.array(np.concatenate((dg_eds.flatten(), hr_eds.flatten(),
+                                                 vr_eds.flatten(), lf_eds, dn_eds)), dtype=e_type)
             self.b_index = res * res + 2 * (res - 1) * res + 2 * res
-            self.ieds = self.eds[
-                : self.b_index
-            ]  # a view of the edges containing only the interior edges
-            self.beds = self.eds[
-                self.b_index :
-            ]  # a view of the edges containing only the boundary edges
         else:
-            self.eds = np.array(
-                np.concatenate(
-                    (
-                        dg_eds.flatten(),
-                        hr_eds.flatten(),
-                        vr_eds.flatten(),
-                        lf_eds,
-                        rt_eds,
-                        up_eds,
-                        dn_eds,
-                    )
-                ),
-                dtype=e_type,
-            )
+            self.eds = np.array(np.concatenate((dg_eds.flatten(), hr_eds.flatten(),
+                                                 vr_eds.flatten(), lf_eds, rt_eds, up_eds, dn_eds)), dtype=e_type)
             self.b_index = res * res + 2 * (res - 1) * res
-            self.ieds = self.eds[
-                : self.b_index
-            ]  # a view of the edges containing only the interior edges
-            self.beds = self.eds[
-                self.b_index :
-            ]  # a view of the edges containing only the boundary edges
+
+        self.ieds = self.eds[:self.b_index]
+        self.beds = self.eds[self.b_index:]
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "triangulation"))
 
-
-        # les coins. Points transformés en tuples pour être hashables
+        # Corners: flat integer indices (hashable directly as ints)
         if self.u_identify == self.v_identify == "no":
-            self.corners = set(
-                [
-                    tuple(points[0, 0]),
-                    tuple(points[0, res]),
-                    tuple(points[res, 0]),
-                    tuple(points[res, res]),
-                ]
-            )
+            self.corners = {int(points[0, 0]), int(points[0, res]),
+                            int(points[res, 0]), int(points[res, res])}
         else:
             self.corners = set()
 
@@ -673,7 +776,8 @@ class Surface:
         else:
             self.close = simple_close  # s'il n'y a pas de raccord, il faut éviter de ralentir le programme avec la fonction close.
 
-    def traitement(self):
+    def traitement(self, use_lp=True, use_newton=True, simplify_pts=None):
+        self._use_newton = use_newton
         self.breaks = {
             "b": {},
             "c": {},
@@ -684,22 +788,15 @@ class Surface:
         self.lines = []
         self.break_lines()  # découpe les bords et plis à chaque bord-pli ou cusp.(long)
         self.connect()  # ajoute des segments pour que l'ensemble des bords et plis soit connexe
-        self.simplify_lines()  # espace les points régulièrement (à l'écran) pour éviter les artefacts de discrétisation.
+        self.simplify_lines(n_points=simplify_pts)  # espace les points régulièrement (à l'écran) pour éviter les artefacts de discrétisation.
         self.line_bks = [[[] for j in range(len(l) - 1)] for l in self.lines]
         line, idx = self.intersections() # calcule les intersections/chgement de visi. Renvoie: point visible (long)
         # line, idx = 0, 0
-        #for i, l in enumerate(self.lines): #debug
-        #   self.print("ligne:%i type:%s len:%i debut:[%0.2f,%0.2f] fin:[%0.2f,%0.2f]  chgt visi début:%i chgt visi fin:%i"%(i,l[0]['type'],
-        #                                                                                                        len(l), *self.XY(np.array(self.S(*l['fp'][0]))),
-        #                                                                                                        *self.XY(np.array(self.S(*l['fp'][-1]))), l['v'][0],  l['v'][-1]))
-        #   string = 'breaks : ['
-        #   for j in range(len(l) - 1):
-        #       for (s,v) in self.line_bks[i][j]:
-        #           string+= "(%i, %i) "%(j,v)
-        #   self.print(string+']')
         self.visibilities = {}
-        # self.visibility(line, idx)  # propage la visibilité à toutes les lignes
-        self.visibilite(line, idx)  # propage la visibilité à toutes les lignes
+        if use_lp:
+            self.visibilite(line, idx)   # LP visibility
+        else:
+            self._bfs_visibility(line, idx)  # BFS propagation (fast, no LP)
         #for p, v in self.visibilities.items(): # debug
         #    print("point:[%0.2f,%0.2f] visibilité:%i"%(*self.XY(np.array(self.S(*p))), v))
 
@@ -711,15 +808,21 @@ class Surface:
         ######## Calcul des points de contour #########
 
         #### sélection des arêtes
-        NZ_grid = (
-            self.SN_grid[0] * self.axis[0]
-            + self.SN_grid[1] * self.axis[1]
-            + self.SN_grid[2] * self.axis[2]
-        )
+        if self.SN_axis is self.SN_axis_persp:
+            # Perspective: silhouette condition is N·(S−eye)=0
+            eye = self.ax_param
+            NZ_grid = (self.SN_grid * (self.S_grid - eye[:, np.newaxis])).sum(axis=0)
+        else:
+            # Orthographic: silhouette condition is N·axis=0
+            NZ_grid = (
+                self.SN_grid[0] * self.axis[0]
+                + self.SN_grid[1] * self.axis[1]
+                + self.SN_grid[2] * self.axis[2]
+            )
 
         vec_i = np.where(
-            NZ_grid[self.eds["p"][:, 0], self.eds["p"][:, 1]]
-            * NZ_grid[self.eds["q"][:, 0], self.eds["q"][:, 1]]
+            NZ_grid[self.eds["p"]]
+            * NZ_grid[self.eds["q"]]
             * self.eds["flip"]
             < 0
         )
@@ -733,10 +836,10 @@ class Surface:
         t0 = time.perf_counter()
 
         def NZbis(s, u, v, du, dv):
-            return self.SN_axis(u + s * du, v + s * dv, *self.axis)
+            return self.SN_axis(u + s * du, v + s * dv, *self.ax_param)
 
         init = np.full(len(vec_i), 0.5)
-        if len(vec_i) > 0:
+        if len(vec_i) > 0 and getattr(self, '_use_newton', True):
             vec_s = newton(
                 NZbis,
                 init,
@@ -747,6 +850,16 @@ class Surface:
                     self.eds["fdp"][vec_i, 1],
                 ),
             )
+            # Filter out diverged Newton iterates (NaN or outside [0,1]).
+            # This can happen on disk boundary edges when the secant step
+            # overshoots into a region where the surface is undefined (e.g.
+            # sqrt of a negative number), propagating NaN through the
+            # subsequent SVD call in kerdS.
+            valid = np.isfinite(vec_s) & (vec_s >= 0) & (vec_s <= 1)
+            vec_i = vec_i[valid]
+            vec_s = vec_s[valid]
+        elif len(vec_i) > 0:
+            vec_s = np.full(len(vec_i), 0.5)  # midpoint when Newton disabled
         else:
             vec_s = np.array([])
         self.print(
@@ -815,7 +928,9 @@ class Surface:
 
         self.cusps = fromrecords(cusps, dtype=cusp_type)
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "breaks de cusps"))
-        # print(len(self.c_lines), len(self.b_lines), len(self.cusps))
+        print('c_lines=%i b_lines=%i cusps=%i' % (len(self.c_lines), len(self.b_lines), len(self.cusps)))
+        for ci, cl in enumerate(self.c_lines):
+            print('  c_line %i: len=%i closed=%s' % (ci, len(cl), cl[-1]==cl[0] if len(cl)>0 else 'empty'))
         # print(len(self.breaks['b']),len(self.breaks['c']))
 
     def break_lines(self):
@@ -834,8 +949,8 @@ class Surface:
                 Sv_v   = np.array(self.Sv(u, v))             # (3, N)
                 dS_nu  = Su_v * nu_u  + Sv_v * nu_v          # (3, N)
                 dS_fdp = Su_v * fdp_u + Sv_v * fdp_v         # (3, N)
-                vec_xy = self.XY(dS_nu)                      # (2, N)
-                t_xy   = self.XY(dS_fdp)                     # (2, N)
+                vec_xy = self.proj_vec(u, v, dS_nu)          # (2, N)
+                t_xy   = self.proj_vec(u, v, dS_fdp)         # (2, N)
                 t_n    = t_xy / np.sqrt((t_xy**2).sum(axis=0))
                 inner  = (vec_xy * t_n).sum(axis=0)
                 vp     = vec_xy - inner * t_n
@@ -887,7 +1002,7 @@ class Surface:
                             )
                         ]
                     )
-                if tuple(q) in self.corners:
+                if q in self.corners:
                     # en cas de coin, on casse, car la direction intérieure est discontinue aux coins.
                     lines[-1].append(
                         (
@@ -993,11 +1108,14 @@ class Surface:
         self.cc_s = (
             self.connected_components()
         )  # liste de listes d'indices de lignes, qui sont connectées.
-        # print('nombre de composantes connexes %i'%(len(self.cc_s),))
+        print('nombre de composantes connexes %i'%(len(self.cc_s),))
+        for ci, cc in enumerate(self.cc_s):
+            types = [self.lines[l][0]['type'] for l in cc]
+            print('  composante %i: %i lignes, types=%s' % (ci, len(cc), types))
 
         if len(self.cc_s) < 2:
             return
-        # print('connect !!')
+        print('connect !!')
         # distances entre les composantes connexes, links dit quels points sont reliés : indice de ligne, indice dans la ligne
         trees = {}
         l_index = {}
@@ -1057,6 +1175,9 @@ class Surface:
         dic = defaultdict(list)
         for i, j in cuts:
             il, ie, jl, je = links[i, j]
+            print('  cut: comp%i ligne%i[%i](type=%s) <-> comp%i ligne%i[%i](type=%s)' % (
+                i, il, ie, self.lines[il][ie]['type'],
+                j, jl, je, self.lines[jl][je]['type']))
             bisect.insort(dic[il], ie)
             bisect.insort(dic[jl], je)
             p, q = self.lines[il][ie], self.lines[jl][je]
@@ -1079,34 +1200,27 @@ class Surface:
 
         self.print("[%0.3fs] %s" % (time.perf_counter() - t0, "connect"))
 
-    def simplify_lines(self):
+    def simplify_lines(self, n_points=None):
         t0 = time.perf_counter()
 
         # define sample
         def sample_fn(x):
-            #return x
-            #return x + np.sqrt(x)
-            #return np.sqrt(self.res) * x * x / (1 + np.sqrt(self.res) * x) # moins cher que celui du dessous mais moins bien
             return x * x / (1 + x)
-            #return x*np.sqrt(x)/(1+np.sqrt(x)) # semble être le bonne fonction, sais pas pourquoi
 
         p = []  # list of lists of image points of the lines
-        # pas clair ce qu'il faut. le 50 représente la longueur max d'une ligne (largeur écran = 1), 100 = nombre de points par unité de longueur
-        # sample = sample_fn(np.linspace(0,50, 50*self.res))
-        # sample = sample_fn(np.linspace(0,50, 50*min(self.res, 200))) # pas clair ce qu'il faut.
-        sample = sample_fn(
-            np.linspace(0, 50, 50 * max(self.res // 5, 100))
-        )  # pas clair ce qu'il faut.
+        # n_points is "output points per unit of screen width"; multiply by 50 to get sample count.
+        # Old default: 50 * max(res // 5, 100).  With n_points=80 → 50*80 = 4000 ≈ same order.
+        _n = (n_points * 50) if n_points is not None else 50 * max(self.res // 5, 100)
+        sample = sample_fn(np.linspace(0, 50, _n))
 
-        # compute bounds of image self.im_bounds = ([xmin, ymin], [xmax, ymax])
-        im_min = np.min(self.XY(np.array(self.S(self.u_min, self.v_min))))
-        im_max = np.max(self.XY(np.array(self.S(self.u_min, self.v_min))))
+        im_min = np.inf
+        im_max = -np.inf
+
         for l in self.lines:
-            # p.append((self.S(l['fp'][:,0], l['fp'][:,1])[:,0]).T)
             p.append(self.XY(np.array(self.S(l["fp"][:, 0], l["fp"][:, 1]))).T)
-
-            lmin, lmax = np.min(p[-1]), np.max(p[-1])
-            im_min, im_max = min(lmin, im_min), max(lmax, im_max)
+            lmin, lmax = np.nanmin(p[-1]), np.nanmax(p[-1])
+            if np.isfinite(lmin): im_min = min(lmin, im_min)
+            if np.isfinite(lmax): im_max = max(lmax, im_max)
 
         # vector which scales XY coordinates to a square of sidelength 1
         scale = np.array([1, 1]) / (im_max - im_min)
@@ -1357,6 +1471,50 @@ class Surface:
         else:  # sinon c'est q qui a le min de x.
             return e["l_idx"], e["e_idx"] + 1
 
+    def _bfs_visibility(self, line, idx):
+        """BFS propagation of visibility (pre-LP implementation)."""
+        t0 = time.perf_counter()
+        # Reset any stale LP results so plot_for_browser uses current line_bks and l[0]["v"]
+        self.opt_line_bks = self.line_bks
+        self.opt_cp = None
+        visited = set()
+        unseen = set()
+        lines_dic = defaultdict(set)
+        for i, l in enumerate(self.lines):
+            p, q = tuple(l[0]["ixfp"]), tuple(l[-1]["ixfp"])
+            lines_dic[p].add((i, 0))
+            lines_dic[q].add((i, -1))
+            unseen.update([p, q])
+
+        v = (
+            self.lines[line][idx]["v"]
+            if (idx == 0 or idx == len(self.lines[line]) - 1)
+            else 0
+        )
+
+        vis = self.propagation(line, idx, v)
+        p, q = self.lines[line][0], self.lines[line][-1]
+        point = q if idx == 0 else p
+        self.visibilities[tuple(point["ixfp"])] = vis
+        visited.add(tuple(point["ixfp"]))
+        unseen.discard(tuple(point["ixfp"]))
+
+        while visited:
+            pt = visited.pop()
+            for i, j in lines_dic[pt]:
+                l = self.lines[i]
+                qt = tuple(l[-1 - j]["ixfp"])
+                if qt in unseen:
+                    self.visibilities[qt] = self.propagation(
+                        i, j, self.visibilities[pt] + self.lines[i][j]["v"]
+                    )
+                    unseen.discard(qt)
+                    visited.add(qt)
+            visited.discard(pt)
+
+        # _bfs_visibility doesn't set opt_cp / opt_line_bks — plot_for_browser uses fallbacks
+        self.print("[%0.3fs] Visibilité BFS" % (time.perf_counter() - t0))
+
     def visibilite(self, line, idx):
         # LP complet: V[j], cp[i], cq[i], b[k] variables libres; tcp, tcq, tb slacks L1.
         # Toujours faisable (solution nulle satisfait toutes les contraintes).
@@ -1526,6 +1684,21 @@ class Surface:
 
         self.print("[%0.3fs] Visibilité LP (n=%d, m=%d, B=%d, segs=%d, %d comp)" %
                    (time.perf_counter() - t0, n, m, B, nsegs, len(components)))
+        # DIAG: per-line visibility
+        for i in range(m):
+            eff_vis = int(round(V[p_idx[i]])) + int(round(float(opt_cp[i])))
+            # collect breakpoints for this line
+            bk_list = []
+            ki = 0
+            for j in range(len(self.lines[i]) - 1):
+                for s, _ in self.line_bks[i][j]:
+                    bk_list.append("(j=%i,s=%.2f,b=%+.0f)" % (j, s, round(float(opt_b[line_bps[i][ki]]))))
+                    ki += 1
+            bk_str = " bks=[%s]" % ",".join(bk_list) if bk_list else ""
+            print("  line%i type=%s len=%i  V[p]=%+.0f cp=%+.0f cq=%+.0f  eff_vis=%i orig_cp=%+.0f orig_cq=%+.0f%s" % (
+                i, self.lines[i][0]["type"], len(self.lines[i]),
+                round(V[p_idx[i]]), round(float(opt_cp[i])), round(float(result.x[i_cq+i])),
+                eff_vis, orig_cp[i], orig_cq[i], bk_str))
 
     def plot_for_browser(self):
         t0 = time.perf_counter()
@@ -1821,7 +1994,7 @@ class Surface:
 
         Tb = dp / norm(dp)  # tangent au bord
 
-        Np = np.array(self.SD_jac(*p0, *self.axis))  # normale au pli
+        Np = np.array(self.SD_jac(*p0, *self.ax_param))  # normale au pli
         if np.inner(Np, ker) < 0:
             Np = -Np  # dirigée vers le pli supérieur
 
@@ -1833,7 +2006,7 @@ class Surface:
         # On évalue SN_axis en un point légèrement décalé le long de Tb pour capturer
         # les termes d'ordre supérieur qui déterminent le signe.
         eps = (self.u_max - self.u_min + self.v_max - self.v_min) / self.res
-        sn = self.SN_axis(*(p0 + eps * Tb), *self.axis)
+        sn = self.SN_axis(*(p0 + eps * Tb), *self.ax_param)
         self.print("Warning: near-degenerate border-contour crossing at [%0.4f,%0.4f] (Tb·Np=%.4f), using SN_axis offset (sn=%.4f)" % (p0[0], p0[1], inner, sn))
         return 1 if sn > 0 else -1
 
@@ -1844,7 +2017,7 @@ class Surface:
         # on le dirige vers le pli supérieur, càd les z croissants
         if np.inner(self.dS(*p, *ker), self.axis) < 0:
             ker = -ker
-        Np = np.array(self.SD_jac(*p, *self.axis))  # normale au pli
+        Np = np.array(self.SD_jac(*p, *self.ax_param))  # normale au pli
         if np.inner(Np, ker) < 0:
             Np = -Np  # dirigée vers le pli supérieur
 
@@ -1852,19 +2025,10 @@ class Surface:
         return 0 if np.inner(Np, dir) >= 0 else -1
 
     def kerdS(self, u, v):  # u et v peuvent être des float ou des vecteurs de floats
-        # matrice(s) de la différentielle de la projection de S sur le plan
-        du, dv = vect_prod(self.Su(u, v), self.axis), vect_prod(
-            self.Sv(u, v), self.axis
-        )
-        A = np.stack((du.T, dv.T), axis=-1)
-        # singular value decomp. vh est une matrice dont les lignes sont les vecteurs correspondant
-        # aux valeurs singulières en ordre décroissant
-        ux, s, vh = svd(A)
-        # vecteur correspondant à la dernière val sing, on transpose pour avoir le format [u, v]
-        ker = vh[..., -1, :].T
+        ker = self.ker_param(u, v)  # kernel of projection Jacobian (ortho or perspective)
 
-        diff2 = self.XY(self.d2S(u, v, ker[0], ker[1]))
-        im = self.XY(self.dS(u, v, -ker[1], ker[0]))
+        diff2 = self.proj_vec(u, v, self.d2S(u, v, ker[0], ker[1]))
+        im = self.proj_vec(u, v, self.dS(u, v, -ker[1], ker[0]))
         diff2 = diff2 - np.sum(diff2 * im, axis=0) * im / np.sum(im * im, axis=0)
         dir_vec = diff2 / norm(diff2, axis=0)
 

@@ -14,19 +14,15 @@
 		<div class="col" id="liste-surfaces">
 			{% for surface in surfaces %}
 			<div class="list-group-item item-liste" style="break-inside: avoid; overflow: hidden; display:flex; align-items:center; padding:6px 12px;">
-				<a href="{% url 'surface-play' pk=surface.pk %}" style="display:block; width:60px; height:60px; flex-shrink:0; margin-right:12px;">
+				<a href="{% url 'surface-play' pk=surface.pk %}" style="display:block; width:60px; height:60px; flex-shrink:0; margin-right:10px;">
 					{% if surface.thumbnail %}{{ surface.thumbnail|safe }}{% else %}<div style="width:60px; height:60px; background:#f0f0f0; border-radius:4px;"></div>{% endif %}
 				</a>
-				<h3 style="margin:0;">
-					<a href="{% url 'surface-update' pk=surface.pk %}" class="list-glyph">
-						<span class="far fa-pen-to-square"></span>
-					</a>
-					<a href="{% url 'surface-delete' pk=surface.pk %}" class="list-glyph">
-						<span class="far fa-trash-can"></span>
-					</a>
-					<a href="{% url 'surface-play' pk=surface.pk %}">
-					<i>	{{ surface.name }} </i>
-					</a>
+				<h3 style="margin:0; flex:1; display:flex; align-items:center; justify-content:space-between;">
+					<a href="{% url 'surface-play' pk=surface.pk %}"><i>{{ surface.name }}</i></a>
+					<span style="flex-shrink:0;">
+						<a href="{% url 'surface-update' pk=surface.pk %}" class="list-glyph"><span class="far fa-pen-to-square"></span></a>
+						<a href="{% url 'surface-delete' pk=surface.pk %}" class="list-glyph"><span class="far fa-trash-can"></span></a>
+					</span>
 				</h3>
 			</div>
 			{% endfor %}

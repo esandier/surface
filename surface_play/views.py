@@ -25,8 +25,13 @@ class SurfacePlayView(TemplateView):
 
     def get(self, request, pk):
         rec = get_object_or_404(SurfaceRecord, pk=pk)
-        surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
-        positions, normals, faces, center, radius = surf.for_3js() 
+        surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names,
+                       bounds=(rec.u_min, rec.u_max, rec.v_min, rec.v_max),
+                       quotient=(rec.u_identify, rec.v_identify),
+                       domain_type=rec.domain_type, coord_type=rec.coord_type,
+                       r_min=rec.r_min, r_max=rec.r_max,
+                       output_type=rec.output_type)
+        positions, normals, faces, center, radius = surf.for_3js()
         context = {}
         context['positions'] = positions
         context['normals'] = normals
@@ -35,30 +40,47 @@ class SurfacePlayView(TemplateView):
         context['radius'] = radius
         context['surface'] = rec
         context['pk'] = pk
+        context['initial_elev']    = rec.initial_elev
+        context['initial_azim']    = rec.initial_azim
+        context['initial_inplane'] = rec.initial_inplane
+        context['initial_zoom']    = rec.initial_zoom
 
         return render(request, self.template_name, context)
         
     def post(self, request, pk):
         rec = get_object_or_404(SurfaceRecord, pk=pk)
+        data = json.loads(request.body.decode())
+        debug = data.get('debug', {})
+        grid_res = int(debug.get('grid_res', settings.RESOLUTION))
         cache_key = (rec.X, rec.Y, rec.Z, rec.parameter_names,
                      rec.u_min, rec.u_max, rec.v_min, rec.v_max,
-                     rec.u_identify, rec.v_identify, settings.RESOLUTION)
+                     rec.u_identify, rec.v_identify,
+                     rec.domain_type, rec.coord_type, rec.r_min, rec.r_max,
+                     rec.output_type, grid_res)
+
         if _surface_cache.get(pk, (None,))[0] != cache_key:
-            surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names, bounds = (rec.u_min, rec.u_max, rec.v_min, rec.v_max), quotient = (rec.u_identify, rec.v_identify))
-            surf.triangulate(settings.RESOLUTION)
+            surf = Surface(rec.X, rec.Y, rec.Z, rec.parameter_names,
+                           bounds=(rec.u_min, rec.u_max, rec.v_min, rec.v_max),
+                           quotient=(rec.u_identify, rec.v_identify),
+                           domain_type=rec.domain_type, coord_type=rec.coord_type,
+                           r_min=rec.r_min, r_max=rec.r_max,
+                           output_type=rec.output_type)
+            surf.triangulate(grid_res)
             _surface_cache[pk] = (cache_key, surf)
         surf = _surface_cache[pk][1]
 
-        data = json.loads(request.body.decode())
-        I = data['I']
-        J = data['J']
-        O = data['O']
-        # zoom = data['zoom']
+        I   = data['I']
+        J   = data['J']
+        O   = data['O']
+        eye = data.get('eye')  # None for orthographic, [x,y,z] for perspective
 
-        # surf = request.session['surface']
-        surf.set_axis(I,J)
-        surf.traitement()
-        
+        surf.set_axis(I, J, eye=eye)
+        surf.traitement(
+            use_lp=debug.get('use_lp', True),
+            use_newton=debug.get('use_newton', True),
+            simplify_pts=debug.get('simplify_pts', None),
+        )
+
         lines = surf.plot_for_browser()
         lines_by_visibility = []
         for vis in sorted(lines):
@@ -72,11 +94,33 @@ class SurfacePlayView(TemplateView):
 
         response = {}
         response['lines_by_visibility'] = lines_by_visibility
-        response['origin'] = surf.XY(np.array(O)).tolist()
+        if eye is None:
+            response['origin'] = surf.XY(np.array(O)).tolist()
+        else:
+            response['origin'] = surf.XY(np.array(surf.center)).tolist()
         # response['domain'] = surf.domain_data()
 
         return HttpResponse(json.dumps(response), content_type='application/json')        
 
+
+
+def save_view(request, pk):
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    rec = get_object_or_404(SurfaceRecord, pk=pk)
+    data = json.loads(request.body.decode())
+    rec.initial_elev    = float(data['elev'])
+    rec.initial_azim    = float(data['azim'])
+    rec.initial_inplane = float(data['inplane'])
+    rec.initial_zoom    = float(data['zoom'])
+    try:
+        rec.thumbnail = compute_thumbnail(
+            rec, elev=rec.initial_elev, azim=rec.initial_azim, inplane=rec.initial_inplane
+        )
+        rec.save(update_fields=['initial_elev', 'initial_azim', 'initial_inplane', 'initial_zoom', 'thumbnail'])
+    except Exception:
+        rec.save(update_fields=['initial_elev', 'initial_azim', 'initial_inplane', 'initial_zoom'])
+    return HttpResponse('{}', content_type='application/json')
 
 
 class SurfaceRecordListView(ListView):

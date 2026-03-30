@@ -1,153 +1,311 @@
-<!-- templates/home.html -->
+<!-- templates/surface_play/surfacerecord_form.html -->
 {% extends "base.html" %}
 {% load json_filter %}
 
 {% block content %}
 <div class="container-fluid d-flex min-vh-100 flex-column">
-    <div class="row d-flex justify-content-between p-3 titre" style="position:sticky; top:0; z-index:100;">
-        <h1>{% if surface %}{{ surface.name }}{% else %}New surface{% endif %}</h1>
-        <h1>
-            <a href="{% url 'surfaces' %}" class="glyph"><i class="fa-regular fa-rectangle-list"></i></a>
-        </h1>
+<form id="surface-form" method="post" novalidate>
+{% csrf_token %}
+
+    <!-- Sticky top bar: name + Save button -->
+    <div class="row align-items-center justify-content-between px-3 py-2 titre" style="position:sticky; top:0; z-index:100; gap:8px;">
+        <div style="flex:1; min-width:0;">
+            <input type="text" name="name" id="id_name" autocomplete="off"
+                class="form-control form-control-lg{% if form.name.errors %} is-invalid{% endif %}"
+                style="font-size:1.3rem; font-weight:600;"
+                placeholder="Surface name"
+                value="{{ form.name.value|default:'' }}" maxlength="100" autofocus>
+            {% for e in form.name.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+        <div style="flex-shrink:0; display:flex; gap:8px; align-items:center;">
+            <a href="{% url 'surfaces' %}" class="btn btn-outline-secondary btn-sm">Cancel</a>
+            <button type="submit" class="btn btn-primary btn-sm" style="font-size:1rem; padding:6px 20px;">Save</button>
+        </div>
     </div>
-    <div class="row p-4">
+
+    <div class="row px-4 py-2">
         <div class="col-md-10 col-lg-8 col-xl-6">
-            <form method="post" novalidate>
-                {% csrf_token %}
 
-                <!-- Name -->
-                <div class="form-group">
-                    <label for="id_name">Name</label>
-                    <input type="text" name="name" id="id_name"
-                        class="form-control{% if form.name.errors %} is-invalid{% endif %}"
-                        value="{{ form.name.value|default:'' }}" maxlength="100" autofocus>
-                    {% for e in form.name.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
-                </div>
+                <!-- ═══════════════════════════════ DOMAIN SECTION ═══════════════════════════════ -->
+                <fieldset class="mb-3">
+                    <legend style="font-size:1rem; font-weight:600; border-bottom:1px solid #dee2e6; padding-bottom:4px;">Domain</legend>
 
-                <!-- Parameters -->
-                <div class="form-group">
-                    <label for="id_parameter_names">Parameters</label>
+                    <!-- Shape selector -->
+                    <div class="form-group mt-2 mb-2">
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="domain_type" id="dt_rect" value="rect"
+                                {% if form.domain_type.value != 'disk' %}checked{% endif %}>
+                            <label class="form-check-label" for="dt_rect">Rectangle</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="domain_type" id="dt_disk" value="disk"
+                                {% if form.domain_type.value == 'disk' %}checked{% endif %}>
+                            <label class="form-check-label" for="dt_disk">Disk / Annulus</label>
+                        </div>
+                    </div>
+
+                    <!-- ── RECTANGLE domain ── -->
+                    <div id="rect_domain">
+                        <table class="table table-borderless table-sm mb-0" style="width:auto;">
+                            <thead>
+                                <tr>
+                                    <th></th>
+                                    <th class="text-center" style="width:90px;">min</th>
+                                    <th></th>
+                                    <th class="text-center" style="width:90px;">max</th>
+                                    <th class="text-center pl-3">identify</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td class="align-middle pr-3 text-muted small">x</td>
+                                    <td>
+                                        <input type="text" name="u_min" id="id_u_min"
+                                            class="form-control form-control-sm{% if form.u_min.errors %} is-invalid{% endif %}"
+                                            value="{{ form.u_min.value|default:'0' }}" style="font-family:monospace;">
+                                    </td>
+                                    <td class="align-middle px-2 text-muted small">to</td>
+                                    <td>
+                                        <input type="text" name="u_max" id="id_u_max"
+                                            class="form-control form-control-sm{% if form.u_max.errors %} is-invalid{% endif %}"
+                                            value="{{ form.u_max.value|default:'1' }}" style="font-family:monospace;">
+                                    </td>
+                                    <td class="pl-3">
+                                        <select name="u_identify" id="id_u_identify" class="form-control form-control-sm">
+                                            <option value="no" {% if form.u_identify.value == 'no' %}selected{% endif %}>none</option>
+                                            <option value="cy" {% if form.u_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
+                                            <option value="mo" {% if form.u_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td class="align-middle pr-3 text-muted small">y</td>
+                                    <td>
+                                        <input type="text" name="v_min" id="id_v_min"
+                                            class="form-control form-control-sm{% if form.v_min.errors %} is-invalid{% endif %}"
+                                            value="{{ form.v_min.value|default:'0' }}" style="font-family:monospace;">
+                                    </td>
+                                    <td class="align-middle px-2 text-muted small">to</td>
+                                    <td>
+                                        <input type="text" name="v_max" id="id_v_max"
+                                            class="form-control form-control-sm{% if form.v_max.errors %} is-invalid{% endif %}"
+                                            value="{{ form.v_max.value|default:'1' }}" style="font-family:monospace;">
+                                    </td>
+                                    <td class="pl-3">
+                                        <select name="v_identify" id="id_v_identify" class="form-control form-control-sm">
+                                            <option value="no" {% if form.v_identify.value == 'no' %}selected{% endif %}>none</option>
+                                            <option value="cy" {% if form.v_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
+                                            <option value="mo" {% if form.v_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        {% for e in form.u_min.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+                        {% for e in form.u_max.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+                        {% for e in form.v_min.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+                        {% for e in form.v_max.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+                        <small class="form-text text-muted">Bounds accept expressions like <code>2*pi</code>, <code>pi/3</code></small>
+                    </div>
+
+                    <!-- ── DISK domain ── -->
+                    <div id="disk_domain" style="display:none;">
+                        <div class="form-group mb-2">
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="coord_type" id="ct_ca" value="ca"
+                                    {% if form.coord_type.value != 'po' %}checked{% endif %}>
+                                <label class="form-check-label" for="ct_ca">Cartesian <span class="text-muted small">(x, y)</span></label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="coord_type" id="ct_po" value="po"
+                                    {% if form.coord_type.value == 'po' %}checked{% endif %}>
+                                <label class="form-check-label" for="ct_po">Polar <span class="text-muted small">(r, θ)</span></label>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:16px; margin-bottom:6px; align-items:center;">
+                            <span class="text-muted small" style="width:60px;">Variables</span>
+                            <div style="display:flex; align-items:center; gap:4px;">
+                                <input type="text" id="disk_p0" maxlength="10"
+                                    style="width:60px; font-family:monospace; font-style:italic;"
+                                    class="form-control form-control-sm" placeholder="r">
+                                <span class="text-muted small">=</span>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:4px;">
+                                <input type="text" id="disk_p1" maxlength="10"
+                                    style="width:60px; font-family:monospace; font-style:italic;"
+                                    class="form-control form-control-sm" placeholder="θ">
+                                <span class="text-muted small">=</span>
+                            </div>
+                        </div>
+                        <table class="table table-borderless table-sm mb-0" style="width:auto;">
+                            <tbody>
+                                <tr>
+                                    <td class="align-middle pr-3 text-muted small">inner radius</td>
+                                    <td>
+                                        <input type="text" name="r_min" id="id_r_min"
+                                            class="form-control form-control-sm{% if form.r_min.errors %} is-invalid{% endif %}"
+                                            value="{{ form.r_min.value|default:'0' }}" style="font-family:monospace; width:90px;">
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td class="align-middle pr-3 text-muted small">outer radius</td>
+                                    <td>
+                                        <input type="text" name="r_max" id="id_r_max"
+                                            class="form-control form-control-sm{% if form.r_max.errors %} is-invalid{% endif %}"
+                                            value="{{ form.r_max.value|default:'1' }}" style="font-family:monospace; width:90px;">
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        {% for e in form.r_min.errors %}<div class="text-danger small">inner radius: {{ e }}</div>{% endfor %}
+                        {% for e in form.r_max.errors %}<div class="text-danger small">outer radius: {{ e }}</div>{% endfor %}
+                    </div>
+
+                </fieldset>
+
+                <!-- Parameter names -->
+                <div class="form-group mb-3">
+                    <label for="id_parameter_names" style="font-size:0.9rem;">Variable names <span class="text-muted small">(two names separated by a space)</span></label>
                     <input type="text" name="parameter_names" id="id_parameter_names"
                         class="form-control{% if form.parameter_names.errors %} is-invalid{% endif %}"
                         value="{{ form.parameter_names.value|default:'u v' }}" maxlength="30"
-                        placeholder="u v" style="font-family:monospace; width:12em;">
-                    <small class="form-text text-muted">Two variable names separated by a space</small>
+                        style="font-family:monospace; width:14em;">
                     {% for e in form.parameter_names.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
                 </div>
 
-                <!-- X Y Z -->
-                <div class="form-row">
-                    <div class="form-group col-4">
-                        <label for="id_X">X</label>
-                        <input type="text" name="X" id="id_X"
-                            class="form-control{% if form.X.errors %} is-invalid{% endif %}"
-                            value="{{ form.X.value|default:'u' }}" maxlength="400"
-                            placeholder="u" style="font-family:monospace;">
-                        {% for e in form.X.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
-                    </div>
-                    <div class="form-group col-4">
-                        <label for="id_Y">Y</label>
-                        <input type="text" name="Y" id="id_Y"
-                            class="form-control{% if form.Y.errors %} is-invalid{% endif %}"
-                            value="{{ form.Y.value|default:'v' }}" maxlength="400"
-                            placeholder="v" style="font-family:monospace;">
-                        {% for e in form.Y.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
-                    </div>
-                    <div class="form-group col-4">
-                        <label for="id_Z">Z</label>
-                        <input type="text" name="Z" id="id_Z"
-                            class="form-control{% if form.Z.errors %} is-invalid{% endif %}"
-                            value="{{ form.Z.value|default:'0' }}" maxlength="400"
-                            placeholder="0" style="font-family:monospace;">
-                        {% for e in form.Z.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
-                    </div>
-                </div>
-                <small class="form-text text-muted" style="margin-top:-10px;">SymPy expressions in the parameter variables</small>
+                <!-- ═══════════════════════════════ SURFACE SECTION ═══════════════════════════════ -->
+                <fieldset class="mb-3">
+                    <legend style="font-size:1rem; font-weight:600; border-bottom:1px solid #dee2e6; padding-bottom:4px;">Surface</legend>
 
-                <details class="mt-2 mb-3">
-                    <summary style="font-size:0.82rem; color:#888; cursor:pointer; user-select:none;">Supported functions &amp; constants</summary>
-                    <div style="font-family:monospace; font-size:0.8rem; line-height:1.8; background:#f8f9fa; border:1px solid #dee2e6; border-radius:4px; padding:8px 12px; margin-top:4px;">
-                        <div><span style="color:#888;">trig &nbsp;&nbsp;&nbsp;&nbsp;</span> sin, cos, tan, cot, sec, csc</div>
-                        <div><span style="color:#888;">inverse &nbsp;</span> asin, acos, atan, atan2, acot</div>
-                        <div><span style="color:#888;">hyperbolic</span> sinh, cosh, tanh, asinh, acosh, atanh</div>
-                        <div><span style="color:#888;">exp/log &nbsp;</span> exp, log, log2, log10, sqrt, Abs</div>
-                        <div><span style="color:#888;">misc &nbsp;&nbsp;&nbsp;&nbsp;</span> sign, floor, ceiling, Min, Max, Piecewise</div>
-                        <div><span style="color:#888;">constants </span> pi, E</div>
-                        <div><span style="color:#888;">operators </span> + &nbsp;- &nbsp;* &nbsp;/ &nbsp;** &nbsp;( )</div>
+                    <div class="form-group mt-2 mb-2">
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="output_type" id="sc_cart" value="ca"
+                                {% if form.output_type.value != 'cy' %}checked{% endif %}>
+                            <label class="form-check-label" for="sc_cart">Cartesian <span class="text-muted small">(X, Y, Z)</span></label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="output_type" id="sc_cyl" value="cy"
+                                {% if form.output_type.value == 'cy' %}checked{% endif %}>
+                            <label class="form-check-label" for="sc_cyl">Cylindrical <span class="text-muted small">(R, Θ, Z)</span></label>
+                        </div>
                     </div>
-                </details>
 
-                <!-- Domain -->
-                <fieldset class="mt-4">
-                    <legend style="font-size:1rem; font-weight:600; border-bottom:1px solid #dee2e6; padding-bottom:4px;">Domain</legend>
-                    <table class="table table-borderless table-sm mb-0" style="width:auto;">
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th class="text-center" style="width:90px;">min</th>
-                                <th></th>
-                                <th class="text-center" style="width:90px;">max</th>
-                                <th class="text-center pl-3">identify</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td class="align-middle pr-3" style="font-family:monospace;"><em>u</em></td>
-                                <td>
-                                    <input type="number" name="u_min" id="id_u_min" step="any"
-                                        class="form-control form-control-sm{% if form.u_min.errors %} is-invalid{% endif %}"
-                                        value="{{ form.u_min.value|default:'0' }}" style="font-family:monospace;">
-                                </td>
-                                <td class="align-middle px-2 text-muted small">to</td>
-                                <td>
-                                    <input type="number" name="u_max" id="id_u_max" step="any"
-                                        class="form-control form-control-sm{% if form.u_max.errors %} is-invalid{% endif %}"
-                                        value="{{ form.u_max.value|default:'1' }}" style="font-family:monospace;">
-                                </td>
-                                <td class="pl-3">
-                                    <select name="u_identify" id="id_u_identify" class="form-control form-control-sm">
-                                        <option value="no" {% if form.u_identify.value == 'no' %}selected{% endif %}>none</option>
-                                        <option value="cy" {% if form.u_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
-                                        <option value="mo" {% if form.u_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
-                                    </select>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td class="align-middle pr-3" style="font-family:monospace;"><em>v</em></td>
-                                <td>
-                                    <input type="number" name="v_min" id="id_v_min" step="any"
-                                        class="form-control form-control-sm{% if form.v_min.errors %} is-invalid{% endif %}"
-                                        value="{{ form.v_min.value|default:'0' }}" style="font-family:monospace;">
-                                </td>
-                                <td class="align-middle px-2 text-muted small">to</td>
-                                <td>
-                                    <input type="number" name="v_max" id="id_v_max" step="any"
-                                        class="form-control form-control-sm{% if form.v_max.errors %} is-invalid{% endif %}"
-                                        value="{{ form.v_max.value|default:'1' }}" style="font-family:monospace;">
-                                </td>
-                                <td class="pl-3">
-                                    <select name="v_identify" id="id_v_identify" class="form-control form-control-sm">
-                                        <option value="no" {% if form.v_identify.value == 'no' %}selected{% endif %}>none</option>
-                                        <option value="cy" {% if form.v_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
-                                        <option value="mo" {% if form.v_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
-                                    </select>
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    {% for e in form.u_min.errors %}<div class="text-danger small">u min: {{ e }}</div>{% endfor %}
-                    {% for e in form.u_max.errors %}<div class="text-danger small">u max: {{ e }}</div>{% endfor %}
-                    {% for e in form.v_min.errors %}<div class="text-danger small">v min: {{ e }}</div>{% endfor %}
-                    {% for e in form.v_max.errors %}<div class="text-danger small">v max: {{ e }}</div>{% endfor %}
+                    <div class="form-row">
+                        <div class="form-group col-4">
+                            <label for="id_X" id="label_X">X(<em id="lbl_p0">u</em>, <em id="lbl_p1">v</em>) =</label>
+                            <input type="text" name="X" id="id_X"
+                                class="form-control{% if form.X.errors %} is-invalid{% endif %}"
+                                value="{{ form.X.value|default:'u' }}" maxlength="400"
+                                style="font-family:monospace;">
+                            {% for e in form.X.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                        </div>
+                        <div class="form-group col-4">
+                            <label for="id_Y" id="label_Y">Y(<em id="lbl_p0b">u</em>, <em id="lbl_p1b">v</em>) =</label>
+                            <input type="text" name="Y" id="id_Y"
+                                class="form-control{% if form.Y.errors %} is-invalid{% endif %}"
+                                value="{{ form.Y.value|default:'v' }}" maxlength="400"
+                                style="font-family:monospace;">
+                            {% for e in form.Y.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                        </div>
+                        <div class="form-group col-4">
+                            <label for="id_Z" id="label_Z">Z(<em id="lbl_p0c">u</em>, <em id="lbl_p1c">v</em>) =</label>
+                            <input type="text" name="Z" id="id_Z"
+                                class="form-control{% if form.Z.errors %} is-invalid{% endif %}"
+                                value="{{ form.Z.value|default:'0' }}" maxlength="400"
+                                style="font-family:monospace;">
+                            {% for e in form.Z.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+                        </div>
+                    </div>
+
+                    <details class="mt-1 mb-1">
+                        <summary style="font-size:0.82rem; color:#888; cursor:pointer; user-select:none;">Supported functions &amp; constants</summary>
+                        <div style="font-family:monospace; font-size:0.8rem; line-height:1.8; background:#f8f9fa; border:1px solid #dee2e6; border-radius:4px; padding:8px 12px; margin-top:4px;">
+                            <div><span style="color:#888;">trig &nbsp;&nbsp;&nbsp;&nbsp;</span> sin, cos, tan, cot, sec, csc</div>
+                            <div><span style="color:#888;">inverse &nbsp;</span> asin, acos, atan, atan2, acot</div>
+                            <div><span style="color:#888;">hyperbolic</span> sinh, cosh, tanh, asinh, acosh, atanh</div>
+                            <div><span style="color:#888;">exp/log &nbsp;</span> exp, log, log2, log10, sqrt, Abs</div>
+                            <div><span style="color:#888;">misc &nbsp;&nbsp;&nbsp;&nbsp;</span> sign, floor, ceiling, Min, Max, Piecewise</div>
+                            <div><span style="color:#888;">constants </span> pi, E</div>
+                            <div><span style="color:#888;">operators </span> + &nbsp;- &nbsp;* &nbsp;/ &nbsp;** &nbsp;( )</div>
+                        </div>
+                    </details>
                 </fieldset>
 
-                <!-- Submit -->
-                <div class="mt-4 d-flex justify-content-end">
-                    <button type="submit" class="btn btn-primary">Save</button>
-                </div>
-
-            </form>
         </div>
     </div>
+
+</form>
 </div>
+
+<script>
+(function () {
+    const dtInputs  = document.querySelectorAll('input[name="domain_type"]');
+    const ctInputs  = document.querySelectorAll('input[name="coord_type"]');
+    const scInputs  = document.querySelectorAll('input[name="output_type"]');
+    const rectDom   = document.getElementById('rect_domain');
+    const diskDom   = document.getElementById('disk_domain');
+    const diskP0    = document.getElementById('disk_p0');
+    const diskP1    = document.getElementById('disk_p1');
+    const paramInput = document.getElementById('id_parameter_names');
+    const labelX    = document.getElementById('label_X');
+    const labelY    = document.getElementById('label_Y');
+    const labelZ    = document.getElementById('label_Z');
+
+    function getP0() { return paramInput.value.trim().split(/\s+/)[0] || 'u'; }
+    function getP1() { return paramInput.value.trim().split(/\s+/)[1] || 'v'; }
+
+    function updateLabels() {
+        const p0 = getP0(), p1 = getP1();
+        ['lbl_p0','lbl_p0b','lbl_p0c'].forEach(id => {
+            const el = document.getElementById(id); if (el) el.textContent = p0;
+        });
+        ['lbl_p1','lbl_p1b','lbl_p1c'].forEach(id => {
+            const el = document.getElementById(id); if (el) el.textContent = p1;
+        });
+        const sc = document.querySelector('input[name="output_type"]:checked').value;
+        if (sc === 'cy') {
+            labelX.innerHTML = `R(<em>${p0}</em>, <em>${p1}</em>) =`;
+            labelY.innerHTML = `\u0398(<em>${p0}</em>, <em>${p1}</em>) =`;
+            labelZ.innerHTML = `Z(<em>${p0}</em>, <em>${p1}</em>) =`;
+        } else {
+            labelX.innerHTML = `X(<em>${p0}</em>, <em>${p1}</em>) =`;
+            labelY.innerHTML = `Y(<em>${p0}</em>, <em>${p1}</em>) =`;
+            labelZ.innerHTML = `Z(<em>${p0}</em>, <em>${p1}</em>) =`;
+        }
+    }
+
+    function updateDiskVarHints() {
+        const ct = document.querySelector('input[name="coord_type"]:checked').value;
+        diskP0.placeholder = ct === 'po' ? 'r' : 'x';
+        diskP1.placeholder = ct === 'po' ? 'θ' : 'y';
+    }
+
+    function updateUI() {
+        const dt = document.querySelector('input[name="domain_type"]:checked').value;
+        if (dt === 'rect') {
+            rectDom.style.display = '';
+            diskDom.style.display = 'none';
+        } else {
+            rectDom.style.display = 'none';
+            diskDom.style.display = '';
+            updateDiskVarHints();
+        }
+        updateLabels();
+    }
+
+    dtInputs.forEach(el => el.addEventListener('change', updateUI));
+    ctInputs.forEach(el => el.addEventListener('change', () => { updateDiskVarHints(); updateLabels(); }));
+    scInputs.forEach(el => el.addEventListener('change', updateLabels));
+    paramInput.addEventListener('input', updateLabels);
+
+    // Force coord_type = 'ca' for rect domain on submit
+    document.getElementById('surface-form').addEventListener('submit', () => {
+        if (document.querySelector('input[name="domain_type"]:checked').value === 'rect') {
+            document.getElementById('ct_ca').checked = true;
+        }
+    });
+
+    updateUI();
+})();
+</script>
 {% endblock content %}

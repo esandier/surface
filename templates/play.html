@@ -14,14 +14,16 @@
             <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph">
                 <span class="far fa-pen-to-square"></span>
             </a>
+            <a id="persp-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Perspective">
+                <span class="fa-regular fa-eye"></span>
+            </a>
+            <a id="controls-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Controls">
+                <span class="fa-solid fa-sliders"></span>
+            </a>
+            <a id="debug-toggle" class="glyph" style="cursor:pointer; opacity:0.4; font-size:0.75em; font-weight:600; letter-spacing:0.03em;" title="Debug">debug</a>
             <a href="{% url 'surfaces' %}" class="glyph">
                 <span class="fa-regular fa-rectangle-list"></span>
             </a>
-            <!-- domain toggle (debugging only)
-            <a id="domain-toggle" class="glyph" style="cursor:pointer; opacity:0.3" title="Toggle domain view">
-                <span class="fa-regular fa-map"></span>
-            </a>
-            -->
         </h1>
     </div>
 
@@ -32,48 +34,108 @@
                 <g id="svg" transform="translate(0 0) scale(1 1)" style="pointer-events:none"></g>
             </svg>
         </div>
-        <!-- domain panel (debugging only)
-        <div id="domain-panel" style="display:none; position:absolute; top:8px; right:8px; width:360px; height:360px; background:rgba(255,255,255,0.93); border:1px solid #bbb; border-radius:6px; overflow:hidden; z-index:10;">
-            <svg id="domain-svg" width="100%" height="100%" style="cursor:grab">
-                <g id="domain-g"></g>
-            </svg>
-        </div>
-        -->
 
-        <!-- rotation controls panel -->
-        <div id="controls-panel" style="position:absolute; bottom:16px; left:16px; z-index:10; background:rgba(255,255,255,0.88); border-radius:10px; padding:12px 14px; display:flex; flex-direction:column; gap:8px; min-width:210px; box-shadow:0 2px 8px rgba(0,0,0,0.15);">
-            <div style="display:flex; align-items:center; gap:6px;">
-                <span style="width:68px; font-size:12px; color:#555;">Azimuth</span>
-                <input type="range" id="azimuth-slider" min="-180" max="180" step="1" value="45" style="flex:1; cursor:pointer;">
-                <span id="azimuth-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">45°</span>
+        <!-- ═══ ROTATION / ZOOM CONTROLS PANEL ═══ -->
+        <div id="controls-panel" style="position:absolute; bottom:16px; left:16px; z-index:10; background:rgba(255,255,255,0.92); border-radius:12px; padding:14px 16px; display:none; flex-direction:column; gap:10px; box-shadow:0 2px 10px rgba(0,0,0,0.18);">
+
+            <!-- Three dials: Elevation, Azimuth, In-plane -->
+            <div style="display:flex; gap:18px; justify-content:center; align-items:flex-end;">
+
+                <!-- Elevation dial -->
+                <div style="display:flex; flex-direction:column; align-items:center; gap:4px;">
+                    <svg id="elev-dial" width="64" height="64" style="cursor:grab; user-select:none;">
+                        <circle cx="32" cy="32" r="28" fill="#f0f0f0" stroke="#bbb" stroke-width="1.5"/>
+                        <circle cx="32" cy="32" r="3.5" fill="#999"/>
+                        <line id="elev-dial-line" x1="32" y1="32" x2="32" y2="6" stroke="#555" stroke-width="2.5" stroke-linecap="round"/>
+                        <circle id="elev-dial-handle" cx="32" cy="6" r="6" fill="#4a90d9"/>
+                    </svg>
+                    <span id="elev-val" style="font-size:11px; color:#333; font-family:monospace; width:38px; text-align:center;">35°</span>
+                    <span style="font-size:10px; color:#888;">Elev</span>
+                </div>
+
+                <!-- Azimuth dial -->
+                <div style="display:flex; flex-direction:column; align-items:center; gap:4px;">
+                    <svg id="azim-dial" width="64" height="64" style="cursor:grab; user-select:none;">
+                        <circle cx="32" cy="32" r="28" fill="#f0f0f0" stroke="#bbb" stroke-width="1.5"/>
+                        <circle cx="32" cy="32" r="3.5" fill="#999"/>
+                        <line id="azim-dial-line" x1="32" y1="32" x2="32" y2="6" stroke="#555" stroke-width="2.5" stroke-linecap="round"/>
+                        <circle id="azim-dial-handle" cx="32" cy="6" r="6" fill="#4a90d9"/>
+                    </svg>
+                    <span id="azim-val" style="font-size:11px; color:#333; font-family:monospace; width:38px; text-align:center;">45°</span>
+                    <span style="font-size:10px; color:#888;">Azim</span>
+                </div>
+
+                <!-- In-plane dial -->
+                <div style="display:flex; flex-direction:column; align-items:center; gap:4px;">
+                    <svg id="inplane-dial" width="64" height="64" style="cursor:grab; user-select:none;">
+                        <circle cx="32" cy="32" r="28" fill="#f0f0f0" stroke="#bbb" stroke-width="1.5"/>
+                        <circle cx="32" cy="32" r="3.5" fill="#999"/>
+                        <line id="inplane-dial-line" x1="32" y1="32" x2="32" y2="6" stroke="#555" stroke-width="2.5" stroke-linecap="round"/>
+                        <circle id="inplane-dial-handle" cx="32" cy="6" r="6" fill="#4a90d9"/>
+                    </svg>
+                    <span id="inplane-val" style="font-size:11px; color:#333; font-family:monospace; width:38px; text-align:center;">0°</span>
+                    <span style="font-size:10px; color:#888;">Roll</span>
+                </div>
+
             </div>
-            <div style="display:flex; align-items:center; gap:6px;">
-                <span style="width:68px; font-size:12px; color:#555;">Elevation</span>
-                <input type="range" id="elevation-slider" min="-89" max="89" step="1" value="35" style="flex:1; cursor:pointer;">
-                <span id="elevation-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">35°</span>
-            </div>
-            <div style="display:flex; align-items:center; gap:6px;">
-                <span style="width:68px; font-size:12px; color:#555;">In-plane</span>
-                <svg id="dial" width="40" height="40" style="cursor:grab; flex-shrink:0; user-select:none;">
-                    <circle cx="20" cy="20" r="16" fill="#f0f0f0" stroke="#bbb" stroke-width="1.5"/>
-                    <circle cx="20" cy="20" r="2.5" fill="#999"/>
-                    <line id="dial-line" x1="20" y1="20" x2="20" y2="5" stroke="#555" stroke-width="2" stroke-linecap="round"/>
-                    <circle id="dial-handle" cx="20" cy="5" r="4" fill="#555"/>
-                </svg>
-                <span id="inplane-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">0°</span>
-            </div>
-            <div style="display:flex; align-items:center; gap:6px;">
-                <span style="width:68px; font-size:12px; color:#555;">Zoom</span>
+
+            <!-- Zoom slider -->
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="width:38px; font-size:11px; color:#888;">Zoom</span>
                 <input type="range" id="zoom-slider" min="20" max="500" step="1" value="100" style="flex:1; cursor:pointer;">
-                <span id="zoom-val" style="width:38px; text-align:right; font-size:12px; color:#333; font-family:monospace;">100%</span>
+                <span id="zoom-val" style="width:38px; text-align:right; font-size:11px; color:#333; font-family:monospace;">100%</span>
+            </div>
+
+            <!-- Reset + Save buttons -->
+            <div style="display:flex; justify-content:space-between; gap:8px;">
+                <button id="reset-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Reset</button>
+                <button id="save-view-btn" class="btn btn-sm btn-outline-primary" style="font-size:11px; padding:2px 14px;" title="Save current view as default for this surface">Save view</button>
+            </div>
+        </div>
+
+        <!-- ═══ DEBUG PANEL ═══ -->
+        <div id="debug-panel" style="display:none; position:absolute; bottom:16px; right:16px; z-index:10; background:rgba(255,255,255,0.95); border-radius:12px; padding:14px 16px; min-width:240px; box-shadow:0 2px 10px rgba(0,0,0,0.18);">
+            <div style="font-size:12px; font-weight:600; color:#555; margin-bottom:10px;">Debug options</div>
+
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-lp" style="font-size:12px; color:#333; margin:0;">LP visibility</label>
+                <input type="checkbox" id="dbg-lp" checked style="cursor:pointer; width:16px; height:16px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-newton" style="font-size:12px; color:#333; margin:0;">Newton cusps</label>
+                <input type="checkbox" id="dbg-newton" checked style="cursor:pointer; width:16px; height:16px;">
+            </div>
+            <div style="margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
+                    <span style="font-size:12px; color:#333;">Simplify pts</span>
+                    <span id="dbg-simplify-val" style="font-size:11px; font-family:monospace; color:#555;">80</span>
+                </div>
+                <!-- direct value 5..200, default 80 = output points per unit screen width -->
+                <input type="range" id="dbg-simplify" min="5" max="200" step="5" value="80" style="width:100%; cursor:pointer;">
+            </div>
+            <div style="margin-bottom:10px;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
+                    <span style="font-size:12px; color:#333;">Grid res</span>
+                    <span id="dbg-gridres-val" style="font-size:11px; font-family:monospace; color:#555;">250</span>
+                </div>
+                <!-- direct value 30..600, default 250 -->
+                <input type="range" id="dbg-gridres" min="30" max="600" step="10" value="250" style="width:100%; cursor:pointer;">
             </div>
             <div style="display:flex; justify-content:flex-end;">
-                <button id="reset-btn" class="btn btn-sm btn-outline-secondary" style="font-size:12px; padding:2px 12px;">Reset</button>
+                <button id="dbg-apply-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Apply</button>
             </div>
         </div>
+
     </div>
 
 </div>
+
+<style>
+@media (pointer: coarse) {
+    #controls-panel { display: none !important; }
+    #debug-panel    { display: none !important; }
+}
+</style>
 
 <script type="importmap">
 {
@@ -111,9 +173,14 @@
     const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
     scene.add(sunLight);
 
-    /* ---------------- CAMERA ---------------- */
-    const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, -10 * radius, 10 * radius);
-    camera.zoom = 1;
+    /* ---------------- CAMERAS ---------------- */
+    const FOV = 60;
+    const orthoCamera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, -10 * radius, 10 * radius);
+    orthoCamera.zoom = 1;
+    const perspCamera = new THREE.PerspectiveCamera(FOV, 1, 0.01 * radius, 20 * radius);
+    let perspectiveMode = false;
+    let camera = orthoCamera;
+
     camera.position.set(center[0] + radius, center[1] + radius, center[2] + radius);
     camera.up.set(0, 0, 1);
     camera.lookAt(...center);
@@ -131,86 +198,36 @@
     geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(normals), 3));
     geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(faces), 1));
 
-    // Random 3D vector
-    const randomVec = () => ({
-        x: Math.random() * 2 - 1,
-        y: Math.random() * 2 - 1,
-        z: Math.random() * 2 - 1
-    });
+    const randomVec = () => ({ x: Math.random() * 2 - 1, y: Math.random() * 2 - 1, z: Math.random() * 2 - 1 });
+    const normalize = (v) => { const mag = Math.sqrt(v.x**2 + v.y**2 + v.z**2); return { x: v.x/mag, y: v.y/mag, z: v.z/mag }; };
+    const dot = (a, b) => a.x*b.x + a.y*b.y + a.z*b.z;
 
-    // Helper to normalize a vector
-    const normalize = (v) => {
-        const mag = Math.sqrt(v.x**2 + v.y**2 + v.z**2);
-        return { x: v.x / mag, y: v.y / mag, z: v.z / mag };
-    }; 
-    
-    // Scalar product
-    const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
-
-    // Two random orthogonal unit vectors
     const e1 = normalize(randomVec());
     var e2 = normalize(randomVec());
-    e2 = normalize({
-        x : e2.x - dot(e1,e2) * e1.x, 
-        y : e2.y - dot(e1,e2) * e1.y, 
-        z : e2.z - dot(e1,e2) * e1.z
-    });
-
-    // Calculate Vertex Colors from Normals
+    e2 = normalize({ x: e2.x - dot(e1,e2)*e1.x, y: e2.y - dot(e1,e2)*e1.y, z: e2.z - dot(e1,e2)*e1.z });
 
     const colors = new Float32Array(normals.length);
-
-    // Version 1
-    /*for (let i = 0; i < normals.length; i++) {
-        colors[i] = normals[i] * 0.5 + 0.5; 
-    }
-    */
-
-    // Version 2
     var i = 0;
-
     while (i + 2 < normals.length) {
-        const normal = normalize({x : normals[i], y : normals[i + 1], z : normals[i + 2]});
-
-        const nx = dot(normal, e1);
-        const ny = dot(normal, e2);
-
-    
+        const normal = normalize({x: normals[i], y: normals[i+1], z: normals[i+2]});
+        const nx = dot(normal, e1), ny = dot(normal, e2);
         const color = new THREE.Color();
-
-        // 1. Get the angle in the XY plane (abs value)
-        const angle = Math.atan2(ny, nx);
-
-        // 2. Map angle to Hue (0.0 to 1.0)
-        const hue = .5 * angle/Math.PI + .5;
-
-        // 3. Set HSL: (Hue, Saturation, Lightness)
-        const lightness = .5;
-        color.setHSL(hue, .9, lightness);
-
-        colors[i] = color.r; 
-        colors[i + 1] = color.g; 
-        colors[i + 2] = color.b;
-        
-        i += 3
+        const hue = .5 * Math.atan2(ny, nx) / Math.PI + .5;
+        color.setHSL(hue, .9, .5);
+        colors[i] = color.r; colors[i+1] = color.g; colors[i+2] = color.b;
+        i += 3;
     }
-    
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
-    // MeshPhongMaterial provides the "punchy" highlights for the active state
     const material = new THREE.MeshPhongMaterial({
-        vertexColors: true,
-        side: THREE.DoubleSide,
-        shininess: 0.2,
-        specular: 0x000000,
-        transparent: false 
+        vertexColors: true, side: THREE.DoubleSide, shininess: 0.2,
+        specular: 0x000000, transparent: false
     });
-
     const surface = new THREE.Mesh(geometry, material);
     scene.add(surface);
 
     /* ---------------- CONTROLS ---------------- */
-    const controls = new TrackballControls(camera, renderer.domElement);
+    let controls = new TrackballControls(camera, renderer.domElement);
     controls.target.set(...center);
     controls.enablePan = false;
     controls.enableZoom = false;
@@ -221,18 +238,22 @@
     /* ---------------- RESIZE ---------------- */
     function resizeRenderer() {
         const pixelRatio = window.devicePixelRatio;
-        const width = canvas.clientWidth * pixelRatio | 0;
+        const width  = canvas.clientWidth  * pixelRatio | 0;
         const height = canvas.clientHeight * pixelRatio | 0;
         if (canvas.width !== width || canvas.height !== height) {
             renderer.setSize(width, height, false);
             renderer.setViewport(0, 0, width, height);
-            const aspect = width / height;
-            if (aspect >= 1) {
-                camera.left = -radius * aspect; camera.right = radius * aspect;
-                camera.top = radius; camera.bottom = -radius;
+            if (perspectiveMode) {
+                perspCamera.aspect = width / height;
             } else {
-                camera.left = -radius; camera.right = radius;
-                camera.top = radius / aspect; camera.bottom = -radius / aspect;
+                const aspect = width / height;
+                if (aspect >= 1) {
+                    orthoCamera.left = -radius * aspect; orthoCamera.right = radius * aspect;
+                    orthoCamera.top = radius; orthoCamera.bottom = -radius;
+                } else {
+                    orthoCamera.left = -radius; orthoCamera.right = radius;
+                    orthoCamera.top = radius / aspect; orthoCamera.bottom = -radius / aspect;
+                }
             }
             camera.updateProjectionMatrix();
         }
@@ -243,7 +264,7 @@
         requestAnimationFrame(animate);
         resizeRenderer();
         controls.update();
-        sunLight.position.copy(camera.position); // Always lit from camera POV
+        sunLight.position.copy(camera.position);
         renderer.render(scene, camera);
     }
     animate();
@@ -252,8 +273,6 @@
     function mouseDown() {
         svg.innerHTML = "";
         downloadButton.style.visibility = "hidden";
-
-        // ACTIVE STATE: Saturated, shiny, and bright
         material.emissive.setHex(0x000000);
         material.emissiveIntensity = 0;
         material.shininess = 80;
@@ -263,42 +282,73 @@
 
     let isRequesting = false;
 
+    // Log-scale mapping: slider [1..100] → [lo..hi]
+    function logMap(t, lo, hi) {
+        return Math.round(Math.exp(Math.log(lo) + (t - 1) / 99 * Math.log(hi / lo)));
+    }
+
+    function getDebugParams() {
+        const use_lp      = document.getElementById('dbg-lp').checked;
+        const use_newton  = document.getElementById('dbg-newton').checked;
+        const simplify_pts = parseInt(document.getElementById('dbg-simplify').value);
+        const grid_res     = parseInt(document.getElementById('dbg-gridres').value);
+        return { use_lp, use_newton, simplify_pts, grid_res };
+    }
+
     function mouseUp(fromControls = false) {
         if (isRequesting) return;
-        if (!fromControls) updateSlidersFromAngles(readAnglesFromCamera());
+        if (!fromControls) updateDialsFromAngles(readAnglesFromCamera());
 
         isRequesting = true;
         spinner.style.visibility = "visible";
         downloadButton.replaceWith(spinner);
         controls.enabled = false;
 
-        let I = new THREE.Vector3(1, 0, -1).unproject(camera);
-        let J = new THREE.Vector3(0, 1, -1).unproject(camera);
-        let O = new THREE.Vector3(0, 0, -1).unproject(camera);
+        let data;
+        if (perspectiveMode) {
+            const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+            const up    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+            data = { I: right.toArray(), J: up.toArray(), O: camera.position.toArray(), eye: camera.position.toArray() };
+        } else {
+            let I = new THREE.Vector3(1, 0, -1).unproject(camera);
+            let J = new THREE.Vector3(0, 1, -1).unproject(camera);
+            let O = new THREE.Vector3(0, 0, -1).unproject(camera);
+            data = { I: I.sub(O).toArray(), J: J.sub(O).toArray(), O: O.toArray() };
+        }
+        data.debug = getDebugParams();
 
-        let data = {
-            I: I.sub(O).toArray(),
-            J: J.sub(O).toArray(),
-            O: O.toArray()
-        };
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
 
         fetch("{% url 'surface-play' pk=pk %}", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(data)
+            body: JSON.stringify(data),
+            signal: controller.signal,
         })
-        .then(r => r.json())
+        .then(r => { clearTimeout(timeoutId); return r.json(); })
         .then(drawSVG)
-        .catch(console.error);
+        .catch(err => {
+            clearTimeout(timeoutId);
+            console.error(err);
+            isRequesting = false;
+            controls.enabled = true;
+            spinner.replaceWith(downloadButton);
+        });
     }
 
     /* ---------------- SVG DRAWING ---------------- */
     let lastOrigin = [0, 0];
 
     function updateSVGTransform() {
-        const zoom = camera.zoom;
-        svg.transform.baseVal.getItem(1).setScale(zoom / radius, -zoom / radius);
-        svg.transform.baseVal.getItem(0).setTranslate(-zoom * lastOrigin[0] / radius, zoom * lastOrigin[1] / radius);
+        let scale;
+        if (perspectiveMode) {
+            scale = perspCamera.zoom / Math.tan(FOV * Math.PI / 360);
+        } else {
+            scale = orthoCamera.zoom / radius;
+        }
+        svg.transform.baseVal.getItem(1).setScale(scale, -scale);
+        svg.transform.baseVal.getItem(0).setTranslate(-scale * lastOrigin[0], scale * lastOrigin[1]);
     }
 
     function drawSVG(data) {
@@ -326,18 +376,16 @@
 
         svg.innerHTML = html;
 
-        // PASTEL STATE: Bleach colors with white light, remove shine
         material.emissive.setHex(0xffffff);
-        material.emissiveIntensity = 0.5; 
+        material.emissiveIntensity = 0.5;
         material.shininess = 0;
         material.specular.setHex(0x000000);
-        ambientLight.intensity = 0.4; // Dim environment to emphasize SVG
+        ambientLight.intensity = 0.4;
 
         controls.enabled = true;
         spinner.replaceWith(downloadButton);
         downloadButton.style.visibility = "visible";
         prepareDownload();
-        // if (data.domain) updateDomain(data.domain);
     }
 
     /* ---------------- SVG EXPORT ---------------- */
@@ -352,34 +400,97 @@
         downloadButton.download = "{{ surface.name }}.svg";
     }
 
-    /* ---------------- ROTATION CONTROLS ---------------- */
-    const azimuthSlider  = document.getElementById("azimuth-slider");
-    const elevationSlider = document.getElementById("elevation-slider");
-    const azimuthVal     = document.getElementById("azimuth-val");
-    const elevationVal   = document.getElementById("elevation-val");
-    const inplaneVal     = document.getElementById("inplane-val");
-    const dial           = document.getElementById("dial");
-    const dialHandle     = document.getElementById("dial-handle");
-    const dialLine       = document.getElementById("dial-line");
-    const resetBtn       = document.getElementById("reset-btn");
-
-    const DEFAULT_ANGLES = { elev: 35, azim: 45, inPlane: 0 };
-    let inPlaneAngle = 0;
+    /* ============================================================
+       ROTATION DIALS
+       ============================================================ */
+    const DIAL_CX = 32, DIAL_CY = 32, DIAL_R = 26;  // handle orbit radius
 
     function dialAngleToXY(deg) {
         const rad = (deg - 90) * Math.PI / 180;
-        return { x: 20 + 15 * Math.cos(rad), y: 20 + 15 * Math.sin(rad) };
+        return { x: DIAL_CX + DIAL_R * Math.cos(rad), y: DIAL_CY + DIAL_R * Math.sin(rad) };
     }
 
-    function updateDialDisplay() {
-        const { x, y } = dialAngleToXY(inPlaneAngle);
-        dialHandle.setAttribute("cx", x);
-        dialHandle.setAttribute("cy", y);
-        dialLine.setAttribute("x2", x);
-        dialLine.setAttribute("y2", y);
-        inplaneVal.textContent = Math.round(inPlaneAngle) + "°";
+    function setDialDisplay(lineSel, handleSel, valSel, deg, displayDeg) {
+        // displayDeg is the angle fed to dialAngleToXY (may differ from value for elevation)
+        const { x, y } = dialAngleToXY(displayDeg !== undefined ? displayDeg : deg);
+        document.querySelector(lineSel).setAttribute("x2", x);
+        document.querySelector(lineSel).setAttribute("y2", y);
+        document.querySelector(handleSel).setAttribute("cx", x);
+        document.querySelector(handleSel).setAttribute("cy", y);
+        document.querySelector(valSel).textContent = Math.round(deg) + "°";
     }
 
+    /* Initial values from server-side saved view */
+    const SAVED_ANGLES = { elev: {{ initial_elev }}, azim: {{ initial_azim }}, inPlane: {{ initial_inplane }}, zoom: {{ initial_zoom }} };
+    const DEFAULT_ANGLES = { elev: 35, azim: 45, inPlane: 0, zoom: 1 };
+
+    let elevAngle   = SAVED_ANGLES.elev;
+    let azimAngle   = SAVED_ANGLES.azim;
+    let inPlaneAngle = SAVED_ANGLES.inPlane;
+
+    function updateAllDialDisplays() {
+        // Elevation stored in [-89,89] but displayed on full circle (scale back to [-180,180])
+        setDialDisplay('#elev-dial-line',    '#elev-dial-handle',    '#elev-val',    elevAngle,    elevAngle * 180 / 89);
+        setDialDisplay('#azim-dial-line',    '#azim-dial-handle',    '#azim-val',    azimAngle);
+        setDialDisplay('#inplane-dial-line', '#inplane-dial-handle', '#inplane-val', inPlaneAngle);
+    }
+
+    function updateDialsFromAngles({ elev, azim, inPlane }) {
+        elevAngle    = elev;
+        azimAngle    = azim;
+        inPlaneAngle = inPlane;
+        updateAllDialDisplays();
+    }
+
+    /* Generic dial drag setup */
+    function makeDial(svgId, getAngle, setAngle, onDragEnd, wrapDeg = false) {
+        const el = document.getElementById(svgId);
+        let dragging = false;
+        el.addEventListener("mousedown", e => {
+            dragging = true;
+            el.style.cursor = "grabbing";
+            mouseDown();
+            e.preventDefault();
+        });
+        window.addEventListener("mousemove", e => {
+            if (!dragging) return;
+            const rect = el.getBoundingClientRect();
+            const dx = e.clientX - (rect.left + rect.width  / 2);
+            const dy = e.clientY - (rect.top  + rect.height / 2);
+            let deg = Math.atan2(dx, -dy) * 180 / Math.PI;
+            if (!wrapDeg) {
+                // Clamp elevation to [-89, 89] by projecting onto range
+                deg = Math.max(-89, Math.min(89, deg));
+            }
+            setAngle(deg);
+            updateAllDialDisplays();
+            setCameraFromAngles(elevAngle, azimAngle, inPlaneAngle);
+        });
+        window.addEventListener("mouseup", () => {
+            if (!dragging) return;
+            dragging = false;
+            el.style.cursor = "grab";
+            mouseUp(true);
+        });
+    }
+
+    // Elevation: scale full [-180,180] dial rotation to [-89,89] so handle always follows
+    makeDial('elev-dial',
+        () => elevAngle,
+        deg => { elevAngle = deg * 89 / 180; },
+        null, true);
+
+    makeDial('azim-dial',
+        () => azimAngle,
+        deg => { azimAngle = deg; },
+        null, true);
+
+    makeDial('inplane-dial',
+        () => inPlaneAngle,
+        deg => { inPlaneAngle = deg; },
+        null, true);
+
+    /* ---------------- CAMERA ↔ ANGLES ---------------- */
     function setCameraFromAngles(elev, azim, inPlane) {
         const phi   = elev   * Math.PI / 180;
         const theta = azim   * Math.PI / 180;
@@ -432,229 +543,124 @@
         return { elev: Math.round(elev), azim: Math.round(azim), inPlane: Math.round(inPlane) };
     }
 
-    function updateSlidersFromAngles({ elev, azim, inPlane }) {
-        azimuthSlider.value  = azim;
-        elevationSlider.value = elev;
-        azimuthVal.textContent  = azim  + "°";
-        elevationVal.textContent = elev + "°";
-        inPlaneAngle = inPlane;
-        updateDialDisplay();
-    }
-
-    // Slider interactions
-    azimuthSlider.addEventListener("input", () => {
-        azimuthVal.textContent = azimuthSlider.value + "°";
-        mouseDown();
-        setCameraFromAngles(+elevationSlider.value, +azimuthSlider.value, inPlaneAngle);
-    });
-    azimuthSlider.addEventListener("change", () => mouseUp(true));
-
-    elevationSlider.addEventListener("input", () => {
-        elevationVal.textContent = elevationSlider.value + "°";
-        mouseDown();
-        setCameraFromAngles(+elevationSlider.value, +azimuthSlider.value, inPlaneAngle);
-    });
-    elevationSlider.addEventListener("change", () => mouseUp(true));
-
-    // Dial interactions
-    let dialDragging = false;
-    dial.addEventListener("mousedown", e => {
-        dialDragging = true;
-        dial.style.cursor = "grabbing";
-        mouseDown();
-        e.preventDefault();
-    });
-    window.addEventListener("mousemove", e => {
-        if (!dialDragging) return;
-        const rect = dial.getBoundingClientRect();
-        const dx = e.clientX - (rect.left + rect.width  / 2);
-        const dy = e.clientY - (rect.top  + rect.height / 2);
-        inPlaneAngle = Math.atan2(dx, -dy) * 180 / Math.PI;
-        updateDialDisplay();
-        setCameraFromAngles(+elevationSlider.value, +azimuthSlider.value, inPlaneAngle);
-    });
-    window.addEventListener("mouseup", e => {
-        if (!dialDragging) return;
-        dialDragging = false;
-        dial.style.cursor = "grab";
-        mouseUp(true);
-    });
-
-    // Zoom slider
+    /* ---------------- ZOOM ---------------- */
     const zoomSlider = document.getElementById("zoom-slider");
     const zoomVal    = document.getElementById("zoom-val");
 
     function applyZoom(z) {
-        camera.zoom = Math.max(0.2, Math.min(5, z));
-        camera.updateProjectionMatrix();
-        zoomSlider.value = Math.round(camera.zoom * 100);
-        zoomVal.textContent = Math.round(camera.zoom * 100) + "%";
+        const clamped = Math.max(0.2, Math.min(5, z));
+        if (perspectiveMode) {
+            perspCamera.zoom = clamped;
+            perspCamera.updateProjectionMatrix();
+        } else {
+            orthoCamera.zoom = clamped;
+            orthoCamera.updateProjectionMatrix();
+        }
+        zoomSlider.value = Math.round(clamped * 100);
+        zoomVal.textContent = Math.round(clamped * 100) + "%";
         updateSVGTransform();
     }
 
-    zoomSlider.addEventListener("input", () => {
-        mouseDown();
-        applyZoom(zoomSlider.value / 100);
-    });
+    zoomSlider.addEventListener("input", () => { mouseDown(); applyZoom(zoomSlider.value / 100); });
     zoomSlider.addEventListener("change", () => mouseUp(true));
 
     let wheelTimer = null;
     canvas.addEventListener("wheel", e => {
         e.preventDefault();
         mouseDown();
-        applyZoom(camera.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+        const currentZoom = perspectiveMode ? perspCamera.zoom : orthoCamera.zoom;
+        applyZoom(currentZoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
         clearTimeout(wheelTimer);
         wheelTimer = setTimeout(() => mouseUp(true), 400);
     }, { passive: false });
 
-    // Reset
-    resetBtn.addEventListener("click", () => {
+    /* ---------------- PERSPECTIVE TOGGLE ---------------- */
+    const perspToggle = document.getElementById("persp-toggle");
+
+    perspToggle.addEventListener("click", () => {
+        perspectiveMode = !perspectiveMode;
+        perspToggle.style.opacity = perspectiveMode ? '1' : '0.4';
+
+        const angles = readAnglesFromCamera();
+        const zoom = perspectiveMode ? perspCamera.zoom : orthoCamera.zoom;
+
+        camera = perspectiveMode ? perspCamera : orthoCamera;
+        controls.dispose();
+        controls = new TrackballControls(camera, renderer.domElement);
+        controls.target.set(...center);
+        controls.enablePan = false;
+        controls.enableZoom = false;
+        controls.staticMoving = true;
+        controls.addEventListener("start", mouseDown);
+        controls.addEventListener("end", () => mouseUp(false));
+
+        setCameraFromAngles(angles.elev, angles.azim, angles.inPlane);
+        applyZoom(zoom);
         mouseDown();
-        updateSlidersFromAngles(DEFAULT_ANGLES);
-        setCameraFromAngles(DEFAULT_ANGLES.elev, DEFAULT_ANGLES.azim, DEFAULT_ANGLES.inPlane);
-        applyZoom(1);
         mouseUp(true);
     });
 
-    // Initialise sliders from actual camera state
-    updateSlidersFromAngles(readAnglesFromCamera());
+    /* ---------------- CONTROLS PANEL TOGGLE ---------------- */
+    const controlsToggle = document.getElementById("controls-toggle");
+    const controlsPanel  = document.getElementById("controls-panel");
 
-    /* ---------------- DOMAIN PANEL (debugging only — uncomment to enable) ----------------
-    const domainPanel = document.getElementById("domain-panel");
-    const domainSvg = document.getElementById("domain-svg");
-    const domainG = document.getElementById("domain-g");
-    const domainToggle = document.getElementById("domain-toggle");
-
-    let domainData = null;
-
-    // Pan/zoom state
-    let dpTx = 0, dpTy = 0, dpScale = 1;
-    let dpDragging = false, dpDx = 0, dpDy = 0;
-
-    domainToggle.addEventListener("click", () => {
-        if (domainPanel.style.display === "none") {
-            domainPanel.style.display = "block";
-            domainToggle.style.opacity = "1";
-            if (domainData) renderDomain();
-        } else {
-            domainPanel.style.display = "none";
-            domainToggle.style.opacity = "0.3";
-        }
+    controlsToggle.addEventListener("click", () => {
+        const visible = controlsPanel.style.display !== 'none';
+        controlsPanel.style.display = visible ? 'none' : '';
+        controlsToggle.style.opacity = visible ? '0.4' : '1';
     });
 
-    domainSvg.addEventListener("wheel", e => {
-        e.preventDefault();
-        const factor = e.deltaY < 0 ? 1.15 : 1/1.15;
-        const rect = domainSvg.getBoundingClientRect();
-        const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
-        dpTx = mx + factor * (dpTx - mx);
-        dpTy = my + factor * (dpTy - my);
-        dpScale *= factor;
-        applyDomainTransform();
-    }, {passive: false});
+    /* ---------------- DEBUG PANEL TOGGLE ---------------- */
+    const debugToggle = document.getElementById("debug-toggle");
+    const debugPanel  = document.getElementById("debug-panel");
 
-    domainSvg.addEventListener("mousedown", e => {
-        dpDragging = true;
-        dpDx = e.clientX - dpTx;
-        dpDy = e.clientY - dpTy;
-        domainSvg.style.cursor = "grabbing";
-    });
-    window.addEventListener("mousemove", e => {
-        if (!dpDragging) return;
-        dpTx = e.clientX - dpDx;
-        dpTy = e.clientY - dpDy;
-        applyDomainTransform();
-    });
-    window.addEventListener("mouseup", () => {
-        dpDragging = false;
-        domainSvg.style.cursor = "grab";
+    debugToggle.addEventListener("click", () => {
+        const visible = debugPanel.style.display !== 'none';
+        debugPanel.style.display = visible ? 'none' : '';
+        debugToggle.style.opacity = visible ? '0.4' : '1';
     });
 
-    function applyDomainTransform() {
-        domainG.setAttribute("transform", `translate(${dpTx},${dpTy}) scale(${dpScale})`);
-        const inv = 1 / dpScale;
-        for (const el of domainG.querySelectorAll("[data-base-fs]"))
-            el.setAttribute("font-size", (parseFloat(el.dataset.baseFs) * inv).toFixed(2));
-        for (const el of domainG.querySelectorAll("[data-base-r]"))
-            el.setAttribute("r", (parseFloat(el.dataset.baseR) * inv).toFixed(2));
-    }
+    /* Debug sliders display */
+    const simplifySlider = document.getElementById('dbg-simplify');
+    const simplifyVal    = document.getElementById('dbg-simplify-val');
+    const gridResSlider  = document.getElementById('dbg-gridres');
+    const gridResVal     = document.getElementById('dbg-gridres-val');
 
-    function renderDomain() {
-        if (!domainData) return;
-        const d = domainData;
-        const W = domainSvg.clientWidth || 360;
-        const H = domainSvg.clientHeight || 360;
-        const pad = 24;
-        const [uMin, uMax, vMin, vMax] = d.bounds;
-        const du = uMax - uMin, dv = vMax - vMin;
-        const sx = (W - 2*pad) / du;
-        const sy = (H - 2*pad) / dv;
+    simplifySlider.addEventListener('input', () => {
+        simplifyVal.textContent = simplifySlider.value;
+    });
+    gridResSlider.addEventListener('input', () => {
+        gridResVal.textContent = gridResSlider.value;
+    });
 
-        // Map domain coords to SVG pixel coords
-        const px = u => pad + (u - uMin) * sx;
-        const py = v => H - pad - (v - vMin) * sy;
+    /* ---------------- RESET & SAVE VIEW ---------------- */
+    document.getElementById("reset-btn").addEventListener("click", () => {
+        mouseDown();
+        updateDialsFromAngles(DEFAULT_ANGLES);
+        setCameraFromAngles(DEFAULT_ANGLES.elev, DEFAULT_ANGLES.azim, DEFAULT_ANGLES.inPlane);
+        applyZoom(DEFAULT_ANGLES.zoom);
+        mouseUp(true);
+    });
 
-        // Reset transform
-        dpTx = 0; dpTy = 0; dpScale = 1;
-        applyDomainTransform();
+    document.getElementById("dbg-apply-btn").addEventListener("click", () => {
+        mouseDown();
+        mouseUp(true);  // recompute silhouette with current camera, picks up latest debug params
+    });
 
-        let html = "";
+    document.getElementById("save-view-btn").addEventListener("click", () => {
+        const zoom = perspectiveMode ? perspCamera.zoom : orthoCamera.zoom;
+        fetch("{% url 'surface-save-view' pk=pk %}", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ elev: elevAngle, azim: azimAngle, inplane: inPlaneAngle, zoom }),
+        }).catch(err => console.error("save view failed:", err));
+    });
 
-        // Triangle grid
-        if (d.res) {
-            const res = d.res;
-            const us = Array.from({length: res+1}, (_, i) => uMin + i * du / res);
-            const vs = Array.from({length: res+1}, (_, j) => vMin + j * dv / res);
-            // Horizontal lines
-            for (let j = 0; j <= res; j++) {
-                html += `<line x1="${px(us[0])}" y1="${py(vs[j])}" x2="${px(us[res])}" y2="${py(vs[j])}" stroke="#ddd" stroke-width="0.4" vector-effect="non-scaling-stroke"/>`;
-            }
-            // Vertical lines
-            for (let i = 0; i <= res; i++) {
-                html += `<line x1="${px(us[i])}" y1="${py(vs[0])}" x2="${px(us[i])}" y2="${py(vs[res])}" stroke="#ddd" stroke-width="0.4" vector-effect="non-scaling-stroke"/>`;
-            }
-            // Diagonals (bottom-left to top-right) — only at moderate resolution
-            if (res <= 80) {
-                for (let i = 0; i < res; i++) {
-                    for (let j = 0; j < res; j++) {
-                        html += `<line x1="${px(us[i])}" y1="${py(vs[j])}" x2="${px(us[i+1])}" y2="${py(vs[j+1])}" stroke="#ddd" stroke-width="0.4" vector-effect="non-scaling-stroke"/>`;
-                    }
-                }
-            }
-        }
+    /* ---------------- INIT ---------------- */
+    setCameraFromAngles(SAVED_ANGLES.elev, SAVED_ANGLES.azim, SAVED_ANGLES.inPlane);
+    applyZoom(SAVED_ANGLES.zoom);
+    updateAllDialDisplays();
+    updateDialsFromAngles(readAnglesFromCamera());
 
-        // Lines
-        const typeColor = {"contour": "red", "border": "#3399ff", "??": "#aaa"};
-        for (const line of d.lines) {
-            const col = typeColor[line.type] || "#aaa";
-            // Draw the polyline
-            if (line.pts && line.pts.length > 0) {
-                const points = line.pts.map(p => `${px(p[0])},${py(p[1])}`).join(" ");
-                html += `<polyline points="${points}" fill="none" stroke="${col}" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`;
-            }
-            // Breakpoints
-            for (const bk of (line.bks || [])) {
-                const bx = px(bk.pt[0]), by = py(bk.pt[1]);
-                html += `<circle cx="${bx}" cy="${by}" r="3" fill="orange" stroke="none" data-base-r="3"/>`;
-                html += `<text x="${bx+4}" y="${by-3}" font-size="8" fill="orange" data-base-fs="8">${bk.v}</text>`;
-            }
-        }
-
-        // Cusps (magenta stars)
-        for (const cp of (d.cusps || [])) {
-            const cx = px(cp[0]), cy = py(cp[1]);
-            html += `<text x="${cx}" y="${cy}" font-size="12" fill="magenta" text-anchor="middle" dominant-baseline="middle" data-base-fs="12">★</text>`;
-        }
-
-        domainG.innerHTML = html;
-    }
-
-    // Called from drawSVG when data arrives
-    function updateDomain(d) {
-        domainData = d;
-        if (domainPanel.style.display !== "none") renderDomain();
-    }
-    ---------------- END DOMAIN PANEL ---------------- */
 </script>
 {% endblock %}
