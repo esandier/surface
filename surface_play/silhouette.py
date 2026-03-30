@@ -297,9 +297,7 @@ class Surface:
         ax = sp.Array([ax_x, ax_y, ax_z])
         du, dv = sp.symbols("du dv")
 
-        # Le choix de la perturbation est délicat. En gros il faut une dérivée suffisament grande
-        # (de l'ordre de dérivée de X divisé par resolution), amplitude petite pour que ça se voie pas, oscillation pas trop
-        # grande pour pas perturber les cusps.
+        #  la perturbation est petite et affine, choisie au hasard, mais multipliée par un sinus pour permettre les raccord cylindre ou moebius. on pourrait essayer de rajouter des termes affines pour mélanger un peu les coordonnées.
         freq_u = 2 if self.u_identify != "mo" else 1
         freq_v = 2 if self.v_identify != "mo" else 1
 

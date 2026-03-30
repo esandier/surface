@@ -122,21 +122,6 @@
                                 <label class="form-check-label" for="ct_po">Polar <span class="text-muted small">(r, θ)</span></label>
                             </div>
                         </div>
-                        <div style="display:flex; gap:16px; margin-bottom:6px; align-items:center;">
-                            <span class="text-muted small" style="width:60px;">Variables</span>
-                            <div style="display:flex; align-items:center; gap:4px;">
-                                <input type="text" id="disk_p0" maxlength="10"
-                                    style="width:60px; font-family:monospace; font-style:italic;"
-                                    class="form-control form-control-sm" placeholder="r">
-                                <span class="text-muted small">=</span>
-                            </div>
-                            <div style="display:flex; align-items:center; gap:4px;">
-                                <input type="text" id="disk_p1" maxlength="10"
-                                    style="width:60px; font-family:monospace; font-style:italic;"
-                                    class="form-control form-control-sm" placeholder="θ">
-                                <span class="text-muted small">=</span>
-                            </div>
-                        </div>
                         <table class="table table-borderless table-sm mb-0" style="width:auto;">
                             <tbody>
                                 <tr>
@@ -165,7 +150,7 @@
 
                 <!-- Parameter names -->
                 <div class="form-group mb-3">
-                    <label for="id_parameter_names" style="font-size:0.9rem;">Variable names <span class="text-muted small">(two names separated by a space)</span></label>
+                    <label for="id_parameter_names" id="lbl_parameter_names" style="font-size:0.9rem;">Variable names <span class="text-muted small">(two names separated by a space)</span></label>
                     <input type="text" name="parameter_names" id="id_parameter_names"
                         class="form-control{% if form.parameter_names.errors %} is-invalid{% endif %}"
                         value="{{ form.parameter_names.value|default:'u v' }}" maxlength="30"
@@ -244,8 +229,6 @@
     const scInputs  = document.querySelectorAll('input[name="output_type"]');
     const rectDom   = document.getElementById('rect_domain');
     const diskDom   = document.getElementById('disk_domain');
-    const diskP0    = document.getElementById('disk_p0');
-    const diskP1    = document.getElementById('disk_p1');
     const paramInput = document.getElementById('id_parameter_names');
     const labelX    = document.getElementById('label_X');
     const labelY    = document.getElementById('label_Y');
@@ -274,10 +257,14 @@
         }
     }
 
-    function updateDiskVarHints() {
+    function updateDiskVarHints() {}
+
+    function updateParamLabel() {
+        const dt = document.querySelector('input[name="domain_type"]:checked').value;
         const ct = document.querySelector('input[name="coord_type"]:checked').value;
-        diskP0.placeholder = ct === 'po' ? 'r' : 'x';
-        diskP1.placeholder = ct === 'po' ? 'θ' : 'y';
+        const lbl = document.getElementById('lbl_parameter_names');
+        const coords = (dt === 'disk' && ct === 'po') ? 'r, θ' : 'x, y';
+        lbl.innerHTML = `Variable names for ${coords} <span class="text-muted small">(two names separated by a space)</span>`;
     }
 
     function updateUI() {
@@ -288,13 +275,13 @@
         } else {
             rectDom.style.display = 'none';
             diskDom.style.display = '';
-            updateDiskVarHints();
         }
+        updateParamLabel();
         updateLabels();
     }
 
     dtInputs.forEach(el => el.addEventListener('change', updateUI));
-    ctInputs.forEach(el => el.addEventListener('change', () => { updateDiskVarHints(); updateLabels(); }));
+    ctInputs.forEach(el => el.addEventListener('change', () => { updateParamLabel(); updateLabels(); }));
     scInputs.forEach(el => el.addEventListener('change', updateLabels));
     paramInput.addEventListener('input', updateLabels);
 

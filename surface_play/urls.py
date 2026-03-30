@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import SurfaceRecordListView, SurfaceRecordCreateView, SurfaceRecordUpdateView, SurfaceRecordDeleteView, SurfacePlayView, save_view
+from .views import SurfaceRecordListView, SurfaceRecordCreateView, SurfaceRecordUpdateView, SurfaceRecordDeleteView, SurfacePlayView, save_view, save_thumbnail
 from django.views.decorators.csrf import csrf_exempt
 
 urlpatterns = [
@@ -9,4 +9,5 @@ urlpatterns = [
     path('surfaceplay/<int:pk>/', csrf_exempt(SurfacePlayView.as_view()), name='surface-play'),
     path('surface/<int:pk>/delete/', SurfaceRecordDeleteView.as_view(), name='surface-delete'),
     path('surfaceplay/<int:pk>/saveview/', csrf_exempt(save_view), name='surface-save-view'),
+    path('surfaceplay/<int:pk>/savethumbnail/', csrf_exempt(save_thumbnail), name='surface-save-thumbnail'),
 ]

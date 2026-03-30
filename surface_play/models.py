@@ -65,6 +65,7 @@ class SurfaceRecord(models.Model):
     initial_azim   = models.FloatField(default=45.0)
     initial_inplane = models.FloatField(default=0.0)
     initial_zoom   = models.FloatField(default=1.0)
+    initial_perspective = models.BooleanField(default=False)
 
     def __str__(self):
         return self.name

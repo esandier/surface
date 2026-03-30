@@ -11,13 +11,16 @@
             <a id="download-button" class="glyph" style="visibility:hidden">
                 <span class="fa-regular fa-circle-down"></span>
             </a>
-            <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph">
+            <a id="thumbnail-btn" class="glyph" style="cursor:pointer;" title="Save thumbnail">
+                <span class="fa-solid fa-camera"></span>
+            </a>
+            <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph" title="Edit surface">
                 <span class="far fa-pen-to-square"></span>
             </a>
             <a id="persp-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Perspective">
                 <span class="fa-regular fa-eye"></span>
             </a>
-            <a id="controls-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Controls">
+            <a id="controls-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Visual controls">
                 <span class="fa-solid fa-sliders"></span>
             </a>
             {% if debug_ui %}<a id="debug-toggle" class="glyph" style="cursor:pointer; opacity:0.4; font-size:0.75em; font-weight:600; letter-spacing:0.03em;" title="Debug">debug</a>{% endif %}
@@ -424,7 +427,7 @@
     }
 
     /* Initial values from server-side saved view */
-    const SAVED_ANGLES = { elev: {{ initial_elev }}, azim: {{ initial_azim }}, inPlane: {{ initial_inplane }}, zoom: {{ initial_zoom }} };
+    const SAVED_ANGLES = { elev: {{ initial_elev }}, azim: {{ initial_azim }}, inPlane: {{ initial_inplane }}, zoom: {{ initial_zoom }}, perspective: {{ initial_perspective|yesno:"true,false" }} };
     const DEFAULT_ANGLES = { elev: 35, azim: 45, inPlane: 0, zoom: 1 };
 
     let elevAngle   = SAVED_ANGLES.elev;
@@ -651,11 +654,45 @@
         fetch("{% url 'surface-save-view' pk=pk %}", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ elev: elevAngle, azim: azimAngle, inplane: inPlaneAngle, zoom }),
+            body: JSON.stringify({ elev: elevAngle, azim: azimAngle, inplane: inPlaneAngle, zoom, perspective: perspectiveMode }),
         }).catch(err => console.error("save view failed:", err));
     });
 
+    document.getElementById("thumbnail-btn").addEventListener("click", () => {
+        const btn = document.getElementById("thumbnail-btn");
+        btn.style.transition = 'opacity 0s';
+        btn.style.opacity = '0.2';
+        setTimeout(() => { btn.style.transition = 'opacity 0.5s'; btn.style.opacity = '1'; }, 60);
+
+        let thumbData;
+        if (perspectiveMode) {
+            const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+            const up    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+            thumbData = { I: right.toArray(), J: up.toArray(), eye: camera.position.toArray() };
+        } else {
+            let tI = new THREE.Vector3(1, 0, -1).unproject(camera);
+            let tJ = new THREE.Vector3(0, 1, -1).unproject(camera);
+            let tO = new THREE.Vector3(0, 0, -1).unproject(camera);
+            thumbData = { I: tI.sub(tO).toArray(), J: tJ.sub(tO).toArray() };
+        }
+        fetch("{% url 'surface-save-thumbnail' pk=pk %}", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(thumbData),
+        }).catch(err => console.error("save thumbnail failed:", err));
+    });
+
     /* ---------------- INIT ---------------- */
+    if (SAVED_ANGLES.perspective) {
+        perspectiveMode = true;
+        camera = perspCamera;
+        perspToggle.style.opacity = '1';
+        controls.dispose();
+        controls = new TrackballControls(camera, renderer.domElement);
+        controls.target.set(...center);
+        controls.enablePan = false;
+        controls.enabled = false;
+    }
     setCameraFromAngles(SAVED_ANGLES.elev, SAVED_ANGLES.azim, SAVED_ANGLES.inPlane);
     applyZoom(SAVED_ANGLES.zoom);
     updateAllDialDisplays();

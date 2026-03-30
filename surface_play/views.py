@@ -40,10 +40,11 @@ class SurfacePlayView(TemplateView):
         context['radius'] = radius
         context['surface'] = rec
         context['pk'] = pk
-        context['initial_elev']    = rec.initial_elev
-        context['initial_azim']    = rec.initial_azim
-        context['initial_inplane'] = rec.initial_inplane
-        context['initial_zoom']    = rec.initial_zoom
+        context['initial_elev']        = rec.initial_elev
+        context['initial_azim']        = rec.initial_azim
+        context['initial_inplane']     = rec.initial_inplane
+        context['initial_zoom']        = rec.initial_zoom
+        context['initial_perspective'] = rec.initial_perspective
         context['debug_ui']        = settings.DEBUG
 
         return render(request, self.template_name, context)
@@ -110,17 +111,29 @@ def save_view(request, pk):
         return HttpResponse(status=405)
     rec = get_object_or_404(SurfaceRecord, pk=pk)
     data = json.loads(request.body.decode())
-    rec.initial_elev    = float(data['elev'])
-    rec.initial_azim    = float(data['azim'])
-    rec.initial_inplane = float(data['inplane'])
-    rec.initial_zoom    = float(data['zoom'])
+    rec.initial_elev        = float(data['elev'])
+    rec.initial_azim        = float(data['azim'])
+    rec.initial_inplane     = float(data['inplane'])
+    rec.initial_zoom        = float(data['zoom'])
+    rec.initial_perspective = bool(data.get('perspective', False))
+    rec.save(update_fields=['initial_elev', 'initial_azim', 'initial_inplane', 'initial_zoom',
+                            'initial_perspective'])
+    return HttpResponse('{}', content_type='application/json')
+
+
+def save_thumbnail(request, pk):
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    rec = get_object_or_404(SurfaceRecord, pk=pk)
+    data = json.loads(request.body.decode())
+    I   = data.get('I')
+    J   = data.get('J')
+    eye = data.get('eye')  # None for orthographic
     try:
-        rec.thumbnail = compute_thumbnail(
-            rec, elev=rec.initial_elev, azim=rec.initial_azim, inplane=rec.initial_inplane
-        )
-        rec.save(update_fields=['initial_elev', 'initial_azim', 'initial_inplane', 'initial_zoom', 'thumbnail'])
-    except Exception:
-        rec.save(update_fields=['initial_elev', 'initial_azim', 'initial_inplane', 'initial_zoom'])
+        rec.thumbnail = compute_thumbnail(rec, I=I, J=J, eye=eye)
+        rec.save(update_fields=['thumbnail'])
+    except Exception as e:
+        return HttpResponse(json.dumps({'error': str(e)}), content_type='application/json', status=500)
     return HttpResponse('{}', content_type='application/json')
 
 
@@ -134,13 +147,7 @@ class SurfaceRecordCreateView(CreateView):
     context_object_name = 'surface'
 
     def form_valid(self, form):
-        response = super().form_valid(form)
-        try:
-            self.object.thumbnail = compute_thumbnail(self.object)
-            self.object.save(update_fields=['thumbnail'])
-        except Exception:
-            pass
-        return response
+        return super().form_valid(form)
 
 class SurfaceRecordUpdateView(UpdateView):
     model = SurfaceRecord
@@ -148,13 +155,7 @@ class SurfaceRecordUpdateView(UpdateView):
     context_object_name = 'surface'
 
     def form_valid(self, form):
-        response = super().form_valid(form)
-        try:
-            self.object.thumbnail = compute_thumbnail(self.object)
-            self.object.save(update_fields=['thumbnail'])
-        except Exception:
-            pass
-        return response
+        return super().form_valid(form)
 
 class SurfaceRecordDeleteView(DeleteView):
     model = SurfaceRecord
