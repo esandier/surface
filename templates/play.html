@@ -703,7 +703,10 @@
         controls = new TrackballControls(camera, renderer.domElement);
         controls.target.set(...center);
         controls.enablePan = false;
-        controls.enabled = false;
+        controls.enableZoom = false;
+        controls.staticMoving = true;
+        controls.addEventListener("start", mouseDown);
+        controls.addEventListener("end", () => mouseUp(false));
     }
     setCameraFromAngles(SAVED_ANGLES.elev, SAVED_ANGLES.azim, SAVED_ANGLES.inPlane);
     applyZoom(SAVED_ANGLES.zoom);
