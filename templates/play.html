@@ -8,16 +8,16 @@
         <h1>{{ surface.name }}</h1>
         <h1>
             <div id="spinner" class="spinner-border" style="visibility:hidden"></div>
-            <a id="download-button" class="glyph" style="visibility:hidden">
+            <a id="download-button" class="glyph" style="visibility:hidden" title="Download .svg file">
                 <span class="fa-regular fa-circle-down"></span>
             </a>
-            <a id="thumbnail-btn" class="glyph" style="cursor:pointer;" title="Save thumbnail">
+            <a id="thumbnail-btn" class="glyph" style="cursor:pointer;" title="Make this the default view">
                 <span class="fa-solid fa-camera"></span>
             </a>
             <a href="{% url 'surface-update' pk=surface.pk %}" class="glyph" title="Edit surface">
                 <span class="far fa-pen-to-square"></span>
             </a>
-            <a id="persp-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Perspective">
+            <a id="persp-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Perspective/Orthographic">
                 <span class="fa-regular fa-eye"></span>
             </a>
             <a id="controls-toggle" class="glyph" style="cursor:pointer; opacity:0.4;" title="Visual controls">
@@ -89,10 +89,9 @@
                 <span id="zoom-val" style="width:38px; text-align:right; font-size:11px; color:#333; font-family:monospace;">100%</span>
             </div>
 
-            <!-- Reset + Save buttons -->
+            <!-- Reset button -->
             <div style="display:flex; justify-content:space-between; gap:8px;">
                 <button id="reset-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Reset</button>
-                <button id="save-view-btn" class="btn btn-sm btn-outline-primary" style="font-size:11px; padding:2px 14px;" title="Save current view as default for this surface">Save view</button>
             </div>
         </div>
 
@@ -120,10 +119,10 @@
             <div style="margin-bottom:10px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
                     <span style="font-size:12px; color:#333;">Grid res</span>
-                    <span id="dbg-gridres-val" style="font-size:11px; font-family:monospace; color:#555;">250</span>
+                    <span id="dbg-gridres-val" style="font-size:11px; font-family:monospace; color:#555;">20</span>
                 </div>
                 <!-- direct value 30..600, default 250 -->
-                <input type="range" id="dbg-gridres" min="30" max="600" step="10" value="250" style="width:100%; cursor:pointer;">
+                <input type="range" id="dbg-gridres" min="10" max="600" step="10" value="20" style="width:100%; cursor:pointer;">
             </div>
             <div style="display:flex; justify-content:flex-end;">
                 <button id="dbg-apply-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Apply</button>
@@ -361,6 +360,7 @@
         isRequesting = false;
         lastOrigin = data.origin;
         const lines = data.lines_by_visibility;
+        const siLines = data.si_lines_by_visibility || [];
 
         updateSVGTransform();
 
@@ -374,6 +374,20 @@
                     fill="none"
                     stroke="${visible ? 'black' : 'grey'}"
                     stroke-width="1.5"
+                    ${visible ? '' : 'stroke-dasharray="4"'}
+                    vector-effect="non-scaling-stroke"
+                />`;
+            });
+        });
+        siLines.forEach((group, i) => {
+            group.forEach(line => {
+                const visible = i === siLines.length - 1;
+                html += `
+                <polyline
+                    points="${line}"
+                    fill="none"
+                    stroke="${visible ? 'black' : 'grey'}"
+                    stroke-width="2.5"
                     ${visible ? '' : 'stroke-dasharray="4"'}
                     vector-effect="non-scaling-stroke"
                 />`;
@@ -649,20 +663,18 @@
         mouseUp(true);  // recompute silhouette with current camera, picks up latest debug params
     });
 
-    document.getElementById("save-view-btn").addEventListener("click", () => {
+    document.getElementById("thumbnail-btn").addEventListener("click", () => {
+        const btn = document.getElementById("thumbnail-btn");
+        btn.style.transition = 'opacity 0s';
+        btn.style.opacity = '0.2';
+        setTimeout(() => { btn.style.transition = 'opacity 0.5s'; btn.style.opacity = '1'; }, 60);
+
         const zoom = perspectiveMode ? perspCamera.zoom : orthoCamera.zoom;
         fetch("{% url 'surface-save-view' pk=pk %}", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ elev: elevAngle, azim: azimAngle, inplane: inPlaneAngle, zoom, perspective: perspectiveMode }),
         }).catch(err => console.error("save view failed:", err));
-    });
-
-    document.getElementById("thumbnail-btn").addEventListener("click", () => {
-        const btn = document.getElementById("thumbnail-btn");
-        btn.style.transition = 'opacity 0s';
-        btn.style.opacity = '0.2';
-        setTimeout(() => { btn.style.transition = 'opacity 0.5s'; btn.style.opacity = '1'; }, 60);
 
         let thumbData;
         if (perspectiveMode) {
