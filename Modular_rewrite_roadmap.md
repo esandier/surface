@@ -85,7 +85,7 @@ These come from prior-attempt notes. Each is referenced by its ID in the steps t
 | **G5** | SplitPoint identity | A SP shared between two curves must be **the same Python object** in both, so visibility propagation can traverse via `id(sp)` lookup. Don't `dataclass(frozen=True, eq=True)` and rely on equality — store `dict[int(id(sp)), ...]`. |
 | **G6** | HC dedup at same target sample | Two helper curves can argmin to the same sample of the same target curve, although no example comes to mind. The split must be applied once and the SP shared by both HCs. |
 | **G7** | LP infeasibility = bug or numerical problem in computing visibility changes | `lp_refine_visibility` may report infeasible. **Do not relax the LP** to recover. Instead, surface the failure: it indicates δv values from `split_all` violate the global constraint, which is a bug or numerical problem in computing visibility changes. Raise `LPInfeasibleError`. |
-| **G8** | ker_param via SVD | Implement `ker_param(p)` as the right-singular vector (smallest singular value) of the 2×2 Jacobian of the projected surface parametrization `(u, v) ↦ XY(S(u, v))`. In the **perspective** case the projection map is non-linear, so the Jacobian picks up chain-rule terms from differentiating the perspective divide; the exact formula is **deferred to P3 implementation** (TODO: derive from spec or reconstruct from silhouette.py with user authorization). |
+| **G8** | ker_param via SVD | Implement `ker_param(p)` as the right-singular vector (smallest singular value) of the 2×2 Jacobian of the projected surface parametrization `(u, v) ↦ XY(S(u, v))`. Ortho: `J = [[I·Su, I·Sv], [J·Su, J·Sv]]`. Persp: chain rule through the perspective divide gives `J[r, c] = basis_r·Sc − (basis_r·d / z)·(n·Sc)` with `d = S(p) − eye`, `z = n·(S(p) − eye)`, `n = (I × J)/‖·‖`. Drop the uniform `1/z` for the SVD (right-singular vectors are scale-invariant); keep it in `proj_vec`. |
 | **G9** | Newton fallback | When Newton on `s ∈ (0, 1)` for `inner(SN, axis) = 0` escapes the interval, fall back to `s = 0.5`. Don't loop, don't extrapolate. |
 | **G10** | δv ∈ {−1, 0, +1} | All split visibility-change formulas yield ±1 or 0 per side. Magnitudes ±2 only appear at projection breaks (CC occluder). Anything else means a sign convention got dropped. |
 | **G11** | cse() before lambdify | Apply `sympy.cse()` to the joint expressions for `[S, Su, Sv, Suu, Suv, Svv, SN]` so they share subexpressions in a single lambdified callable. ~10× speedup on the construction phase. Spec §"Implementation note" line 147. |
@@ -255,7 +255,7 @@ class Projection:
 - `O` defaults: `O = [0, 0, 0]` in ortho if not supplied; assert `O == eye` in persp (frontend contract from [templates/play.html:330](templates/play.html#L330)).
 - Ortho mode: image-plane normal `n = I × J` (normalized, internal `_axis`); `XY(xyz) = (I·(xyz − O), J·(xyz − O))`; `Z(xyz) = n·(xyz − O)`. `viewer_direction()` returns `n`.
 - Persp mode: `viewer_direction(xyz) = xyz − eye` (unnormalized — sign-only consumers, matching SN). XY uses standard perspective divide along `n`: `XY(xyz) = (I·d, J·d)/(n·d)` with `d = xyz − eye`; eye projects to `(0, 0)` by definition (zero-vector special case). `Z(xyz) = n·(xyz − eye)` is signed depth along the image-plane normal.
-- `ker_param(p)` (G8): build the 2×2 Jacobian of `(XY ∘ S)` at `p`. SVD; right-singular vector for the smallest singular value is `ker_param`. **Perspective TODO:** the Jacobian's chain-rule contribution from the perspective divide is not yet specified — derive at implementation time. Ortho `ker_param` is implemented and tested first; perspective `ker_param` lands as a follow-up sub-step inside P3. `O` does not affect `ker_param` (it's a constant translation; Jacobian is unchanged).
+- `ker_param(p)` (G8): build the 2×2 Jacobian of `(XY ∘ S)` at `p`. SVD; right-singular vector for the smallest singular value is `ker_param`. Ortho: `J = [[I·Su, I·Sv], [J·Su, J·Sv]]`; `O` drops out (constant translation). Persp: chain-rule through the perspective divide gives `J[r, c] = basis_r·Sc − (basis_r·d / z)·(n·Sc)` with `d = S(p) − eye`, `z = n·d`; the uniform `1/z` prefactor is dropped for SVD (irrelevant to right-singular vectors). At a persp contour point this is rank-deficient and the kernel direction's image under dS is parallel to `d` (along the viewing ray). `proj_vec` in persp uses the same Jacobian applied to `dir3d`, but keeps the `1/z` (linear-map scale carries information).
 - `per_vertex_viewer_dot` is vectorized (`np.einsum`).
 
 **Test criterion:**
@@ -264,8 +264,11 @@ class Projection:
 3. Persp with `eye=[0,0,5]`, `O=[0,0,5]`, `I=[1,0,0], J=[0,1,0]`: `XY([0, 0, 5]) == (0, 0)` (eye projects to view-plane origin).
 4. **Persp `O ≠ eye` rejected:** constructor raises `ValueError` if persp mode is given `O != eye`.
 5. `per_vertex_viewer_dot` shape `(N,)`, matches per-vertex loop on a 50-vertex mesh.
+6. Persp `ker_param` converges to ortho `ker_param` as `eye` recedes along axis (regression on the chain-rule formula).
+7. Persp `ker_param` at a known persp contour point (paraboloid `Z=u²+v²`, `eye=(0,0,−h)`, contour circle `u²+v²=h`): `kerdS` is parallel to `S(p) − eye`.
+8. Persp `proj_vec` matches the finite-difference linearization of `XY` along `dir3d` (regression on the `1/z` scale).
 **Gotchas:** G8.
-**Stop & verify:** `pytest surface_play/test_projection.py` ⇒ 5 green.
+**Stop & verify:** `pytest surface_play/test_projection.py` ⇒ 8 green.
 
 ---
 

@@ -4,13 +4,9 @@ Spec: Reorganization_of_the_surface_app.md §"Projection of the surface" (lines 
 kerdS formula in spec line 273.
 Gotchas: G8 (ker_param via SVD).
 
-P3 sub-step status:
-- Ortho mode: full implementation (XY, Z, viewer_direction, per_vertex_viewer_dot,
-  ker_param, kerdS, proj_vec).
-- Perspective mode: XY, Z, viewer_direction, per_vertex_viewer_dot implemented.
-  ker_param / kerdS / proj_vec raise NotImplementedError — the chain-rule
-  contribution from the perspective divide is deferred to a follow-up sub-step
-  inside P3 (G8 TODO).
+P3 sub-step status: full implementation in both ortho and persp.
+  Persp ker_param / proj_vec use the chain-rule Jacobian of XY through the
+  perspective divide; see _xy_jac_persp below.
 
 API note: there is no public `axis` attribute. Use `viewer_direction(xyz=None)`:
 in ortho the no-arg form returns the constant (3,) view direction; in persp
@@ -134,41 +130,87 @@ class Projection:
         d = xyz - self.eye  # unnormalized; sign-only downstream
         return np.einsum("ij,ij->i", SN, d)
 
-    # ── Kernel direction (G8) ─────────────────────────────────────────────────
-    def ker_param(self, p: np.ndarray) -> np.ndarray:
-        """2D kernel direction in (u, v): right-singular vector of d(XY∘S) at p
-        for the smallest singular value (G8). Ortho only — persp TODO."""
-        if self.mode == "persp":
-            raise NotImplementedError(
-                "ker_param for perspective mode is a P3 follow-up sub-step (G8 TODO)"
-            )
+    # ── Internals: 2x2 Jacobian of (XY ∘ S) at p ──────────────────────────────
+    def _xy_s_jac(self, p: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (J_2x2, Su, Sv) at p. Used by ker_param and (persp) proj_vec.
+
+        Ortho:  J = [[I·Su, I·Sv], [J·Su, J·Sv]].
+        Persp:  J = same minus rank-1 correction from perspective divide:
+                J[r, c] = (basis_r · Sc) - (basis_r · d / z) * (n · Sc)
+                with d = S(p) - eye, z = n · d. The uniform 1/z prefactor is
+                dropped (irrelevant for SVD right-singular vectors).
+        """
         p = np.asarray(p, dtype=float).reshape(2)
         u, v = float(p[0]), float(p[1])
         Su = np.asarray(self.surface.Su(u, v), dtype=float).reshape(3)
         Sv = np.asarray(self.surface.Sv(u, v), dtype=float).reshape(3)
-        # O drops out of the Jacobian (constant translation).
+        I, J = self.I, self.J
+
+        if self.mode == "ortho":
+            J_mat = np.array([[I @ Su, I @ Sv],
+                              [J @ Su, J @ Sv]])
+            return J_mat, Su, Sv
+
+        S_p = np.asarray(self.surface.S(u, v), dtype=float).reshape(3)
+        d = S_p - self.eye
+        z = float(self._axis @ d)
+        if z == 0.0:
+            raise ValueError(
+                f"ker_param/proj_vec undefined: S(p)={S_p} lies on the image plane "
+                f"through eye (z = n·(S-eye) = 0)"
+            )
+        a = float(I @ d)
+        b = float(J @ d)
+        nSu = float(self._axis @ Su)
+        nSv = float(self._axis @ Sv)
         J_mat = np.array([
-            [self.I @ Su, self.I @ Sv],
-            [self.J @ Su, self.J @ Sv],
+            [I @ Su - (a / z) * nSu, I @ Sv - (a / z) * nSv],
+            [J @ Su - (b / z) * nSu, J @ Sv - (b / z) * nSv],
         ])
+        return J_mat, Su, Sv
+
+    # ── Kernel direction (G8) ─────────────────────────────────────────────────
+    def ker_param(self, p: np.ndarray) -> np.ndarray:
+        """2D kernel direction in (u, v): right-singular vector of d(XY∘S) at p
+        for the smallest singular value (G8). Works in both ortho and persp."""
+        J_mat, _Su, _Sv = self._xy_s_jac(p)
         _U, _S, Vh = np.linalg.svd(J_mat)
         return Vh[-1]
 
     def kerdS(self, uv: np.ndarray) -> np.ndarray:
-        """3D image of ker_param via dS at uv. Ortho only — persp TODO."""
+        """3D image of ker_param via dS at uv."""
         uv = np.asarray(uv, dtype=float).reshape(2)
-        kp = self.ker_param(uv)  # raises in persp mode
+        kp = self.ker_param(uv)
         u, v = float(uv[0]), float(uv[1])
         Su = np.asarray(self.surface.Su(u, v), dtype=float).reshape(3)
         Sv = np.asarray(self.surface.Sv(u, v), dtype=float).reshape(3)
         return kp[0] * Su + kp[1] * Sv
 
     def proj_vec(self, uv: np.ndarray, dir3d: np.ndarray) -> np.ndarray:
-        """Map a 3D vector to its 2D image in the view plane.
-        Ortho: linear (I·v, J·v). Perspective: TODO (chain rule through divide)."""
-        if self.mode == "persp":
-            raise NotImplementedError(
-                "proj_vec for perspective mode is a P3 follow-up sub-step"
+        """Map a 3D vector at S(uv) to its 2D image in the view plane (linear in dir3d).
+
+        Ortho: (I·v, J·v) — uv is unused (kept for API parity).
+        Persp: (1/z) · ((I·v) - (a/z)(n·v),  (J·v) - (b/z)(n·v))
+               with a=I·d, b=J·d, d=S(uv)-eye, z=n·d. Here the 1/z scale matters
+               (proj_vec is a linear map; ker_param only needs the direction).
+        """
+        v3 = np.asarray(dir3d, dtype=float).reshape(3)
+        I, J = self.I, self.J
+        if self.mode == "ortho":
+            return np.array([I @ v3, J @ v3])
+        uv = np.asarray(uv, dtype=float).reshape(2)
+        u, v = float(uv[0]), float(uv[1])
+        S_p = np.asarray(self.surface.S(u, v), dtype=float).reshape(3)
+        d = S_p - self.eye
+        z = float(self._axis @ d)
+        if z == 0.0:
+            raise ValueError(
+                f"proj_vec undefined: S(uv)={S_p} lies on the image plane through eye"
             )
-        d = np.asarray(dir3d, dtype=float).reshape(3)
-        return np.array([self.I @ d, self.J @ d])
+        a = float(I @ d)
+        b = float(J @ d)
+        nv = float(self._axis @ v3)
+        return np.array([
+            ((I @ v3) - (a / z) * nv) / z,
+            ((J @ v3) - (b / z) * nv) / z,
+        ])
