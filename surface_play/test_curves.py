@@ -1,8 +1,8 @@
-"""Tests for P4: make_lines."""
+"""Tests for P4: make_lines, P6: sign_changes."""
 
 import numpy as np
 import pytest
-from surface_play.curves import make_lines
+from surface_play.curves import make_lines, sign_changes
 
 
 def _abs_chain(chain: np.ndarray) -> list[int]:
@@ -99,3 +99,26 @@ class TestTwoLoops:
 # ---------------------------------------------------------------------------
 def test_empty_input():
     assert make_lines(np.empty((0, 2), dtype=int)) == []
+
+
+# ---------------------------------------------------------------------------
+# P6: sign_changes
+# ---------------------------------------------------------------------------
+class TestSignChanges:
+    def test_default_flip(self):
+        vals_p = np.array([1, -1, 2, -3])
+        vals_q = np.array([-1, 1, 3, -2])
+        mask = sign_changes(vals_p, vals_q)
+        assert mask.tolist() == [True, True, False, False]
+
+    def test_with_flip(self):
+        vals_p = np.array([1, -1, 2, -3])
+        vals_q = np.array([-1, 1, 3, -2])
+        flip = np.array([-1, 1, 1, 1])
+        mask = sign_changes(vals_p, vals_q, flip)
+        assert mask.tolist() == [False, True, False, False]
+
+    def test_empty(self):
+        mask = sign_changes(np.array([]), np.array([]))
+        assert mask.shape == (0,)
+        assert mask.dtype == bool

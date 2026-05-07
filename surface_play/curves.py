@@ -1,6 +1,19 @@
-"""curves.py — P4: make_lines"""
+"""curves.py — P4: make_lines, P6: sign_changes"""
 
 import numpy as np
+
+
+def sign_changes(vals_p: np.ndarray, vals_q: np.ndarray,
+                 flip: np.ndarray | None = None) -> np.ndarray:
+    """
+    Returns boolean mask shape (N,): True where vals_p[i] * vals_q[i] * flip[i] < 0.
+    flip defaults to all +1. flip ∈ {-1, +1} per segment (Möbius mesh edges have -1).
+    """
+    vals_p = np.asarray(vals_p)
+    vals_q = np.asarray(vals_q)
+    if flip is None:
+        return (vals_p * vals_q) < 0
+    return (vals_p * vals_q * np.asarray(flip)) < 0
 
 
 def make_lines(segments: np.ndarray) -> list[np.ndarray]:
