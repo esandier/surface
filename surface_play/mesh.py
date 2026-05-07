@@ -46,6 +46,53 @@ def _generate_rect_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np
     return uv, tris
 
 
+def _jitter(
+    uv: np.ndarray,
+    tris: np.ndarray,
+    domain: Domain,
+    *,
+    seed: int | None = None,
+) -> np.ndarray:
+    """
+    Returns a jittered copy of uv. Independent jitter per vertex by ±0.1% of typical
+    edge length. Reprojects true boundary vertices onto the domain boundary. Run BEFORE
+    `_apply_identifications` (C4): paired vertices receive independent jitter — the
+    discarded one is dropped at identification, so coherence is unnecessary.
+    RNG seeded by `seed` (default = id(uv) for repro).
+    """
+    if seed is None:
+        seed = id(uv)
+
+    e0 = np.linalg.norm(uv[tris[:, 1]] - uv[tris[:, 0]], axis=1)
+    e1 = np.linalg.norm(uv[tris[:, 2]] - uv[tris[:, 1]], axis=1)
+    e2 = np.linalg.norm(uv[tris[:, 0]] - uv[tris[:, 2]], axis=1)
+    L = float(np.median(np.concatenate([e0, e1, e2])))
+
+    rng = np.random.default_rng(seed)
+    delta = rng.uniform(-1.0, 1.0, uv.shape) * 0.001 * L
+    uv_new = uv + delta
+
+    tol = 1e-12
+    if domain.type == "rect":
+        u_min, u_max, v_min, v_max = domain.bounds
+        if domain.u_identify == "no":
+            uv_new[np.abs(uv[:, 0] - u_min) < tol, 0] = u_min
+            uv_new[np.abs(uv[:, 0] - u_max) < tol, 0] = u_max
+        if domain.v_identify == "no":
+            uv_new[np.abs(uv[:, 1] - v_min) < tol, 1] = v_min
+            uv_new[np.abs(uv[:, 1] - v_max) < tol, 1] = v_max
+    elif domain.type in ("disk", "annulus"):
+        r_min, r_max = domain.bounds[0], domain.bounds[1]
+        r = np.sqrt(uv[:, 0] ** 2 + uv[:, 1] ** 2)
+        ring_radii = [r_max] + ([r_min] if r_min > 0 else [])
+        for target_r in ring_radii:
+            mask = np.abs(r - target_r) < tol
+            r_new = np.sqrt(uv_new[mask, 0] ** 2 + uv_new[mask, 1] ** 2)
+            uv_new[mask] = uv_new[mask] / r_new[:, None] * target_r
+
+    return uv_new
+
+
 def _generate_disk_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np.ndarray]:
     """
     Disk (r_min == 0) or annulus (r_min > 0). Returns (uv, tris) in cartesian (u, v).
