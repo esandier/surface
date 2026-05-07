@@ -6,6 +6,15 @@ import triangle
 from surface_play.domain import Domain
 
 
+def _boundary_edge_count(tris: np.ndarray) -> int:
+    """Count edges that appear in exactly one triangle (boundary edges)."""
+    all_edges = np.sort(
+        np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), axis=1
+    )
+    _, counts = np.unique(all_edges, axis=0, return_counts=True)
+    return int((counts == 1).sum())
+
+
 def _generate_rect_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np.ndarray]:
     """
     Returns:
@@ -91,6 +100,88 @@ def _jitter(
             uv_new[mask] = uv_new[mask] / r_new[:, None] * target_r
 
     return uv_new
+
+
+def _apply_identifications(
+    uv_jittered: np.ndarray,
+    tris: np.ndarray,
+    domain: Domain,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    For rect with cy/mo on either axis: for each pair of identified boundary vertices,
+    pick one as canonical (the u_min/v_min-side vertex) and replace occurrences of the
+    other in tris. The disposed vertex's row in uv is left in place (unused) — caller
+    may compact later. Returns (uv_unchanged, tris_with_merged_indices).
+    Vertex pairing matches by the geometric criterion at PRE-jitter positions: cy uses
+    same v (or u) coord; mo uses mirrored. (Pairing is determined from C1's deterministic
+    boundary placement, not from current jittered uvs.)
+    """
+    if domain.type != "rect" or (domain.u_identify == "no" and domain.v_identify == "no"):
+        return uv_jittered, tris.copy()
+
+    # Infer n = resolution from boundary edge count (= 4*n for a rect PSLG with -Y).
+    n = _boundary_edge_count(tris) // 4
+    N = len(uv_jittered)
+
+    # C1 boundary layout (indices):
+    #   bottom: 0..n-1  at (u_min + k*du, v_min)
+    #   right:  n..2n-1 at (u_max, v_min + k*dv)
+    #   top:   2n..3n-1 at (u_max - k*du, v_max)
+    #   left:  3n..4n-1 at (u_min, v_max - k*dv)
+    pairs: list[tuple[int, int]] = []
+
+    if domain.u_identify == "cy":
+        # (u_min, v) pairs with (u_max, same-v): (0,n) and (3n+i, 2n-i)
+        pairs.append((0, n))
+        for i in range(n):
+            pairs.append((3 * n + i, 2 * n - i))
+    elif domain.u_identify == "mo":
+        # (u_min, v) pairs with (u_max, mirrored-v): (0,2n) and (3n+i, n+i)
+        pairs.append((0, 2 * n))
+        for i in range(n):
+            pairs.append((3 * n + i, n + i))
+
+    if domain.v_identify == "cy":
+        # (u, v_min) pairs with (same-u, v_max): (n,2n) and (i, 3n-i)
+        pairs.append((n, 2 * n))
+        for i in range(n):
+            pairs.append((i, 3 * n - i))
+    elif domain.v_identify == "mo":
+        # (u, v_min) pairs with (mirrored-u, v_max): (n,3n) and (i, 2n+i)
+        pairs.append((n, 3 * n))
+        for i in range(n):
+            pairs.append((i, 2 * n + i))
+
+    # Union-find with path halving; smaller index wins as canonical.
+    # Sequential assignment would create cycles for mo-mo (e.g. n->3n->n),
+    # so union-find is required to resolve all equivalence classes correctly.
+    parent = np.arange(N, dtype=np.int32)
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in pairs:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            if ra > rb:
+                ra, rb = rb, ra
+            parent[rb] = ra
+
+    remap = np.array([find(i) for i in range(N)], dtype=np.int32)
+    new_tris = remap[tris].astype(np.int32)
+
+    # Remove degenerate faces (two vertices collapsed to the same canonical) and
+    # duplicate faces (two pre-id triangles that map to the same triple of vertices,
+    # which happens at corners under mo-mo identification).
+    valid = np.array([len(set(t)) == 3 for t in new_tris])
+    new_tris = new_tris[valid]
+    _, first_occurrence = np.unique(np.sort(new_tris, axis=1), axis=0, return_index=True)
+    new_tris = new_tris[np.sort(first_occurrence)]
+
+    return uv_jittered, new_tris
 
 
 def _generate_disk_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np.ndarray]:

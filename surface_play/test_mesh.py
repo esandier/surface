@@ -5,7 +5,12 @@ import pytest
 from scipy.spatial.distance import pdist
 
 from surface_play.domain import Domain
-from surface_play.mesh import _generate_disk_mesh, _generate_rect_mesh, _jitter
+from surface_play.mesh import (
+    _apply_identifications,
+    _generate_disk_mesh,
+    _generate_rect_mesh,
+    _jitter,
+)
 
 
 def test_generate_rect_mesh():
@@ -200,3 +205,63 @@ def test_jitter():
     r_a_post = np.sqrt(uv_a_j[:, 0] ** 2 + uv_a_j[:, 1] ** 2)
     assert np.all(np.abs(r_a_post[np.abs(r_a_pre - 1.0) < tol] - 1.0) < 1e-12)
     assert np.all(np.abs(r_a_post[np.abs(r_a_pre - 0.3) < tol] - 0.3) < 1e-12)
+
+
+def _euler_post_id(uv: np.ndarray, tris: np.ndarray) -> int:
+    """Euler characteristic counting only active (non-disposed) vertices."""
+    V = len(np.unique(tris))
+    all_edges = np.sort(
+        np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), axis=1
+    )
+    E = len(np.unique(all_edges, axis=0))
+    return V - E + len(tris)
+
+
+def test_apply_identifications():
+    res = 10
+
+    def mesh_rect(u_id, v_id):
+        d = Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0),
+                   u_identify=u_id, v_identify=v_id)
+        uv, tris = _generate_rect_mesh(d, resolution=res)
+        return d, uv, tris
+
+    # 1. cy-no: Euler chi = 0 (cylinder)
+    d, uv, tris = mesh_rect("cy", "no")
+    _, tris_id = _apply_identifications(uv, tris, d)
+    assert _euler_post_id(uv, tris_id) == 0, f"cy-no: chi={_euler_post_id(uv, tris_id)}, expected 0"
+
+    # 2. cy-cy: Euler chi = 0 (torus)
+    d, uv, tris = mesh_rect("cy", "cy")
+    _, tris_id = _apply_identifications(uv, tris, d)
+    assert _euler_post_id(uv, tris_id) == 0, f"cy-cy: chi={_euler_post_id(uv, tris_id)}, expected 0"
+
+    # 3. mo-no: Euler chi = 0 (Möbius band)
+    d, uv, tris = mesh_rect("mo", "no")
+    _, tris_id = _apply_identifications(uv, tris, d)
+    assert _euler_post_id(uv, tris_id) == 0, f"mo-no: chi={_euler_post_id(uv, tris_id)}, expected 0"
+
+    # 4. mo-mo: Euler chi = 1 (RP², both axes reversed — corner triangles deduplicated)
+    d, uv, tris = mesh_rect("mo", "mo")
+    _, tris_id = _apply_identifications(uv, tris, d)
+    assert _euler_post_id(uv, tris_id) == 1, f"mo-mo: chi={_euler_post_id(uv, tris_id)}, expected 1"
+
+    # 5. no-no: tris unchanged, chi = 1
+    d, uv, tris = mesh_rect("no", "no")
+    _, tris_id = _apply_identifications(uv, tris, d)
+    assert np.array_equal(tris, tris_id), "no-no: tris should be unchanged"
+    assert _euler_post_id(uv, tris_id) == 1, "no-no: expected chi=1"
+
+    # 6. disk: tris unchanged (no identifications applicable)
+    d_disk = Domain(type="disk", bounds=(0.0, 1.0, 0.0, 2 * math.pi))
+    uv_d, tris_d = _generate_disk_mesh(d_disk, resolution=20)
+    _, tris_di = _apply_identifications(uv_d, tris_d, d_disk)
+    assert np.array_equal(tris_d, tris_di), "disk: tris should be unchanged"
+
+    # 7. Pairing correctness under jitter: index-based pairing must ignore uv perturbation
+    d, uv, tris = mesh_rect("cy", "no")
+    uv_j = _jitter(uv, tris, d, seed=42)
+    _, tris_from_clean = _apply_identifications(uv, tris, d)
+    _, tris_from_jitter = _apply_identifications(uv_j, tris, d)
+    assert np.array_equal(tris_from_clean, tris_from_jitter), \
+        "Pairing must be index-based, not coordinate-based"
