@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import triangle
 
@@ -37,6 +39,52 @@ def _generate_rect_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np
     area = rect_area / resolution ** 2
 
     pslg = {"vertices": bverts, "segments": bsegs}
+    result = triangle.triangulate(pslg, opts=f"pYq30a{area:.17g}")
+
+    uv = np.asarray(result["vertices"], dtype=np.float64)
+    tris = np.asarray(result["triangles"], dtype=np.int32)
+    return uv, tris
+
+
+def _generate_disk_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Disk (r_min == 0) or annulus (r_min > 0). Returns (uv, tris) in cartesian (u, v).
+    """
+    r_min, r_max = domain.bounds[0], domain.bounds[1]
+    bbox_diag = domain.bbox_diag()  # = 2 * r_max
+
+    n_outer = max(3, round(2 * math.pi * r_max * resolution / bbox_diag))
+    theta_outer = np.linspace(0, 2 * math.pi, n_outer, endpoint=False)
+    outer_verts = np.column_stack(
+        [r_max * np.cos(theta_outer), r_max * np.sin(theta_outer)]
+    )
+    idx_o = np.arange(n_outer, dtype=np.int32)
+    outer_segs = np.column_stack([idx_o, np.roll(idx_o, -1)])
+
+    if r_min > 0:
+        n_inner = max(3, round(2 * math.pi * r_min * resolution / bbox_diag))
+        theta_inner = np.linspace(0, 2 * math.pi, n_inner, endpoint=False)
+        inner_verts = np.column_stack(
+            [r_min * np.cos(theta_inner), r_min * np.sin(theta_inner)]
+        )
+        idx_i = n_outer + np.arange(n_inner, dtype=np.int32)
+        inner_segs = np.column_stack([idx_i, np.roll(idx_i, -1)])
+
+        all_verts = np.vstack([outer_verts, inner_verts])
+        all_segs = np.vstack([outer_segs, inner_segs])
+        domain_area = math.pi * (r_max ** 2 - r_min ** 2)
+        pslg = {
+            "vertices": all_verts,
+            "segments": all_segs,
+            "holes": np.array([[0.0, 0.0]]),
+        }
+    else:
+        all_verts = outer_verts
+        all_segs = outer_segs
+        domain_area = math.pi * r_max ** 2
+        pslg = {"vertices": all_verts, "segments": all_segs}
+
+    area = domain_area / resolution ** 2
     result = triangle.triangulate(pslg, opts=f"pYq30a{area:.17g}")
 
     uv = np.asarray(result["vertices"], dtype=np.float64)
