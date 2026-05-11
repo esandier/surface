@@ -81,7 +81,7 @@ These come from prior-attempt notes. Each is referenced by its ID in the steps t
 | **G1** | Perturbation phase | Spec §"Perturbation" formula multiplies by `sin((u−u_min)·freq_u·π/d_u)·sin(...)` which vanishes at `u∈{u_min, u_max}` for `freq_u=2`. On cyl identification this puts seam vertices on the SIS axis. **Fix:** add fixed phases inside the sin: `sin((u−u_min)·freq_u·π/d_u + φ_u)`. `φ_u = 0` if `u_identify=='mo'` (mo seams need pert=0 for orientation reversal); else `φ_u = 0.543367` (arbitrary, breaks accidental zero coincidences). Same for v. |
 | **G2** | Sibling-pair consumption | Spec §Appendix is mandatory. After Möller-Trumbore classifies an `(E1, F2)` hit as either a face or near-edge intersection, the sibling pairs `(E1, F2')`, `(E2, F1)`, `(E2, F1')` must be marked consumed so they're not re-emitted as duplicate DPs. Process highest-min_bary first. Without this, SICs fragment into many tiny chains. |
 | **G3** | Close-aware sweeps | Every 2D-domain sweep (intersections.py:sweep_segments and all callers) must use `domain.close(p, q)` to lift the second endpoint into the same fundamental domain as the first. Otherwise identified-rectangle seam segments produce false intersections (large `q-p` vectors point across the domain). Spec §"2D line sweep" is explicit. |
-| **G4** | Mesh generation and perturbation | (a) `triangle` is invoked with `-Y` (no boundary refinement), so enough initial boundary points must be given to it before mesh generation. (b) **Order:** raw mesh → **jitter** (independent on every vertex; paired vertices need NOT have coherent jitter — one will be discarded at identification anyway) → **apply identifications** (vertex-index relabeling in tris; merge edge/face dicts) → **build edges/faces** (close-aware uniformly: `pq = close(uv[i], uv[j]) − uv[i]`, etc., handles seam-crossing edges that arise after merging u_max-side relabels into u_min frame). Jitter `±0.1%` of typical edge length applied to all vertices. **True boundary vertices** (rect outer sides in the no-identification case; disk `r=r_min`/`r=r_max` ring) reprojected onto the boundary after jitter (clamp coord for rect; renormalize radius for disk). |
+| **G4** | Mesh generation and perturbation | (a) `triangle` is invoked with `-Y` (no boundary refinement), so enough initial boundary points must be given to it before mesh generation. (b) **Order:** raw mesh → **jitter** (independent per vertex; paired vertices need not be coherent — each retains its own jittered uv) → **compute vertex equivalence classes** (C4: union-find on side-identification pairs; `tris` is **not** rewritten — pre-id labels are preserved) → **build edges/faces** (C5: per-face `p, pq, pr` are direct subtractions of pre-id uvs — no `close()` needed since a triangle never spans the seam; edges merge across identified sides by the geometric rule of G13). Jitter `±0.1%` of typical edge length applied to all vertices. **True boundary vertices** (rect outer sides in the no-identification case; disk `r=r_min`/`r=r_max` ring) reprojected onto the boundary after jitter (clamp coord for rect; renormalize radius for disk). |
 | **G5** | SplitPoint identity | A SP shared between two curves must be **the same Python object** in both, so visibility propagation can traverse via `id(sp)` lookup. Don't `dataclass(frozen=True, eq=True)` and rely on equality — store `dict[int(id(sp)), ...]`. |
 | **G6** | HC dedup at same target sample | Two helper curves can argmin to the same sample of the same target curve, although no example comes to mind. The split must be applied once and the SP shared by both HCs. |
 | **G7** | LP infeasibility = bug or numerical problem in computing visibility changes | `lp_refine_visibility` may report infeasible. **Do not relax the LP** to recover. Instead, surface the failure: it indicates δv values from `split_all` violate the global constraint, which is a bug or numerical problem in computing visibility changes. Raise `LPInfeasibleError`. |
@@ -90,7 +90,7 @@ These come from prior-attempt notes. Each is referenced by its ID in the steps t
 | **G10** | δv ∈ {−1, 0, +1} | All split visibility-change formulas yield ±1 or 0 per side. Magnitudes ±2 only appear at projection breaks (CC occluder). Anything else means a sign convention got dropped. |
 | **G11** | cse() before lambdify | Apply `sympy.cse()` to the joint expressions for `[S, Su, Sv, Suu, Suv, Svv, SN]` so they share subexpressions in a single lambdified callable. ~10× speedup on the construction phase. Spec §"Implementation note" line 147. |
 | **G12** | Pure vectorized eval | Lambdified callables are wrapped as `def _eval_vec(fn, u, v): return np.array(fn(u, v))` so a single call evaluates over arrays. No Python `for` over points. Spec lines 147-150. |
-| **G13** | Edge/face directional fields are close-aware | `pq = close(uv[i], uv[j]) − uv[i]` for edges, `pq, pr` analogously for faces, `dir` derived from `pq` and a third-vertex offset (close-aware). Without `close()`, edges that became seam-crossing after the identification merge (one endpoint relabeled from u_max-side to u_min-side, but its surviving partner was on the same uv-side as the other endpoint, etc.) yield a large wrong vector pointing across the domain. The spec's "computed before identification" prescription (lines 105-109) is satisfied **semantically** — close-aware post-id arithmetic gives the same numerical result without needing pre-id arrays. Independent jitter on paired vertices is fine because we discard one of each pair at identification (no coherence required). |
+| **G13** | Edge/face identity is geometric, not by vertex labels | Two pre-id edges merge into one post-id edge **iff** both endpoints lie on a single identified side of the rectangle (e.g., both on u-min) **and** their endpoints pair under that side's C1 identification rule (so their partners lie together on the opposite identified side). All other edges keep their own identity. **Triangles never merge** — each pre-id triangle is its own 2-cell. The label-based rule "two cells with the same canonical vertex set are the same cell" is **wrong**: under mo-mo at corners, two geometrically distinct pre-id triangles in opposite corners can have all three vertices pairwise identified, producing identical canonical triples for different cells. Treating them as duplicates removes a valid 2-cell and tears the manifold (verified: rect mo-mo at res=5 with the old dedup produced 1 edge with 3 faces and 2 edges with 1 face). Because each post-id edge and each face stays inside a single fundamental-domain copy, per-element geometric fields (`p, pq, pr, dir`) are direct subtractions of the pre-id uvs — **no `close()` is needed for them**. `close()` is still required for cross-element navigation (curve traversal across the seam, DP uv interpolation per G15). The spec §"Data stored" "computed before identification" prescription is now satisfied **literally**, by keeping pre-id vertex indices in `tris` and reading `uv` straight from those. |
 | **G14** | BVH broad phase for DP search | Möller-Trumbore over all (edge, face) pairs is `O(E·F)` — intractable at `res ≥ 100`. **AABB-broadcast pre-filter is also rejected** (it's `O(E·F)` memory). Required: a stack-based BVH over edge AABBs vs face AABBs, partitioning on cycling axes (`depth % 3`), brute-force at leaves. Numba-JIT compiled (cf. legacy [old stuff/intersections_prev.py](old%20stuff/intersections_prev.py) `_numba_bvh_final_boss`). Output deduped via combined-key sort. Spec line 207. |
 | **G15** | DP uv interpolation uses `close()` | When recovering domain coordinates of a DP from edge/face barycentrics, the implied vertex uv coords must be lifted by `domain.close(p, q)` before interpolation, otherwise identification seams produce wildly wrong DP uvs. Spec line 209. |
 | **G16** | BCs from no-id rect are ONE closed loop | `make_lines(boundary_edges)` on an unidentified rectangle yields a single closed BC traversing all four sides — corners do **not** split it. The four open arcs from corner-to-corner emerge later in Layer O via SPTs of type `cn`. Don't try to "fix" it inside `build_bcs`. Spec lines 47-48 + our P4 decision. |
@@ -480,98 +480,131 @@ def _jitter(uv: np.ndarray, tris: np.ndarray, domain: Domain, *,
 
 ---
 
-### C4 — `mesh.py`: `_apply_identifications`
+### C4 — `mesh.py`: `_apply_identifications` (vertex equivalence only)
 
-**Spec:** §"Mesh" lines 164-166, §"User specification" lines 95-99.
+**Spec:** §"Mesh" lines 162-176, §"Data stored — Identification of edges and faces" lines 111-119, §"User specification" lines 95-99.
 **Files:** extend [surface_play/mesh.py](surface_play/mesh.py); add tests.
 **API:**
 ```python
 def _apply_identifications(uv_jittered: np.ndarray, tris: np.ndarray, domain: Domain
-                           ) -> tuple[np.ndarray, np.ndarray]:
+                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    For rect with cy/mo on either axis: for each pair of identified boundary vertices,
-    pick one as canonical (the u_min/v_min-side vertex) and replace occurrences of the
-    other in tris. The disposed vertex's row in uv is left in place (unused) — caller
-    may compact later. Returns (uv_unchanged, tris_with_merged_indices).
-    Vertex pairing matches by the geometric criterion at PRE-jitter positions: cy uses
-    same v (or u) coord; mo uses mirrored. (Pairing is determined from C1's deterministic
-    boundary placement, not from current jittered uvs.)
+    For rect with cy/mo on either axis: compute the vertex equivalence classes induced
+    by the side-identification rules. Does NOT rewrite indices in `tris` — pre-id labels
+    are preserved (G13). Edge/face identification is the responsibility of C5 and is
+    determined geometrically, not by canonical labels.
+
+    Returns (uv_unchanged, tris_filtered, vertex_class), where:
+      - uv_unchanged: input uv (pass-through).
+      - tris_filtered: input tris with any triangle removed whose three vertices map to
+        fewer than three distinct equivalence classes (such a triangle is geometrically
+        degenerate post-id — two corners coincide). For non-mo identifications this is
+        almost always a no-op; included for safety on pathological corner configurations.
+        Pre-id labels are preserved on the surviving rows.
+      - vertex_class: (N,) int32. `vertex_class[i]` is the canonical (smallest pre-id
+        index) representative of `i`'s equivalence class. For vertices not on any
+        identified side, `vertex_class[i] == i`.
+
+    Vertex pairing follows C1's deterministic boundary indexing (NOT current jittered uvs):
+    cy uses same coordinate on the partner side; mo uses mirrored.
     """
 ```
-**Algorithm:** For `u_identify ∈ {cy, mo}`: identify each `u_min`-side boundary vertex `v_a` with the corresponding `u_max`-side vertex `v_b`. For `cy`, "corresponding" means same `v` coordinate **at C1 placement time** (pre-jitter). For `mo`, mirrored: same `(v_max + v_min) − v` at C1 placement. Replace `v_b` with `v_a` everywhere in `tris`. Same for v-axis. **Important:** vertex pairing is determined by C1's deterministic boundary indexing (e.g., `i_a = u_min_side[k]`, `i_b = u_max_side[k]` for cy with same k). Do NOT match by post-jitter coordinates.
+**Algorithm:**
+1. If not a rect or no identifications: return `(uv, tris, np.arange(N))`.
+2. Build pair list from C1 boundary indexing (same logic as before):
+   - u-cy: `(0, n)` and `(3n+i, 2n−i)` for i in 0..n−1
+   - u-mo: `(0, 2n)` and `(3n+i, n+i)` for i in 0..n−1
+   - v-cy: `(n, 2n)` and `(i, 3n−i)` for i in 0..n−1
+   - v-mo: `(n, 3n)` and `(i, 2n+i)` for i in 0..n−1
+3. Union-find with path halving; smaller index wins as canonical. Compute `vertex_class[i] = find(i)`.
+4. Filter degenerate triangles: keep row `t` iff `len(set(vertex_class[t])) == 3`.
+5. **Do NOT relabel `tris`**, do NOT dedup by sorted-tuple. Edge/face identity is geometric (G13).
 
-**Edge and face merging — implicit, deferred to C5:** the spec (line 165) says "one of the two identified edges is deleted and replaced by the other in faces that contain it as an edge." We satisfy this in C5 rather than here: by building the edge dict from post-id `tris` keyed on `(min(p_idx, q_idx), max(...))`, the two formerly-distinct boundary edges (e.g., `(5, 6)` on u_min side and `(25, 26)` on u_max side, both relabeled to `(5, 6)` after this step) collide on the same dict key and naturally merge into one interior edge with two adjacent faces. **Faces retain their identity** — only vertex indices in `tris` change.
+**Why no dedup and no relabel (regression of the old C4 mo-mo bug):** Under mo-mo at corners, opposite-corner pre-id triangles can have all three vertices pairwise identified, yielding identical canonical triples for distinct cells. The old `np.unique(sorted(new_tris))` step silently deleted one such triangle, leaving a non-manifold complex (rect mo-mo res=5: 2 boundary edges, 1 edge with 3 faces). The fix is to abandon label-based identity for edges and faces entirely; C5 builds them by the geometric rule.
+
 **Test criterion:**
-1. Rect cy-no with `resolution=10`: post-merge Euler χ = 0 (cylinder).
-2. Rect cy-cy: Euler χ = 0 (torus).
-3. Rect mo-no: Euler χ = 0 (Möbius band).
-4. Rect mo-mo: Euler χ = 0 (Klein bottle).
-5. Rect no-no: tris unchanged (Euler χ = 1).
-6. Disk: unchanged (no identifications applicable).
-7. Pairing correctness under jitter: even when jitter perturbs uvs, the pairing map is identical to the un-jittered case (regression for index-based pairing).
-**Gotchas:** none new — but rely on C1's deterministic boundary indexing for pairing (G4 order: jitter happens AFTER mesh placement, before identification).
+1. Rect no-no: `tris_filtered == tris`; `vertex_class == arange(N)`.
+2. Rect cy-no `resolution=10`: pairs (0, n), (3n+i, 2n−i) merge into the same class; all other vertices stay singleton. Each class has size 1 (interior) or 2 (a u-side pair).
+3. Rect mo-mo `resolution=5`: corner classes are exactly `{0, 2n} = {0, 10}` and `{n, 3n} = {5, 15}`; the four corners collapse to 2 classes (not 1 — verifying mo-mo is RP² with 2 corner classes). No degenerate triangles removed at this resolution (regression for the bug: pre-id triangle (5, 6, 4) maps to canonical classes {5, 6, 4} which are 3 distinct classes; pre-id triangle (14, 15, 16) also maps to {4, 5, 6} — same canonical labels, but **both must remain** in `tris_filtered`).
+4. Rect cy-cy `resolution=10`: each class has size at most 4 (interior corners merge 4 boundary vertices); `tris_filtered == tris` (no degeneracies).
+5. Disk: `vertex_class == arange(N)`, `tris_filtered == tris`.
+6. Pairing under jitter: jitter perturbs uvs but does NOT change `vertex_class` — pairing is by C1's deterministic indexing.
+7. Determinism: `vertex_class` is reproducible across runs for the same `(domain, resolution)`.
+
+**Gotchas:** G4 order (jitter before C4); G13 (vertex equivalence only — do not touch `tris` indices).
 **Stop & verify:** `pytest surface_play/test_mesh.py::test_apply_identifications` ⇒ green.
 
 ---
 
 ### C5 — `mesh.py`: `_build_edges_faces`
 
-**Spec:** §"Data stored" (lines 105-109), §"Mesh" lines 167-171.
+**Spec:** §"Data stored" (lines 103-119), §"Mesh" lines 162-176.
 **Files:** extend [surface_play/mesh.py](surface_play/mesh.py); add tests.
 **API:**
 ```python
 edge_dtype = np.dtype([
-    ("p_idx", "i4"), ("q_idx", "i4"),  # post-identification vertex indices
-    ("p",  "2f8"),                     # uv coord of first endpoint (canonical post-id), per spec line 105
-    ("pq", "2f8"),                     # close-aware (uv of second) − (uv of first); G13
-    ("f", "i4"), ("g", "i4"),          # adjacent face indices; g = -1 if boundary
+    ("p_idx", "i4"), ("q_idx", "i4"),  # pre-id vertex indices of the canonical edge (G13)
+    ("p",  "2f8"),                     # uv[p_idx] — pre-id, direct, no close()
+    ("pq", "2f8"),                     # uv[q_idx] − uv[p_idx] — pre-id subtraction, no close()
+    ("f", "i4"), ("g", "i4"),          # adjacent face indices into the faces array; g = -1 if boundary
     ("dir", "2f8"),                    # inward normal in uv (boundary edges only); zeros otherwise
-    ("flip", "i1"),                    # +1 or -1: sign of dot(SN_p, SN_q) — captures mo orientation reversal
-    ("split1", "i4"), ("split2", "i4"), # SPT indices — spec line 245; -1 = no split. Populated in Layer O.
+    ("flip", "i1"),                    # +1 or -1: orientation across the edge (mo-aware)
+    ("split1", "i4"), ("split2", "i4"), # SPT indices (G17); -1 = no split. Populated in Layer O.
 ])
 
 face_dtype = np.dtype([
-    ("verts", "3i4"),                  # post-identification vertex indices
-    ("edges", "3i4"),                  # edge indices into the edge array
-    ("p",  "2f8"),                     # uv of first vertex (canonical post-id), per spec line 109
-    ("pq", "2f8"),                     # close-aware (uv of second) − (uv of first); G13
-    ("pr", "2f8"),                     # close-aware (uv of third) − (uv of first); G13
+    ("verts", "3i4"),                  # pre-id vertex indices of this triangle (in tris winding order)
+    ("edges", "3i4"),                  # edge indices into the edges array
+    ("p",  "2f8"),                     # uv[verts[0]] — pre-id
+    ("pq", "2f8"),                     # uv[verts[1]] − uv[verts[0]] — pre-id, no close()
+    ("pr", "2f8"),                     # uv[verts[2]] − uv[verts[0]] — pre-id, no close()
 ])
 
 def _build_edges_faces(uv: np.ndarray, tris: np.ndarray,
+                       vertex_class: np.ndarray,
                        SN_per_vertex: np.ndarray, domain: Domain
                        ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Returns (edges, faces) structured arrays.
-    `uv` is the canonical post-id (jittered) uv array. `tris` is post-id (after C4).
-    `domain.close()` is used uniformly for `pq, pr` so seam-crossing edges (those whose
-    post-id endpoints span the period) yield small vectors (G13).
+    Returns (edges, faces). `tris` carries PRE-id vertex labels (from C4). Edges merge
+    across identified sides by the geometric rule of G13. Faces are never merged.
+    `vertex_class` is consulted to identify which pre-id edges are paired (both endpoints
+    on identified sides, with C1 pairings matching). `SN_per_vertex[i]` is the surface
+    normal at pre-id vertex `i`.
     """
 ```
 **Algorithm:**
-1. Build edge dict: `(min(v_p, v_q), max(v_p, v_q)) → list of (face_idx, p, q)`. Interior edges have 2 entries; boundary edges have 1. Vertex indices are post-id (from C4); **this is where identified edges get merged** — two formerly-distinct boundary edges from opposite sides of an identified rect axis (e.g., u_min-side `(5, 6)` and u_max-side `(25, 26)`, both relabeled to `(5, 6)` by C4) collide on the same dict key and become one interior edge with two adjacent faces. No explicit edge-relabeling step is needed.
-2. **Edge geometric fields (G13 — close-aware, uniform):** for each edge with post-id endpoints `(i, j)`,
-   - `p  = uv[i]`
-   - `pq = domain.close(uv[i], uv[j]) − uv[i]`     ← `close()` is a no-op when not seam-crossing
-   - `p_idx = i`, `q_idx = j`
-3. **Boundary edge `dir`:** for each edge with `g = -1`, let `k` be the index of the third vertex of face `f` (the one not in the edge). Compute inward normal in uv: orthogonal to `e.pq`, oriented so `dot(dir, domain.close(uv[i], uv[k]) − uv[i]) > 0`. Boundary edges by definition lie on a true boundary side, so `close()` is essentially a no-op here, but we keep the call for symmetry. Interior edges get `dir = (0, 0)`.
-4. **Edge `flip`:** `flip = +1 if dot(SN[i], SN[j]) > 0 else -1`. Captures mo orientation reversal at the seam (where the canonical post-id vertex `i` and its post-id neighbor `j` carry SNs from opposite-orientation parametrizations).
-5. **Face geometric fields (G13 — close-aware, uniform):** for each face with post-id vertices `(i, j, k)` in winding order,
-   - `p  = uv[i]`
-   - `pq = domain.close(uv[i], uv[j]) − uv[i]`
-   - `pr = domain.close(uv[i], uv[k]) − uv[i]`
-   - `verts = (i, j, k)`
-   - `edges = (idx of edge {i,j}, idx of edge {j,k}, idx of edge {k,i})` via the dict from step 1.
-6. **Split slot initialization (G17):** `split1 = split2 = -1` for every edge. Layer O populates these in O4 (splitting).
+
+Notation: a pre-id boundary vertex's *side* is one of `{u_min, u_max, v_min, v_max, interior}`, determined from its C1 index range (using `_boundary_edge_count(tris)` to recover `n`). A pre-id edge's *side* is `S` if **both** endpoints have side `S`; otherwise the edge is `interior` (this includes edges with one endpoint on the boundary and one in the interior).
+
+1. **Classify each pre-id vertex** by side from its C1 boundary index. Interior vertices (index ≥ `4n`) get side `interior`.
+2. **Iterate over every (face, local-edge) pair**, producing a record `(a, b, third, face_idx)` where `(a, b)` is the unordered pre-id edge and `third` is the third vertex of the face. Determine the edge's side from step 1.
+3. **Compute each edge's canonical key:**
+   - If the edge's side `S` is `interior`, OR `S` is on an unidentified axis (e.g., u-min/u-max with `u_identify == "no"`): key = `tuple(sorted([a, b]))` — no merging.
+   - Else (`S` is on an identified axis): map both `a` and `b` to their canonical (`vertex_class[a]`, `vertex_class[b]`), then key = `tuple(sorted([vertex_class[a], vertex_class[b]]))`. This collapses the pre-id edge on side `S` with its partner on the paired side. **Sanity check:** assert each endpoint actually pairs to a vertex on the partner side; if a pre-id "side edge" has an endpoint whose canonical lives elsewhere, the pairing is malformed.
+4. **For each canonical key**, collect the list of (face_idx, third, oriented endpoints). Length 1 ⇒ boundary; length 2 ⇒ interior. Length ≥ 3 ⇒ raise — indicates a malformed pairing.
+5. **Pick a canonical pre-id edge per key:** when two pre-id edges merge, the canonical is the one on the lower-index identified side (u-min over u-max; v-min over v-max). The face containing this canonical edge becomes `f`; the other becomes `g`. `(p_idx, q_idx)` are the canonical pre-id endpoints in the canonical face's winding order around the edge.
+6. **Edge geometric fields:** `p = uv[p_idx]`, `pq = uv[q_idx] − uv[p_idx]`. Pre-id subtraction; no `close()`.
+7. **Boundary `dir`:** for an edge with `g = −1`, let `r = uv[third]` from the single adjacent face `f`. Inward normal in uv: orthogonal to `pq`, oriented so `dot(dir, r − p) > 0`. (`r` and `p` are both in `f`'s fundamental-domain copy, so no `close()` needed.) Interior edges: `dir = (0, 0)`.
+8. **`flip`:**
+   - For unmerged edges (interior or unidentified-side): `flip = +1 if dot(SN[p_idx], SN[q_idx]) > 0 else −1`. Will be `+1` everywhere unless the surface SN is itself near-degenerate.
+   - For merged side edges: let `(a, b)` be the canonical pre-id endpoints (on side `S`) and `(a', b')` their partners (on the paired side, with `vertex_class[a'] = vertex_class[a]`, etc.). `flip = +1 if dot(SN[a], SN[a']) > 0 else −1`. Captures mo orientation reversal at the seam (cy: same orientation ⇒ `+1`; mo: reversed ⇒ `−1` on a Möbius-band SN field).
+9. **Faces:** one face per row of `tris`. `verts = tris[f_idx]` (pre-id labels). `p = uv[verts[0]]`, `pq = uv[verts[1]] − uv[verts[0]]`, `pr = uv[verts[2]] − uv[verts[0]]`. `edges` = the 3 canonical edge indices via the dict from step 4.
+10. **Split slots (G17):** `split1 = split2 = -1` for every edge.
+
 **Test criterion:**
-1. Rect no-id at resolution 5: every interior edge has `f, g ≥ 0`; boundary edges have `g == -1`.
-2. Rect cy-no: post-merge identified edges become interior (both `f, g ≥ 0`); seam-crossing edges have `‖pq‖ ≪ period_u` (close()-corrected). **Edge-count regression:** the count of edges with `g == -1` (boundary) at resolution `R` is exactly `2·R` (top + bottom v-sides), not `4·R` — confirms that the u-side boundary edges actually merged (didn't double-count). On rect cy-cy: zero boundary edges. On rect mo-mo: zero boundary edges.
-3. `flip` is `+1` everywhere on rect cy-no with a smooth surface like helicoid.
-4. `flip` contains `-1` entries on rect mo-no with a Möbius band parametrization, at edges crossing the mo seam.
-5. `dir` for boundary edges satisfies `dot(dir, e.pq) ≈ 0` and points inward toward the third vertex (positive dot product against the close-aware offset to it).
-6. **No anomalous `‖pq‖`:** all `‖pq‖` ≈ `L` (median edge length), even for seam-crossing edges (regression for G13: a missing `close()` would yield `‖pq‖ ≈ period`).
-7. **`p` and `pq` round-trip with `close`:** for every edge, `domain.close(e.p, uv[e.q_idx]) ≈ e.p + e.pq` to machine precision. Same: `domain.close(f.p, uv[f.verts[1]]) ≈ f.p + f.pq`, and `domain.close(f.p, uv[f.verts[2]]) ≈ f.p + f.pr`.
-8. **Splits initialized:** all `edges["split1"] == edges["split2"] == -1` (G17 — Layer O populates).
+1. **Edge counts:** boundary count (`g == −1`) at resolution `R` matches the topological expectation per identification:
+   - no-no: `4R`     (cyl: `2R`, torus: 0)
+   - cy-no / mo-no: `2R`
+   - cy-cy / cy-mo / mo-cy / mo-mo: `0`  ← critical regression for the old mo-mo bug
+2. **Face count == len(tris):** every pre-id triangle survives as its own post-id face.
+3. **Euler χ matches topology** for every (u_id, v_id) combination at `resolution=5` and `resolution=10`: no-no → 1; cy-no/mo-no → 0 (cylinder/Möbius band); cy-cy → 0 (torus); cy-mo/mo-cy → 0 (Klein bottle); **mo-mo → 1 (RP²)**.
+4. **Manifoldness regression (mo-mo):** at `resolution ∈ {5, 7, 10}`, every edge in the post-id mesh has exactly 2 incident faces (`f, g ≥ 0`) and zero boundary edges. Histogram of face-counts-per-edge is `{2: E}` only.
+5. **`flip`:** on rect cy-no with a smooth SN (e.g., `SN = (0,0,1)` constant): every edge has `flip = +1`. On rect mo-no with a Möbius-band-like SN that reverses sign across the u-seam (e.g., `SN(u) = (cos(π·(u−u_min)/period_u), 0, sin(...))`): every merged u-side edge has `flip = −1`, every non-side edge has `flip = +1`.
+6. **`dir`:** for every boundary edge, `dot(dir, pq) ≈ 0` (machine precision) and `dot(dir, uv[third] − uv[p_idx]) > 0`.
+7. **`p` and `pq` are pre-id subtractions:** for every edge, `e.p + e.pq == uv[e.q_idx]` exactly (no float drift from `close()`). Same for face `pq`, `pr`.
+8. **Splits initialized:** all `edges["split1"] == edges["split2"] == -1`.
+9. **No `close()` calls in the body of `_build_edges_faces`:** static-source assertion (`"close(" not in inspect.getsource(_build_edges_faces)`) — keeps G13 honest.
+
 **Gotchas:** G13, G17.
 **Stop & verify:** `pytest surface_play/test_mesh.py::test_build_edges_faces` ⇒ green.
 
@@ -579,7 +612,7 @@ def _build_edges_faces(uv: np.ndarray, tris: np.ndarray,
 
 ### C6 — `mesh.py`: `Mesh` dataclass + `build_mesh` orchestrator
 
-**Spec:** consolidates spec §"Mesh" (lines 162-171).
+**Spec:** consolidates spec §"Mesh" (lines 162-176).
 **Files:** extend [surface_play/mesh.py](surface_play/mesh.py); add integration test.
 **API:**
 ```python
@@ -587,14 +620,15 @@ def _build_edges_faces(uv: np.ndarray, tris: np.ndarray,
 class Mesh:
     domain: Domain
     surface: SurfaceParams
-    uv: np.ndarray                 # (N, 2)
-    tris: np.ndarray               # (M, 3)
+    uv: np.ndarray                 # (N, 2) — pre-id, jittered
+    tris: np.ndarray               # (M, 3) — pre-id vertex labels (G13)
+    vertex_class: np.ndarray       # (N,)  — canonical class for each pre-id vertex
     edges: np.ndarray              # structured array, edge_dtype
     faces: np.ndarray              # structured array, face_dtype
-    SN: np.ndarray                 # (N, 3) — per-vertex surface normal
-    xyz: np.ndarray                # (N, 3) — per-vertex 3D position
-    boundary_edge_idx: np.ndarray  # int array of indices into edges where g == -1
-    corner_idx: np.ndarray         # int array of corner vertex indices (rect only, no-id corners)
+    SN: np.ndarray                 # (N, 3) — per-vertex surface normal (at pre-id uv)
+    xyz: np.ndarray                # (N, 3) — per-vertex 3D position (at pre-id uv)
+    boundary_edge_idx: np.ndarray  # indices into edges where g == -1
+    corner_idx: np.ndarray         # indices of corner vertex classes (rect only)
 
 def build_mesh(domain: Domain, surface: SurfaceParams, resolution: int,
                *, jitter: bool = True, seed: int | None = None) -> Mesh:
@@ -602,18 +636,22 @@ def build_mesh(domain: Domain, surface: SurfaceParams, resolution: int,
 ```
 **Algorithm:**
 1. Generate raw mesh via C1 or C2 dispatch on `domain.type` → `(uv_raw, tris_raw)`.
-2. **Jitter (C3)** → `uv` (jittered, pre-identification). Skip if `jitter=False`.
-3. **Apply identifications (C4)** → `tris` (post-id vertex indices). `uv` unchanged from step 2 (canonical post-id is the u_min/v_min-side jittered vertex; the discarded partner's row in `uv` is left unused).
-4. Evaluate per-vertex `xyz = surface.S(uv[:,0], uv[:,1]).T` (shape `(N, 3)`) and `SN` similarly via cse'd lambdified callable (G12).
-5. **Build edges/faces (C5)** using `(uv, tris, SN, domain)` — close-aware geometric fields handle seam-crossing edges (G13).
-6. Identify corner vertices: for rect no-id, the 4 corner vertices are still distinct boundary vertices with degree 2 (one boundary edge per side at the corner).
+2. **Jitter (C3)** → `uv` (jittered, pre-id). Skip if `jitter=False`.
+3. **Apply identifications (C4)** → `(uv_unchanged, tris_filtered, vertex_class)`. `tris` retains pre-id labels (G13).
+4. Evaluate per-vertex `xyz = surface.S(uv[:,0], uv[:,1]).T` and `SN` at the pre-id uvs via the cse'd lambdified callable (G11, G12). Each pre-id vertex (including both members of an identified pair) gets its own evaluation; mo orientation reversal between paired vertices is captured by `edge.flip` in step 5.
+5. **Build edges/faces (C5)** with `(uv, tris, vertex_class, SN, domain)` — geometric merge rule (G13). No `close()` in per-element fields.
+6. Identify corner vertex classes:
+   - rect no-id: 4 distinct corner vertices (classes are singletons).
+   - rect cy-no / mo-no etc.: corners merge into fewer classes per the C4 vertex pairing.
+   - rect mo-mo: exactly 2 corner classes (regression — verifies the topology is RP² with 2 distinct corner points).
 7. Wrap in `Mesh`.
 **Test criterion (integration):**
-1. Helicoid rect-cy on `(0, 1) × (0, 2π)`, `resolution=15`: builds cleanly, mesh has expected topology.
-2. Möbius band rect-mo-no, `resolution=15`: mesh has flip=-1 entries at seam edges; `boundary_edge_idx` covers exactly the v-min and v-max sides.
+1. Helicoid rect-cy on `(0, 1) × (0, 2π)`, `resolution=15`: builds cleanly, edges["flip"] == +1 everywhere on u-seam (cy = orientation preserving).
+2. Möbius band rect-mo-no, `resolution=15`: edges["flip"] == −1 on the merged u-seam edges; `boundary_edge_idx` covers exactly the v-min and v-max sides (count `= 2·15`).
 3. Disk `r_max=1`, `resolution=20`: 1 boundary loop, no seams.
 4. Annulus `r_min=0.3, r_max=1`, `resolution=20`: 2 boundary loops (inner + outer).
-5. Fig-8 immersion `(2 + cos(u))cos(v), (2 + cos(u))sin(v), sin(u·2)` on `(0, 2π) × (0, 2π)` cy-cy: mesh builds cleanly (will be reused as the SIC fixture in C8-C10).
+5. Fig-8 immersion `(2 + cos(u))cos(v), (2 + cos(u))sin(v), sin(u·2)` on `(0, 2π) × (0, 2π)` cy-cy: mesh builds cleanly with χ = 0 (torus topology); to be reused as the SIC fixture in C8-C10.
+6. **mo-mo regression:** rect mo-mo `resolution=10` with any smooth surface: `len(edges)` agrees with χ = 1 (RP²) given `V = N − |paired_classes|/2`-style counting; zero boundary edges; every edge has 2 adjacent faces (manifold).
 **Gotchas:** G4, G13.
 **Stop & verify:** `pytest surface_play/test_mesh.py::test_build_mesh` ⇒ green.
 
@@ -633,7 +671,7 @@ class BoundaryCurve:
 def build_bcs(mesh: Mesh) -> list[BoundaryCurve]:
     ...
 ```
-**Algorithm:** Take `mesh.edges[mesh.boundary_edge_idx]`; assemble a `(K, 2)` array of `(p, q)` vertex indices; pass to `make_lines`. Wrap each chain as `BoundaryCurve` with `is_closed = (chain[0] == chain[-1])` (in segment-graph terms: the chain returns to its starting vertex).
+**Algorithm:** Take `mesh.edges[mesh.boundary_edge_idx]`; assemble a `(K, 2)` array of vertex indices, **mapped through `mesh.vertex_class`** so that mo-identified corners are recognized as the same chain node (e.g., the v-min and v-max boundary segments of a rect-mo-no must connect at the shared corner class). Pass to `make_lines`. Wrap each chain as `BoundaryCurve` with `is_closed = (chain[0] == chain[-1])` (in segment-graph terms: the chain returns to its starting vertex class).
 **Test criterion:**
 1. Rect no-id: 1 BC, **closed** (per G16; the four-arcs-from-corners come later).
 2. Rect cy-no: 2 BCs, both closed (top and bottom rims).
@@ -701,7 +739,7 @@ def find_double_points(mesh: Mesh, surface: SurfaceParams,
 **Algorithm:**
 1. Build per-edge and per-face 3D AABBs from `mesh.xyz`.
 2. **C8 BVH** generates candidate `(edge_idx, face_idx)` pairs.
-3. Skip pairs sharing a vertex (vectorized: any of `ep == fv[0/1/2]` or `eq == fv[0/1/2]`).
+3. Skip pairs sharing a vertex **class** (vectorized: any of `mesh.vertex_class[ep] == mesh.vertex_class[fv[0/1/2]]` or `mesh.vertex_class[eq] == mesh.vertex_class[fv[0/1/2]]`). Under the new C4 contract, pre-id labels are preserved in `tris`, so an edge on the u-min seam and a face on the u-max seam will not share a raw pre-id index — they share a `vertex_class`. Comparing by class avoids the spurious-DP-at-seam false positives.
 4. **Batched Möller-Trumbore** over surviving candidates (legacy `moller_trumbore_batch`): vectorized solve for `(s, u, v)`. Filter by `s ∈ (0, 1)`, `u, v ≥ 0`, `u + v ≤ 1`.
 5. **Per-hit Appendix classification (G2):** sort hits by descending `min_bary`. Process serially with a `consumed` mask and an `ee_keys` set. Three outcomes per legacy:
    - `min_bary ≥ delta` → emit `"EF"` record.
@@ -709,7 +747,7 @@ def find_double_points(mesh: Mesh, surface: SurfaceParams,
    - Otherwise → emit `"EE"` record (deduped by `(min(E1, E2), max(E1, E2))`).
    - Mark `(E1, F2)`, `(E1, F2')`, `(E2, F1)`, `(E2, F1')` siblings consumed.
 6. For each emitted DP, recover `uv1, uv2` (G15):
-   - On the edge side: `uv1 = e.p + s · e.pq` where `e` is the edge and `s` is the MT edge parameter. Because `e.pq` was computed close-aware in C5 (G13), this is already in the correct fundamental domain — no extra `close()` call needed.
+   - On the edge side: `uv1 = e.p + s · e.pq` where `e` is the edge and `s` is the MT edge parameter. Because C5 builds `(p, pq)` from pre-id labels of one face's fundamental-domain copy of the edge (G13), the result already lies in the canonical face's fundamental-domain — no `close()` call needed.
    - On the face side: `uv2 = f.p + u · f.pq + v · f.pr` (or analogous on the EE-paired edge). Same reason.
 7. Populate `A1, A2` from `mesh.edges[E1].f, .g` (with `-1` padding) and analogously for E2/F2.
 **Test criterion:**
@@ -1524,7 +1562,7 @@ def build_outline(init: SurfaceInit, I, J, O, eye, *,
 2. `mesh_to_threejs`:
    - Output shape: `{"vertices": [...], "faces": [[i,j,k], ...], "normals": [...], "uvs": [...]}` matching what the frontend currently consumes from `Surface.for_3js()`.
    - Pulls from `construction.mesh.xyz`, `.tris`, `.SN`, `.uv`.
-   - **Post-id vertex compaction (C4):** `tris` references vertex indices that may have unused rows in `uv/xyz` (disposed-partner rows). Either compact (rebuild a dense vertex array with a relabel pass) or pass through with the unused rows intact. Pick the convention `templates/play.html` currently expects from `Surface.for_3js()`. Document the choice in the docstring.
+   - **Vertex-class compaction (C4):** under the new C4 contract, `tris` carries pre-id labels and every row of `uv/xyz/SN` is live; paired vertices each have their own evaluation. For three.js, decide per `templates/play.html` whether to send all N pre-id vertices (paired vertices appear as duplicated geometry, harmless overdraw) or compact to one representative per `vertex_class` (rebuild a dense array via the `vertex_class` map). Document the choice in the docstring.
 3. `build_outline`:
    - Build `Projection(surface, I, J, O, eye)` (P3). `O` is the world-space view-plane anchor — see W2 for the full semantics. Pass through unmodified.
    - Run Layer O end-to-end on `(init.construction, projection)` with the supplied debug knobs threaded through: `newton_cusp` → O1's `use_newton`; `canvas_resolution` → O14's `resolution` (defaults to `settings.CANVAS_RESOLUTION`); `project_resampled` → O14's `project_resampled`; `propagation` selects O16-only (BFS) vs. O17 LP1/LP4.

@@ -102,11 +102,23 @@ The data specified by the user can be a sympy expression which evaluates to a re
 
 ## Data stored
 
-In addition to the combinatorial data of the mesh, with vertices containing the `(u,v)` coordinates, the edge `(i,j)` must contain an `p`and `pq` field which are equal to `p` and `q-p`, where `q` and `p` are the `(u,v)` coordinates of the points with indices `(i,j)`. These are computed before identification otherwise there can be problems. Edges also contain the indices of the two adjacent faces. Boundary edges are those with only 1 adjacent face, then the second index is `-1`. 
+The mesh keeps **pre-identification** vertex indices throughout. Vertices have `(u,v)` coordinates in the original rectangular (or polar) domain; identifications do not rewrite indices in `tris`. A separate `vertex_class[i]` array gives the canonical equivalence class of each pre-id vertex (used for 3D evaluation and for traversal across the seam); identification of higher-dimensional cells is then derived geometrically (see below), **not** by collapsing labels in `tris`.
 
-Boundary edges contain a vector `dir` which is the vector orthogonal to `pq` oriented so that the inner product of `r-p` and `dir` is positive, where `r` is the third vertex of the face adjacent to the edge. It is also computed before identification to avoid problems. An array contains the indices of boundary edges, together with their `dir` field. 
+The edge `(i,j)` contains a `p` and `pq` field equal to `p` and `q-p`, where `p` and `q` are the pre-id `(u,v)` coordinates of vertices `i` and `j`. Because both endpoints of any single edge live in the same fundamental domain (a triangle is never split across the seam), no `close()` arithmetic is needed here. Edges also contain the indices of the two adjacent faces; boundary edges have only 1 adjacent face, and the second index is `-1`.
 
-Faces contain the indices of their vertices, and of their edges, as well as fields `p`, `pq`, and `pr`, which are equal to `p`, `q-p`and `r-p`, where `p` and `q` and `r` are the `(u,v)` coordinates of the vertices of the face. These are computed before identification also. 
+Boundary edges contain a vector `dir`, orthogonal to `pq`, oriented so that the inner product of `r-p` and `dir` is positive, where `r` is the third vertex of the adjacent face. An array contains the indices of boundary edges, together with their `dir` field.
+
+Faces contain the indices of their vertices and of their edges, as well as fields `p`, `pq`, and `pr` equal to `p`, `q-p` and `r-p`, where `p`, `q`, `r` are the pre-id `(u,v)` coordinates of the face's vertices. All three live in the same fundamental domain by construction (a face is one pre-id triangle), so these are direct subtractions.
+
+### Identification of edges and faces — geometric, not by vertex labels
+
+Identifications are interpreted as a gluing of *sides of the rectangle*, not as a relabeling of vertex indices. The rules:
+
+- **Vertices**: paired by the side-identification rule (cy: same coordinate on the other side; mo: mirrored coordinate). The pairing produces equivalence classes, recorded in `vertex_class`. Vertices are otherwise kept distinct with their original pre-id indices.
+- **Edges**: two pre-id edges `{a, b}` and `{c, d}` merge into one post-id edge **iff** both edges lie on identified sides of the rectangle (both endpoints of `{a, b}` on one identified side, both endpoints of `{c, d}` on the partner side) **and** their endpoints correspond under that side's pairing (`a ~ c, b ~ d` or `a ~ d, b ~ c`). All other edges keep their own identity, even when their endpoint pairs happen to share canonical labels with another edge.
+- **Faces (triangles)**: never merged. Each pre-id triangle is its own 2-cell in the post-id mesh.
+
+This rule is required because under reverse identifications on both axes (mo-mo), opposite-corner pre-id triangles can have all three of their vertices pairwise identified, producing identical canonical vertex labels for geometrically distinct cells. A label-based dedup would silently delete one of those cells and tear the manifold. The post-id complex is best viewed as a Δ-complex (semi-simplicial): multiple cells may share the same vertex set without being the same cell.
 
 ## Domain API
 
@@ -162,13 +174,17 @@ When a viewpoint, zoom factor is selected, the component of the normal to the su
 # Mesh
 A mesh is computed from the domain data. It is important that faces are triangles.
 
-In the rectangle case, after the mesh is generated, the boundaries which must be identified are. This means that one of the two identified vertices  is deleted, and replaced by the other one in edges and faces that contain it as a vertex. Same happens for two identified edges: one is deleted and replaced by the other in faces that contains it as an edge. 
+In the rectangle case, the mesh is generated on the *raw* rectangle, then identifications are applied geometrically:
 
-Each of the mesh vertices contains as data its coordinates in the domain, the normal to the surface (SN) computed at this point, and the 3D coordinates of the point. 
+- **Vertex equivalence** is recorded in a `vertex_class` array: two boundary vertices on identified sides are placed in the same class (canonical = the smaller pre-id index). Vertex indices in `tris` are **not** rewritten.
+- **Edges** are merged across identified sides: a pre-id edge on the u-min side merges with its partner on the u-max side iff both endpoints pair under the side's identification rule, and similarly for v-sides. Edges that do not lie entirely on identified sides retain their own identity even if their endpoints' canonical labels coincide with another edge's. (See §"Data stored".)
+- **Faces (triangles)** are never merged. Each pre-id triangle is its own 2-cell in the post-id mesh.
 
-In the rectangular case, the corners are special points, an array contains the four indices of coordinate points. 
+Each mesh vertex contains as data its coordinates in the domain, the normal to the surface (SN) computed at this point, and the 3D coordinates of the point. Paired vertices each carry their own evaluations; consistency across the seam is handled by the `flip` flag on edges (see below) and by `vertex_class` lookups when needed.
 
-In the rectangular case with identifications which reverse orientation, it may happen that the computed normals to the surface at the ends of an edge have negative scalar product instead of being positive. Thus a ``flip`` flag is associated to edges, which is `true` if this inner product is negative. This is done at edge-identification time.
+In the rectangular case, the corners are special points; an array contains the indices of the corner vertex classes (after merging via `vertex_class`).
+
+In the rectangular case with identifications which reverse orientation, it may happen that the computed normals to the surface at the ends of an edge have negative scalar product instead of being positive. Thus a `flip` flag is associated to edges, which is `true` if this inner product is negative. For a side-identified edge with two adjacent faces (one in each fundamental-domain copy), `flip` compares the SN at corresponding paired endpoints across the seam.
 
 # Curves
 

@@ -7,9 +7,12 @@ from scipy.spatial.distance import pdist
 from surface_play.domain import Domain
 from surface_play.mesh import (
     _apply_identifications,
+    _build_edges_faces,
     _generate_disk_mesh,
     _generate_rect_mesh,
     _jitter,
+    edge_dtype,
+    face_dtype,
 )
 
 
@@ -207,11 +210,18 @@ def test_jitter():
     assert np.all(np.abs(r_a_post[np.abs(r_a_pre - 0.3) < tol] - 0.3) < 1e-12)
 
 
-def _euler_post_id(uv: np.ndarray, tris: np.ndarray) -> int:
-    """Euler characteristic counting only active (non-disposed) vertices."""
-    V = len(np.unique(tris))
+def _euler_geometric(tris: np.ndarray, vertex_class: np.ndarray) -> int:
+    """
+    Euler χ of the post-id complex when edges are merged geometrically (by class)
+    and triangles are not merged. This is a quick check used in tests; it counts
+    by canonical labels and so under-counts edges in pathological coincidences,
+    but it suffices for cy-cy/mo-no/etc.
+    """
+    classes = vertex_class[tris]
+    V = len(np.unique(classes))
     all_edges = np.sort(
-        np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), axis=1
+        np.concatenate([classes[:, [0, 1]], classes[:, [1, 2]], classes[:, [2, 0]]]),
+        axis=1,
     )
     E = len(np.unique(all_edges, axis=0))
     return V - E + len(tris)
@@ -226,42 +236,229 @@ def test_apply_identifications():
         uv, tris = _generate_rect_mesh(d, resolution=res)
         return d, uv, tris
 
-    # 1. cy-no: Euler chi = 0 (cylinder)
-    d, uv, tris = mesh_rect("cy", "no")
-    _, tris_id = _apply_identifications(uv, tris, d)
-    assert _euler_post_id(uv, tris_id) == 0, f"cy-no: chi={_euler_post_id(uv, tris_id)}, expected 0"
-
-    # 2. cy-cy: Euler chi = 0 (torus)
-    d, uv, tris = mesh_rect("cy", "cy")
-    _, tris_id = _apply_identifications(uv, tris, d)
-    assert _euler_post_id(uv, tris_id) == 0, f"cy-cy: chi={_euler_post_id(uv, tris_id)}, expected 0"
-
-    # 3. mo-no: Euler chi = 0 (Möbius band)
-    d, uv, tris = mesh_rect("mo", "no")
-    _, tris_id = _apply_identifications(uv, tris, d)
-    assert _euler_post_id(uv, tris_id) == 0, f"mo-no: chi={_euler_post_id(uv, tris_id)}, expected 0"
-
-    # 4. mo-mo: Euler chi = 1 (RP², both axes reversed — corner triangles deduplicated)
-    d, uv, tris = mesh_rect("mo", "mo")
-    _, tris_id = _apply_identifications(uv, tris, d)
-    assert _euler_post_id(uv, tris_id) == 1, f"mo-mo: chi={_euler_post_id(uv, tris_id)}, expected 1"
-
-    # 5. no-no: tris unchanged, chi = 1
+    # 1. no-no: tris and vertex_class are pass-through identity.
     d, uv, tris = mesh_rect("no", "no")
-    _, tris_id = _apply_identifications(uv, tris, d)
-    assert np.array_equal(tris, tris_id), "no-no: tris should be unchanged"
-    assert _euler_post_id(uv, tris_id) == 1, "no-no: expected chi=1"
+    uv_out, tris_out, vc = _apply_identifications(uv, tris, d)
+    assert np.array_equal(tris, tris_out), "no-no: tris must be unchanged"
+    assert np.array_equal(vc, np.arange(len(uv))), "no-no: vertex_class == arange(N)"
 
-    # 6. disk: tris unchanged (no identifications applicable)
+    # 2. cy-no: each u-side class has size 2 (u_min↔u_max), others size 1.
+    d, uv, tris = mesh_rect("cy", "no")
+    _, tris_out, vc = _apply_identifications(uv, tris, d)
+    sizes = np.bincount(vc)
+    sizes_nonzero = sizes[sizes > 0]
+    assert set(sizes_nonzero.tolist()) <= {1, 2}, (
+        f"cy-no: class sizes should be 1 or 2, got {set(sizes_nonzero.tolist())}"
+    )
+    # Number of size-2 classes = number of u-side pairs = n + 1 (the corner pair (0,n) plus n more)
+    n = res
+    expected_pairs = n + 1  # (0,n), (3n+0,2n-0), (3n+1,2n-1), ..., (3n+(n-1),2n-(n-1)) = (4n-1,n+1)
+    # Careful: (3n+0, 2n-0) = (3n, 2n); (0, n) already counts vertex 0. Pair (3n, 2n) joins corners.
+    # Just check the count of size-2 classes is reasonable: equal to (4n - V_postid).
+    assert (sizes == 2).sum() >= n, "cy-no: should have at least n size-2 classes"
+    # tris not relabeled — pre-id labels survive.
+    assert np.array_equal(tris_out, tris), "cy-no: tris should be pre-id (no relabel)"
+
+    # 3. mo-mo res=5: corners collapse to exactly 2 classes; both corner triangles survive.
+    d_mm = Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0),
+                  u_identify="mo", v_identify="mo")
+    uv_mm, tris_mm = _generate_rect_mesh(d_mm, resolution=5)
+    _, tris_mm_out, vc_mm = _apply_identifications(uv_mm, tris_mm, d_mm)
+    n = 5
+    corner_classes = {int(vc_mm[0]), int(vc_mm[n]), int(vc_mm[2 * n]), int(vc_mm[3 * n])}
+    assert len(corner_classes) == 2, (
+        f"mo-mo: expected 2 corner classes, got {corner_classes}"
+    )
+    assert int(vc_mm[0]) == int(vc_mm[2 * n]), "mo-mo: corners 0 and 2n must share class"
+    assert int(vc_mm[n]) == int(vc_mm[3 * n]), "mo-mo: corners n and 3n must share class"
+    # Critical regression: both pre-id triangles (5,6,4) and (14,15,16) — which under the
+    # old C4 dedup got collapsed to one — must remain.
+    def has_tri(tris_arr, a, b, c):
+        s = {a, b, c}
+        return any(s == {int(t[0]), int(t[1]), int(t[2])} for t in tris_arr)
+    assert has_tri(tris_mm, 5, 6, 4) and has_tri(tris_mm, 14, 15, 16), (
+        "fixture sanity: pre-id (5,6,4) and (14,15,16) should both exist"
+    )
+    assert has_tri(tris_mm_out, 5, 6, 4) and has_tri(tris_mm_out, 14, 15, 16), (
+        "mo-mo: both pre-id corner triangles must survive (regression for label-dedup bug)"
+    )
+
+    # 4. cy-cy res=10: each class has size ≤ 4; tris not relabeled.
+    d, uv, tris = mesh_rect("cy", "cy")
+    _, tris_out, vc = _apply_identifications(uv, tris, d)
+    sizes = np.bincount(vc)
+    assert sizes.max() <= 4, f"cy-cy: max class size {sizes.max()} should be ≤ 4"
+    assert np.array_equal(tris_out, tris), "cy-cy: tris should be pre-id (no relabel)"
+
+    # 5. Disk: vertex_class == arange(N), tris unchanged.
     d_disk = Domain(type="disk", bounds=(0.0, 1.0, 0.0, 2 * math.pi))
     uv_d, tris_d = _generate_disk_mesh(d_disk, resolution=20)
-    _, tris_di = _apply_identifications(uv_d, tris_d, d_disk)
-    assert np.array_equal(tris_d, tris_di), "disk: tris should be unchanged"
+    _, tris_d_out, vc_d = _apply_identifications(uv_d, tris_d, d_disk)
+    assert np.array_equal(tris_d, tris_d_out)
+    assert np.array_equal(vc_d, np.arange(len(uv_d)))
 
-    # 7. Pairing correctness under jitter: index-based pairing must ignore uv perturbation
+    # 6. Pairing under jitter: vertex_class is index-based, immune to uv perturbation.
     d, uv, tris = mesh_rect("cy", "no")
     uv_j = _jitter(uv, tris, d, seed=42)
-    _, tris_from_clean = _apply_identifications(uv, tris, d)
-    _, tris_from_jitter = _apply_identifications(uv_j, tris, d)
-    assert np.array_equal(tris_from_clean, tris_from_jitter), \
-        "Pairing must be index-based, not coordinate-based"
+    _, _, vc_clean = _apply_identifications(uv, tris, d)
+    _, _, vc_jitter = _apply_identifications(uv_j, tris, d)
+    assert np.array_equal(vc_clean, vc_jitter), \
+        "vertex_class must be index-based, not coordinate-based"
+
+    # 7. Determinism: same input → same vertex_class.
+    _, _, vc_a = _apply_identifications(uv, tris, d)
+    _, _, vc_b = _apply_identifications(uv, tris, d)
+    assert np.array_equal(vc_a, vc_b)
+
+
+def _build_post_id(u_id, v_id, resolution, seed=42):
+    """Helper: generate raw mesh, jitter, apply identifications. Returns
+    (domain, uv_jittered, tris_filtered, vertex_class)."""
+    d = Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0),
+               u_identify=u_id, v_identify=v_id)
+    uv, tris = _generate_rect_mesh(d, resolution=resolution)
+    uv_j = _jitter(uv, tris, d, seed=seed)
+    _, tris_f, vc = _apply_identifications(uv_j, tris, d)
+    return d, uv_j, tris_f, vc
+
+
+def test_build_edges_faces():
+    import collections
+    import inspect
+    from surface_play import mesh as _mesh_module
+
+    # 1. Boundary counts for each (u_id, v_id) combo at res=5.
+    res = 5
+    expected_boundary = {
+        ("no", "no"): 4 * res,
+        ("cy", "no"): 2 * res,
+        ("no", "cy"): 2 * res,
+        ("mo", "no"): 2 * res,
+        ("no", "mo"): 2 * res,
+        ("cy", "cy"): 0,
+        ("cy", "mo"): 0,
+        ("mo", "cy"): 0,
+        ("mo", "mo"): 0,
+    }
+    expected_chi = {
+        ("no", "no"): 1,
+        ("cy", "no"): 0, ("no", "cy"): 0,
+        ("mo", "no"): 0, ("no", "mo"): 0,
+        ("cy", "cy"): 0, ("cy", "mo"): 0, ("mo", "cy"): 0,
+        ("mo", "mo"): 1,
+    }
+
+    for (u_id, v_id), bnd_expected in expected_boundary.items():
+        d, uv, tris, vc = _build_post_id(u_id, v_id, resolution=res)
+        SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
+        edges, faces = _build_edges_faces(uv, tris, vc, SN, d)
+        assert edges.dtype == edge_dtype
+        assert faces.dtype == face_dtype
+
+        # boundary count
+        bnd = int((edges["g"] == -1).sum())
+        assert bnd == bnd_expected, (
+            f"{u_id}-{v_id} res={res}: boundary={bnd}, expected {bnd_expected}"
+        )
+
+        # face count == len(tris)
+        assert len(faces) == len(tris), (
+            f"{u_id}-{v_id}: face count {len(faces)} != tris {len(tris)}"
+        )
+
+        # Euler χ from V = #classes used by tris, E = len(edges), F = len(faces).
+        V = len(np.unique(vc[tris]))
+        chi = V - len(edges) + len(faces)
+        assert chi == expected_chi[(u_id, v_id)], (
+            f"{u_id}-{v_id}: χ={chi}, expected {expected_chi[(u_id, v_id)]}"
+        )
+
+    # 2. mo-mo manifoldness across resolutions.
+    for r in (5, 7, 10):
+        d, uv, tris, vc = _build_post_id("mo", "mo", resolution=r)
+        SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
+        edges, faces = _build_edges_faces(uv, tris, vc, SN, d)
+        # Every edge has 2 incident faces.
+        edge_face_count = collections.Counter()
+        for f in faces:
+            for e_idx in f["edges"]:
+                edge_face_count[int(e_idx)] += 1
+        counts = sorted(edge_face_count.values())
+        assert min(counts) == 2 and max(counts) == 2, (
+            f"mo-mo res={r}: non-manifold edges, face-count hist = "
+            f"{collections.Counter(counts)}"
+        )
+        assert (edges["g"] == -1).sum() == 0, (
+            f"mo-mo res={r}: should have zero boundary edges"
+        )
+
+    # 3. flip on cy-no with constant SN: every edge has flip=+1.
+    d, uv, tris, vc = _build_post_id("cy", "no", resolution=res)
+    SN_const = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
+    edges_cy, _ = _build_edges_faces(uv, tris, vc, SN_const, d)
+    assert (edges_cy["flip"] == 1).all(), (
+        "cy-no with constant SN: every edge should have flip=+1"
+    )
+
+    # 4. flip on mo-no with a Möbius-band-like SN that reverses across the u-seam.
+    d, uv, tris, vc = _build_post_id("mo", "no", resolution=res)
+    u_min, u_max, _, _ = d.bounds
+    period_u = u_max - u_min
+    s = np.pi * (uv[:, 0] - u_min) / period_u
+    SN_mo = np.column_stack([np.cos(s), np.zeros(len(uv)), np.sin(s)])
+    edges_mo, _ = _build_edges_faces(uv, tris, vc, SN_mo, d)
+    # At least some u-merged edges (those that did merge across the seam) should have flip=-1.
+    interior = edges_mo["g"] >= 0
+    assert (edges_mo["flip"][interior] == -1).any(), (
+        "mo-no with sign-reversing SN: some merged seam edges should have flip=-1"
+    )
+    # Non-side edges (with both endpoints close in u) should have flip=+1.
+    # Sanity: at least most edges still +1.
+    assert (edges_mo["flip"] == 1).sum() > (edges_mo["flip"] == -1).sum()
+
+    # 5. dir: boundary edges have dir ⟂ pq and pointing toward third vertex.
+    d, uv, tris, vc = _build_post_id("no", "no", resolution=res)
+    SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
+    edges_nn, _ = _build_edges_faces(uv, tris, vc, SN, d)
+    bmask = edges_nn["g"] == -1
+    pq_b = edges_nn["pq"][bmask]
+    dir_b = edges_nn["dir"][bmask]
+    dot_pq = (dir_b * pq_b).sum(axis=1)
+    assert np.all(np.abs(dot_pq) < 1e-12), "boundary dir must be ⟂ pq"
+    for e in edges_nn[bmask]:
+        f_idx = int(e["f"])
+        verts = tuple(int(x) for x in tris[f_idx])
+        third = [v for v in verts if v != int(e["p_idx"]) and v != int(e["q_idx"])][0]
+        offset = uv[third] - e["p"]
+        assert float(np.dot(e["dir"], offset)) > 0, (
+            "boundary dir must point inward toward the third vertex"
+        )
+
+    # 6. p, pq, pr are exact pre-id subtractions (no float drift from close()).
+    d, uv, tris, vc = _build_post_id("cy", "cy", resolution=res)
+    SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
+    edges_cc, faces_cc = _build_edges_faces(uv, tris, vc, SN, d)
+    for e in edges_cc:
+        i, j = int(e["p_idx"]), int(e["q_idx"])
+        assert np.array_equal(e["p"], uv[i]), "edge p must equal uv[p_idx] exactly"
+        assert np.array_equal(e["pq"], uv[j] - uv[i]), (
+            "edge pq must equal uv[q_idx] - uv[p_idx] exactly"
+        )
+    for f in faces_cc:
+        i, j, k = int(f["verts"][0]), int(f["verts"][1]), int(f["verts"][2])
+        assert np.array_equal(f["p"], uv[i])
+        assert np.array_equal(f["pq"], uv[j] - uv[i])
+        assert np.array_equal(f["pr"], uv[k] - uv[i])
+
+    # 7. Splits initialized to -1.
+    assert (edges_cc["split1"] == -1).all()
+    assert (edges_cc["split2"] == -1).all()
+    assert (edges_nn["split1"] == -1).all()
+    assert (edges_nn["split2"] == -1).all()
+
+    # 8. Source-level regression: no domain.close() inside _build_edges_faces (G13).
+    src = inspect.getsource(_mesh_module._build_edges_faces)
+    assert ".close(" not in src, (
+        "_build_edges_faces must not call domain.close() — per-element fields are "
+        "pre-id subtractions only (G13)"
+    )
