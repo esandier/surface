@@ -1,9 +1,11 @@
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import triangle
 
 from surface_play.domain import Domain
+from surface_play.surface import SurfaceParams
 
 
 edge_dtype = np.dtype([
@@ -373,6 +375,66 @@ def _apply_identifications(
     tris_filtered = tris[distinct].astype(np.int32)
 
     return uv_jittered, tris_filtered, vertex_class
+
+
+@dataclass
+class Mesh:
+    domain: Domain
+    surface: SurfaceParams
+    uv: np.ndarray           # (N, 2) — pre-id, jittered
+    tris: np.ndarray         # (M, 3) — pre-id labels (G13)
+    vertex_class: np.ndarray # (N,)
+    edges: np.ndarray        # structured array, edge_dtype
+    faces: np.ndarray        # structured array, face_dtype
+    SN: np.ndarray           # (N, 3) — pre-id evaluation
+    xyz: np.ndarray          # (N, 3) — pre-id evaluation
+    boundary_edge_idx: np.ndarray  # indices into edges where g == -1
+    corner_idx: np.ndarray         # corner vertex-class indices (rect only)
+
+
+def build_mesh(
+    domain: Domain,
+    surface: SurfaceParams,
+    resolution: int,
+    *,
+    jitter: bool = True,
+    seed: int | None = None,
+) -> Mesh:
+    if domain.type == "rect":
+        uv_raw, tris_raw = _generate_rect_mesh(domain, resolution)
+    else:
+        uv_raw, tris_raw = _generate_disk_mesh(domain, resolution)
+
+    uv_jittered = _jitter(uv_raw, tris_raw, domain, seed=seed) if jitter else uv_raw
+
+    uv, tris, vertex_class = _apply_identifications(uv_jittered, tris_raw, domain)
+
+    xyz = surface.S(uv[:, 0], uv[:, 1]).T
+    SN = surface.SN(uv[:, 0], uv[:, 1]).T
+
+    edges, faces = _build_edges_faces(uv, tris, vertex_class, SN, domain)
+
+    boundary_edge_idx = np.nonzero(edges["g"] == -1)[0]
+
+    if domain.type == "rect":
+        n = _boundary_edge_count(tris) // 4
+        corner_idx = np.unique(vertex_class[[0, n, 2 * n, 3 * n]])
+    else:
+        corner_idx = np.array([], dtype=np.int32)
+
+    return Mesh(
+        domain=domain,
+        surface=surface,
+        uv=uv,
+        tris=tris,
+        vertex_class=vertex_class,
+        edges=edges,
+        faces=faces,
+        SN=SN,
+        xyz=xyz,
+        boundary_edge_idx=boundary_edge_idx,
+        corner_idx=corner_idx,
+    )
 
 
 def _generate_disk_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np.ndarray]:

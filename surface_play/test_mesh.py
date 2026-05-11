@@ -1,3 +1,4 @@
+import collections
 import math
 
 import numpy as np
@@ -6,13 +7,22 @@ from scipy.spatial.distance import pdist
 
 from surface_play.domain import Domain
 from surface_play.mesh import (
+    Mesh,
     _apply_identifications,
     _build_edges_faces,
     _generate_disk_mesh,
     _generate_rect_mesh,
     _jitter,
+    build_mesh,
     edge_dtype,
     face_dtype,
+)
+from surface_play.surface import SurfaceParams
+from surface_play.test_fixtures import (
+    disk_paraboloid_ca,
+    mobius_u,
+    paraboloid,
+    torus,
 )
 
 
@@ -462,3 +472,97 @@ def test_build_edges_faces():
         "_build_edges_faces must not call domain.close() — per-element fields are "
         "pre-id subtractions only (G13)"
     )
+
+
+TWO_PI = 2 * math.pi
+
+
+def test_build_mesh():
+    # 1. Helicoid rect u-cy: every edge flip=+1 (cy orientation-preserving).
+    #    SN(u,v) = (sin(v), -cos(v), u). At u=0 and u=1, dot product = 1 > 0.
+    domain_hcy = Domain(type="rect", bounds=(0.0, 1.0, 0.0, TWO_PI), u_identify="cy")
+    surf_hcy = SurfaceParams(
+        "u*cos(v)", "u*sin(v)", "v", "u v", domain_hcy, perturb=False
+    )
+    m = build_mesh(domain_hcy, surf_hcy, resolution=15, jitter=True, seed=42)
+    assert isinstance(m, Mesh)
+    assert m.uv.shape[1] == 2
+    assert m.xyz.shape == m.SN.shape == (len(m.uv), 3)
+    assert (m.edges["flip"] == 1).all(), "helicoid u-cy: all flip must be +1"
+    assert len(m.boundary_edge_idx) == 2 * 15  # v_min and v_max only
+
+    # 2. Möbius band rect u-mo: some seam edges have flip=-1.
+    surf_mo = mobius_u(perturb=False)
+    m_mo = build_mesh(surf_mo.domain, surf_mo, resolution=15, jitter=True, seed=42)
+    assert isinstance(m_mo, Mesh)
+    assert len(m_mo.boundary_edge_idx) == 2 * 15  # v_min and v_max sides
+    # At least some merged seam edges must have flip=-1 (Möbius reversal).
+    assert (m_mo.edges["flip"] == -1).any(), "mobius u-mo: some flip must be -1"
+
+    # 3. Disk r_max=1, resolution=20: 1 boundary loop, no seams, vc == arange(N).
+    surf_disk = disk_paraboloid_ca(perturb=False)
+    m_disk = build_mesh(surf_disk.domain, surf_disk, resolution=20, seed=42)
+    n_outer = max(3, round(math.pi * 20))  # = round(π·20) ≈ 63
+    assert len(m_disk.boundary_edge_idx) == n_outer
+    assert np.array_equal(m_disk.vertex_class, np.arange(len(m_disk.uv)))
+    assert len(m_disk.corner_idx) == 0
+
+    # 4. Annulus r_min=0.3, r_max=1, resolution=20: 2 boundary loops.
+    domain_ann = Domain(type="annulus", bounds=(0.3, 1.0, 0.0, TWO_PI))
+    surf_ann = SurfaceParams("x", "y", "x**2 + y**2", "x y", domain_ann, perturb=False)
+    m_ann = build_mesh(domain_ann, surf_ann, resolution=20, seed=42)
+    n_outer_a = max(3, round(math.pi * 20))
+    n_inner_a = max(3, round(math.pi * 0.3 * 20))
+    assert len(m_ann.boundary_edge_idx) == n_outer_a + n_inner_a
+
+    # 5. Fig-8 immersion cy-cy: χ=0 (torus topology), zero boundary edges.
+    domain_fig8 = Domain(
+        type="rect", bounds=(0.0, TWO_PI, 0.0, TWO_PI),
+        u_identify="cy", v_identify="cy",
+    )
+    surf_fig8 = SurfaceParams(
+        "(2 + cos(u))*cos(v)", "(2 + cos(u))*sin(v)", "sin(2*u)",
+        "u v", domain_fig8, perturb=False,
+    )
+    m_fig8 = build_mesh(domain_fig8, surf_fig8, resolution=15, seed=42)
+    assert len(m_fig8.boundary_edge_idx) == 0
+    V = len(np.unique(m_fig8.vertex_class[m_fig8.tris]))
+    chi = V - len(m_fig8.edges) + len(m_fig8.faces)
+    assert chi == 0, f"fig-8 cy-cy: χ={chi}, expected 0"
+
+    # 6. mo-mo regression: zero boundary edges, every edge has exactly 2 incident faces.
+    domain_momo = Domain(
+        type="rect", bounds=(0.0, TWO_PI, -0.3, 0.3),
+        u_identify="mo", v_identify="mo",
+    )
+    surf_momo = SurfaceParams(
+        "cos(u)", "sin(u)", "v", "u v", domain_momo, perturb=False
+    )
+    m_momo = build_mesh(domain_momo, surf_momo, resolution=10, seed=42)
+    assert len(m_momo.boundary_edge_idx) == 0
+    edge_face_count = collections.Counter()
+    for f in m_momo.faces:
+        for e_idx in f["edges"]:
+            edge_face_count[int(e_idx)] += 1
+    counts = list(edge_face_count.values())
+    assert min(counts) == 2 and max(counts) == 2, (
+        f"mo-mo: non-manifold edges; face-count hist = {collections.Counter(counts)}"
+    )
+
+    # 7. corner_idx length: 4 for no-no, 1 for cy-cy, 2 for mo-mo.
+    surf_para = paraboloid(perturb=False)
+    m_nn = build_mesh(surf_para.domain, surf_para, resolution=10, seed=42)
+    assert len(m_nn.corner_idx) == 4
+
+    surf_tor = torus(perturb=False)
+    m_cycy = build_mesh(surf_tor.domain, surf_tor, resolution=10, seed=42)
+    assert len(m_cycy.corner_idx) == 1
+
+    assert len(m_momo.corner_idx) == 2
+
+    # 8. Determinism: jitter=True with fixed seed gives identical fields on two calls.
+    m_a = build_mesh(surf_para.domain, surf_para, resolution=10, jitter=True, seed=7)
+    m_b = build_mesh(surf_para.domain, surf_para, resolution=10, jitter=True, seed=7)
+    assert np.array_equal(m_a.uv, m_b.uv)
+    assert np.array_equal(m_a.xyz, m_b.xyz)
+    assert np.array_equal(m_a.tris, m_b.tris)
