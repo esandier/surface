@@ -1,8 +1,21 @@
-"""Tests for P4: make_lines, P6: sign_changes."""
+"""Tests for P4: make_lines, P6: sign_changes, C7: build_bcs."""
+
+import math
 
 import numpy as np
 import pytest
-from surface_play.curves import make_lines, sign_changes
+from surface_play.curves import BoundaryCurve, build_bcs, make_lines, sign_changes
+from surface_play.domain import Domain
+from surface_play.mesh import build_mesh
+from surface_play.surface import SurfaceParams
+from surface_play.test_fixtures import (
+    disk_paraboloid_ca,
+    mobius_u,
+    paraboloid,
+    torus,
+)
+
+TWO_PI = 2 * math.pi
 
 
 def _abs_chain(chain: np.ndarray) -> list[int]:
@@ -122,3 +135,56 @@ class TestSignChanges:
         mask = sign_changes(np.array([]), np.array([]))
         assert mask.shape == (0,)
         assert mask.dtype == bool
+
+
+# ---------------------------------------------------------------------------
+# C7: build_bcs
+# ---------------------------------------------------------------------------
+
+def _bcs(surf, resolution=8):
+    """Build a mesh and return its BoundaryCurves."""
+    return build_bcs(build_mesh(surf.domain, surf, resolution=resolution, seed=42))
+
+
+def test_build_bcs():
+    # 1. Rect no-id: 1 BC, closed (G16 — four sides form one loop).
+    bcs = _bcs(paraboloid(perturb=False))
+    assert len(bcs) == 1
+    assert bcs[0].is_closed
+
+    # 2. Rect cy-no: 2 BCs, both closed (top and bottom rims).
+    domain_cy = Domain(type="rect", bounds=(0.0, 1.0, 0.0, TWO_PI), u_identify="cy")
+    surf_cy = SurfaceParams("u*cos(v)", "u*sin(v)", "v", "u v", domain_cy, perturb=False)
+    bcs = _bcs(surf_cy)
+    assert len(bcs) == 2
+    assert all(bc.is_closed for bc in bcs)
+
+    # 3. Rect cy-cy: 0 BCs.
+    bcs = _bcs(torus(perturb=False))
+    assert len(bcs) == 0
+
+    # 4. Rect mo-no: 1 BC, closed (mo merges the two v-side open arcs into one loop).
+    bcs = _bcs(mobius_u(perturb=False))
+    assert len(bcs) == 1
+    assert bcs[0].is_closed
+
+    # 5. Rect mo-mo: 0 BCs.
+    domain_momo = Domain(
+        type="rect", bounds=(0.0, TWO_PI, -0.3, 0.3),
+        u_identify="mo", v_identify="mo",
+    )
+    surf_momo = SurfaceParams("cos(u)", "sin(u)", "v", "u v", domain_momo, perturb=False)
+    bcs = build_bcs(build_mesh(domain_momo, surf_momo, resolution=8, seed=42))
+    assert len(bcs) == 0
+
+    # 6. Disk: 1 closed BC.
+    bcs = _bcs(disk_paraboloid_ca(perturb=False), resolution=20)
+    assert len(bcs) == 1
+    assert bcs[0].is_closed
+
+    # 7. Annulus: 2 closed BCs.
+    domain_ann = Domain(type="annulus", bounds=(0.3, 1.0, 0.0, TWO_PI))
+    surf_ann = SurfaceParams("x", "y", "x**2 + y**2", "x y", domain_ann, perturb=False)
+    bcs = build_bcs(build_mesh(domain_ann, surf_ann, resolution=20, seed=42))
+    assert len(bcs) == 2
+    assert all(bc.is_closed for bc in bcs)
