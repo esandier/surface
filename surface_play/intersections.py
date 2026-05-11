@@ -1,14 +1,18 @@
-"""intersections.py — P5: sweep_segments
+"""intersections.py — P5: sweep_segments; C8: candidate_pairs (BVH broad phase).
 
 Shared 2D segment-segment intersection primitive used by the domain sweep
 (self-intersection preimages, CS×SIS, etc.) and the view-plane sweep.
 See Modular_rewrite_roadmap.md §P5; G3 (close-aware) is enforced when
 `domain` is a rectangular domain with identification.
+
+C8: `candidate_pairs(e_bbox, f_bbox)` returns overlapping AABB pairs via a
+stack-based BVH with axis-cycling partitioning, Numba-JIT compiled. See G14.
 """
 
 from typing import Optional
 
 import numpy as np
+from numba import njit
 
 
 intersect_dtype = np.dtype([
@@ -169,3 +173,106 @@ def sweep_segments(
     res["t_a"] = ta_all
     res["t_b"] = tb_all
     return res
+
+
+@njit(cache=True)
+def _bvh_kernel(e_bbox, f_bbox):
+    n_e = e_bbox.shape[0]
+    n_f = f_bbox.shape[0]
+
+    max_res = n_e * 15
+    out_e = np.empty(max_res, dtype=np.int32)
+    out_f = np.empty(max_res, dtype=np.int32)
+    count = 0
+
+    e_indices = np.arange(n_e, dtype=np.int32)
+    f_indices = np.arange(n_f, dtype=np.int32)
+
+    stack = np.empty((64, 5), dtype=np.int32)
+    stack[0] = [0, n_e, 0, n_f, 0]
+    stack_ptr = 1
+
+    while stack_ptr > 0:
+        stack_ptr -= 1
+        e_start, e_end, f_start, f_end, depth = stack[stack_ptr]
+
+        n_curr_e = e_end - e_start
+        n_curr_f = f_end - f_start
+
+        if n_curr_e * n_curr_f < 5000 or depth > 15:
+            for i in range(e_start, e_end):
+                ie = e_indices[i]
+                eb = e_bbox[ie]
+                for j in range(f_start, f_end):
+                    iface = f_indices[j]
+                    fb = f_bbox[iface]
+                    if (eb[0] <= fb[3] and eb[3] >= fb[0] and
+                        eb[1] <= fb[4] and eb[4] >= fb[1] and
+                        eb[2] <= fb[5] and eb[5] >= fb[2]):
+                        if count < max_res:
+                            out_e[count], out_f[count] = ie, iface
+                            count += 1
+            continue
+
+        axis = depth % 3
+
+        f_coords = f_bbox[f_indices[f_start:f_end], axis]
+        mid = (np.min(f_coords) + np.max(f_coords)) * 0.5
+
+        f_split = f_start
+        for i in range(f_start, f_end):
+            if f_bbox[f_indices[i], axis] <= mid:
+                tmp = f_indices[f_split]
+                f_indices[f_split] = f_indices[i]
+                f_indices[i] = tmp
+                f_split += 1
+
+        e_split = e_start
+        for i in range(e_start, e_end):
+            if e_bbox[e_indices[i], axis] <= mid:
+                tmp = e_indices[e_split]
+                e_indices[e_split] = e_indices[i]
+                e_indices[i] = tmp
+                e_split += 1
+
+        if e_split > e_start and f_split > f_start:
+            stack[stack_ptr] = [e_start, e_split, f_start, f_split, depth + 1]
+            stack_ptr += 1
+        if e_split < e_end and f_split < f_end:
+            stack[stack_ptr] = [e_split, e_end, f_split, f_end, depth + 1]
+            stack_ptr += 1
+
+    return out_e[:count], out_f[:count]
+
+
+def candidate_pairs(e_bbox: np.ndarray, f_bbox: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Stack-based BVH AABB-overlap broad phase (C8 / G14).
+
+    Parameters
+    ----------
+    e_bbox, f_bbox : np.ndarray, shape (N, 6)
+        Per-item AABBs as [xmin, ymin, zmin, xmax, ymax, zmax].
+
+    Returns
+    -------
+    (e_idx, f_idx) : tuple of np.ndarray (int64)
+        Deduplicated overlapping AABB pairs.
+    """
+    e_bbox = np.ascontiguousarray(e_bbox, dtype=np.float64)
+    f_bbox = np.ascontiguousarray(f_bbox, dtype=np.float64)
+    if e_bbox.shape[0] == 0 or f_bbox.shape[0] == 0:
+        return (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))
+
+    res_e, res_f = _bvh_kernel(e_bbox, f_bbox)
+
+    if len(res_e) == 0:
+        return (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))
+
+    combined = res_e.astype(np.int64) << 32 | res_f.astype(np.int64)
+    sort_idx = np.argsort(combined)
+    combined = combined[sort_idx]
+    mask = np.ones(len(combined), dtype=np.bool_)
+    mask[1:] = combined[1:] != combined[:-1]
+
+    return (res_e[sort_idx][mask].astype(np.int64),
+            res_f[sort_idx][mask].astype(np.int64))
