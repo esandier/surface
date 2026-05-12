@@ -1,4 +1,4 @@
-"""Tests for P5: sweep_segments; C8: candidate_pairs."""
+"""Tests for P5: sweep_segments; C8: candidate_pairs; C9: find_double_points."""
 
 import math
 import time
@@ -9,9 +9,13 @@ import pytest
 from surface_play.domain import Domain
 from surface_play.intersections import (
     candidate_pairs,
+    dp_dtype,
+    find_double_points,
     intersect_dtype,
     sweep_segments,
 )
+from surface_play.mesh import build_mesh
+from surface_play.test_fixtures import fig8, helicoid, mobius_u
 
 
 TWO_PI = 2 * math.pi
@@ -260,3 +264,118 @@ def test_candidate_pairs_determinism():
     # Stable sort: combined-key non-decreasing.
     combined = (e1.astype(np.int64) << 32) | f1.astype(np.int64)
     assert np.all(np.diff(combined) > 0)
+
+
+# --- C9: find_double_points -------------------------------------------------
+
+def _build(surface, resolution, *, jitter=True, seed=42):
+    return build_mesh(surface.domain, surface, resolution=resolution,
+                      jitter=jitter, seed=seed)
+
+
+def test_find_double_points_helicoid_empty():
+    """Helicoid (rect-no-no): embedded → no self-intersections."""
+    surface = helicoid()
+    mesh = _build(surface, resolution=15)
+    dps = find_double_points(mesh, surface)
+    assert dps.dtype == dp_dtype
+    assert len(dps) == 0
+
+
+def test_find_double_points_mobius_empty():
+    """Möbius band: embedded in 3D → no self-intersections."""
+    surface = mobius_u()
+    mesh = _build(surface, resolution=15)
+    dps = find_double_points(mesh, surface)
+    assert len(dps) == 0
+
+
+def test_find_double_points_fig8_nonempty():
+    """Fig-8 cy-cy res=20: closed self-intersection curve → DPs > 0."""
+    surface = fig8()
+    mesh = _build(surface, resolution=20)
+    dps = find_double_points(mesh, surface)
+    # The fig-8 immersion has one closed SIC, so DP count should be O(res).
+    # Loose lower bound — we mostly want to assert the algorithm finds DPs.
+    assert len(dps) >= 10, f"expected ≥10 DPs, got {len(dps)}"
+    assert len(dps) < 200, f"DP count {len(dps)} suspiciously high (fragmentation?)"
+    # Every DP is one of the two recognized types.
+    types = set(dps["type"].tolist())
+    assert types <= {"EF", "EE"}
+
+
+def test_find_double_points_sibling_consumption():
+    """G2 regression: sibling-pair consumption prevents duplicates.
+
+    No two DPs share the same (E1, F2) for "EF" type, and no two "EE" DPs
+    share the same unordered (E1, E2) edge pair.
+    """
+    surface = fig8()
+    mesh = _build(surface, resolution=25)
+    dps = find_double_points(mesh, surface)
+    assert len(dps) > 0
+
+    ef_mask = dps["type"] == "EF"
+    if ef_mask.any():
+        ef_keys = list(zip(dps["E1"][ef_mask].tolist(),
+                           dps["F2"][ef_mask].tolist()))
+        assert len(ef_keys) == len(set(ef_keys)), \
+            "duplicate (E1, F2) in EF records — sibling consumption failed"
+
+    ee_mask = dps["type"] == "EE"
+    if ee_mask.any():
+        ee_keys = [
+            tuple(sorted((int(e1), int(e2))))
+            for e1, e2 in zip(dps["E1"][ee_mask], dps["E2"][ee_mask])
+        ]
+        assert len(ee_keys) == len(set(ee_keys)), \
+            "duplicate unordered (E1, E2) in EE records — sibling consumption failed"
+
+
+def test_find_double_points_no_fragmentation():
+    """DP count grows smoothly with resolution (no factor-of-2 jumps)."""
+    surface = fig8()
+    counts = {}
+    for res in (20, 30, 40):
+        mesh = _build(surface, resolution=res)
+        dps = find_double_points(mesh, surface)
+        counts[res] = len(dps)
+        assert len(dps) > 0, f"res={res}: no DPs found"
+
+    r1 = counts[30] / counts[20]
+    r2 = counts[40] / counts[30]
+    assert 0.5 <= r1 <= 2.0, f"DP count ratio 30/20 = {r1:.2f} outside [0.5, 2.0] (counts: {counts})"
+    assert 0.5 <= r2 <= 2.0, f"DP count ratio 40/30 = {r2:.2f} outside [0.5, 2.0] (counts: {counts})"
+
+
+def test_find_double_points_uv_in_bounds():
+    """uv1, uv2 lie within domain bounds (with tolerance for jitter)."""
+    surface = fig8()
+    mesh = _build(surface, resolution=20)
+    dps = find_double_points(mesh, surface)
+    assert len(dps) > 0
+
+    u_min, u_max, v_min, v_max = surface.domain.bounds
+    tol = 1e-3 * max(u_max - u_min, v_max - v_min)
+
+    for field in ("uv1", "uv2"):
+        uvs = dps[field]
+        assert (uvs[:, 0] >= u_min - tol).all(), f"{field} u below u_min"
+        assert (uvs[:, 0] <= u_max + tol).all(), f"{field} u above u_max"
+        assert (uvs[:, 1] >= v_min - tol).all(), f"{field} v below v_min"
+        assert (uvs[:, 1] <= v_max + tol).all(), f"{field} v above v_max"
+
+
+def test_find_double_points_performance():
+    """Fig-8 cy-cy res=30 < 5s after warmup (Numba BVH already JIT'd)."""
+    surface = fig8()
+    # Warmup: ensure BVH JIT cache is hot (independent of perf timing below).
+    mesh_warm = _build(surface, resolution=10)
+    _ = find_double_points(mesh_warm, surface)
+
+    mesh = _build(surface, resolution=30)
+    t0 = time.perf_counter()
+    dps = find_double_points(mesh, surface)
+    elapsed = time.perf_counter() - t0
+    assert len(dps) > 0
+    assert elapsed < 5.0, f"find_double_points took {elapsed:.2f}s, expected < 5s"

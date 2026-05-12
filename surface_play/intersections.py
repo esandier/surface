@@ -1,4 +1,5 @@
-"""intersections.py — P5: sweep_segments; C8: candidate_pairs (BVH broad phase).
+"""intersections.py — P5: sweep_segments; C8: candidate_pairs (BVH broad phase);
+C9: find_double_points.
 
 Shared 2D segment-segment intersection primitive used by the domain sweep
 (self-intersection preimages, CS×SIS, etc.) and the view-plane sweep.
@@ -7,6 +8,10 @@ See Modular_rewrite_roadmap.md §P5; G3 (close-aware) is enforced when
 
 C8: `candidate_pairs(e_bbox, f_bbox)` returns overlapping AABB pairs via a
 stack-based BVH with axis-cycling partitioning, Numba-JIT compiled. See G14.
+
+C9: `find_double_points(mesh, surface)` returns DP records (edge-vs-face hits
+in 3D), with sibling-pair consumption (G2) and seam-aware vertex-class skip
+(G13). Uses C5 per-element (p, pq, pr) for uv recovery (G15).
 """
 
 from typing import Optional
@@ -21,6 +26,21 @@ intersect_dtype = np.dtype([
     ("b",   "i4"),
     ("t_a", "f8"),
     ("t_b", "f8"),
+])
+
+
+dp_dtype = np.dtype([
+    ("xyz",         "f8", 3),
+    ("uv1",         "f8", 2),
+    ("uv2",         "f8", 2),
+    ("E1",          "i4"),
+    ("E2",          "i4"),
+    ("F2",          "i4"),
+    ("A1",          "i4", 2),
+    ("A2",          "i4", 2),
+    ("type",        "U2"),
+    ("ptype",       "i4"),
+    ("on_boundary", "?"),
 ])
 
 
@@ -276,3 +296,232 @@ def candidate_pairs(e_bbox: np.ndarray, f_bbox: np.ndarray) -> tuple[np.ndarray,
 
     return (res_e[sort_idx][mask].astype(np.int64),
             res_f[sort_idx][mask].astype(np.int64))
+
+
+def moller_trumbore_batch(
+    origins: np.ndarray,
+    dirs: np.ndarray,
+    v0: np.ndarray,
+    v1: np.ndarray,
+    v2: np.ndarray,
+    *,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized Möller-Trumbore ray/triangle intersection.
+
+    Each row is one (ray, triangle) test. Ray = origins[i] + t * dirs[i].
+    Returns (t, u, v, hit) where hit is the boolean mask of valid intersections
+    with t ∈ (0, 1), u, v ≥ 0, u + v ≤ 1.
+    """
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    h = np.cross(dirs, edge2)
+    a = np.einsum("ij,ij->i", edge1, h)
+    det_ok = np.abs(a) > eps
+    a_safe = np.where(det_ok, a, 1.0)
+    f = 1.0 / a_safe
+    s = origins - v0
+    u = f * np.einsum("ij,ij->i", s, h)
+    q = np.cross(s, edge1)
+    v = f * np.einsum("ij,ij->i", dirs, q)
+    t = f * np.einsum("ij,ij->i", edge2, q)
+    hit = (
+        det_ok
+        & (u >= 0.0)
+        & (v >= 0.0)
+        & (u + v <= 1.0)
+        & (t > 0.0)
+        & (t < 1.0)
+    )
+    return t, u, v, hit
+
+
+def find_double_points(mesh, surface, *, delta: float = 1e-6) -> np.ndarray:
+    """Detect 3D self-intersections of `mesh` as edge-vs-face hits (C9).
+
+    Pipeline: 3D AABBs → C8 BVH broad phase → seam-aware vertex-class skip
+    (G13) → batched Möller-Trumbore → per-hit Appendix classification with
+    sibling-pair consumption (G2). uv1/uv2 are recovered from C5 per-element
+    (p, pq, pr) — already in fundamental domain (G15).
+
+    `surface` is accepted for API parity with downstream callers but unused
+    in C9 (xyz already populated on `mesh`).
+    """
+    del surface  # unused; mesh.xyz is precomputed in C6.
+
+    edges = mesh.edges
+    faces = mesh.faces
+    tris = mesh.tris
+    xyz = mesh.xyz
+    vertex_class = mesh.vertex_class
+
+    n_e = len(edges)
+    n_f = len(faces)
+    if n_e == 0 or n_f == 0:
+        return np.empty(0, dtype=dp_dtype)
+
+    ep = edges["p_idx"]
+    eq = edges["q_idx"]
+    ef = edges["f"]
+    eg = edges["g"]
+
+    # 1. Per-edge / per-face 3D AABBs.
+    e_pts_p = xyz[ep]
+    e_pts_q = xyz[eq]
+    e_bbox = np.hstack([np.minimum(e_pts_p, e_pts_q), np.maximum(e_pts_p, e_pts_q)])
+    f_pts = xyz[tris]                                  # (n_f, 3, 3)
+    f_bbox = np.hstack([f_pts.min(axis=1), f_pts.max(axis=1)])
+
+    # 2. C8 BVH broad phase.
+    ei, fi = candidate_pairs(e_bbox, f_bbox)
+    if len(ei) == 0:
+        return np.empty(0, dtype=dp_dtype)
+
+    # 3. Vertex-class skip (G13).
+    cls_ep = vertex_class[ep[ei]]                      # (K,)
+    cls_eq = vertex_class[eq[ei]]
+    cls_fv = vertex_class[tris[fi]]                    # (K, 3)
+    shared = (
+        (cls_ep[:, None] == cls_fv).any(axis=1)
+        | (cls_eq[:, None] == cls_fv).any(axis=1)
+    )
+    keep = ~shared
+    ei = ei[keep]
+    fi = fi[keep]
+    if len(ei) == 0:
+        return np.empty(0, dtype=dp_dtype)
+
+    # 4. Batched Möller-Trumbore.
+    origins = xyz[ep[ei]]
+    dirs = xyz[eq[ei]] - origins
+    v0 = xyz[tris[fi, 0]]
+    v1 = xyz[tris[fi, 1]]
+    v2 = xyz[tris[fi, 2]]
+    t, u, v, hit = moller_trumbore_batch(origins, dirs, v0, v1, v2)
+    if not np.any(hit):
+        return np.empty(0, dtype=dp_dtype)
+
+    ei = ei[hit]; fi = fi[hit]
+    t = t[hit]; u = u[hit]; v = v[hit]
+    v0 = v0[hit]; v1 = v1[hit]; v2 = v2[hit]
+    bary = np.column_stack([1.0 - u - v, u, v])
+    min_bary = bary.min(axis=1)
+    xyz_hit = v0 + u[:, None] * (v1 - v0) + v[:, None] * (v2 - v0)
+
+    N = len(ei)
+    hit_index = {(int(ei[k]), int(fi[k])): k for k in range(N)}
+
+    def _other_face_of_edge(e_idx: int, f_not: int) -> int:
+        f0, f1 = int(ef[e_idx]), int(eg[e_idx])
+        if f0 == f_not:
+            return f1
+        if f1 == f_not:
+            return f0
+        return -1
+
+    def _vertex_opposite_to_edge_in_face(f_idx: int, e_idx: int) -> int:
+        tri = tris[f_idx]
+        pe = int(vertex_class[int(ep[e_idx])])
+        qe = int(vertex_class[int(eq[e_idx])])
+        for j in range(3):
+            cls_v = int(vertex_class[int(tri[j])])
+            if cls_v != pe and cls_v != qe:
+                return j
+        return -1
+
+    def _ef_record(e_idx: int, f_idx: int, t_k: float, u_k: float, v_k: float,
+                   xyz_k: np.ndarray) -> tuple:
+        e_p = edges[e_idx]["p"]
+        e_pq = edges[e_idx]["pq"]
+        f_p = faces[f_idx]["p"]
+        f_pq = faces[f_idx]["pq"]
+        f_pr = faces[f_idx]["pr"]
+        uv1 = e_p + t_k * e_pq
+        uv2 = f_p + u_k * f_pq + v_k * f_pr
+        on_bnd = (int(eg[e_idx]) == -1)
+        A1 = (int(ef[e_idx]), int(eg[e_idx]))
+        A2 = (int(f_idx), -1)
+        return (xyz_k, uv1, uv2, int(e_idx), -1, int(f_idx),
+                A1, A2, "EF", 2 if on_bnd else 0, on_bnd)
+
+    def _ee_record(e1: int, e2: int, f2: int, t_k: float, u_k: float, v_k: float,
+                   xyz_k: np.ndarray) -> tuple:
+        e1_p = edges[e1]["p"]
+        e1_pq = edges[e1]["pq"]
+        f2_p = faces[f2]["p"]
+        f2_pq = faces[f2]["pq"]
+        f2_pr = faces[f2]["pr"]
+        uv1 = e1_p + t_k * e1_pq
+        uv2 = f2_p + u_k * f2_pq + v_k * f2_pr
+        on_bnd = (int(eg[e1]) == -1) or (int(eg[e2]) == -1)
+        A1 = (int(ef[e1]), int(eg[e1]))
+        A2 = (int(ef[e2]), int(eg[e2]))
+        return (xyz_k, uv1, uv2, int(e1), int(e2), -1,
+                A1, A2, "EE", 2 if on_bnd else 0, on_bnd)
+
+    consumed = np.zeros(N, dtype=bool)
+    records: list[tuple] = []
+    ee_keys: set[tuple[int, int]] = set()
+
+    # 5. Per-hit Appendix classification (G2): sort by descending min_bary,
+    # process serially, mark sibling pairs consumed.
+    order = np.argsort(-min_bary)
+    for k in order:
+        if consumed[k]:
+            continue
+        consumed[k] = True
+        e1, f2 = int(ei[k]), int(fi[k])
+        if min_bary[k] >= delta:
+            records.append(_ef_record(e1, f2, t[k], u[k], v[k], xyz_hit[k]))
+            continue
+
+        # Hit lies on edge of F2 opposite the smallest-bary vertex.
+        opp = int(np.argmin(bary[k]))
+        e2 = int(faces[f2]["edges"][(opp + 1) % 3])
+        if e2 == e1:
+            continue
+
+        f1, f1p = int(ef[e1]), int(eg[e1])
+        f2p = _other_face_of_edge(e2, f2)
+
+        sib_e1_f2p = hit_index.get((e1, f2p)) if f2p >= 0 else None
+        sib_e2_f1 = hit_index.get((e2, f1)) if f1 >= 0 else None
+        sib_e2_f1p = hit_index.get((e2, f1p)) if f1p >= 0 else None
+
+        if sib_e2_f1 is not None:
+            q_idx, q_f = sib_e2_f1, f1
+        elif sib_e2_f1p is not None:
+            q_idx, q_f = sib_e2_f1p, f1p
+        else:
+            q_idx, q_f = None, -1
+
+        if q_idx is None:
+            key = (min(e1, e2), max(e1, e2))
+            if key not in ee_keys:
+                ee_keys.add(key)
+                records.append(_ee_record(e1, e2, f2, t[k], u[k], v[k], xyz_hit[k]))
+        else:
+            j_opp_e1 = _vertex_opposite_to_edge_in_face(q_f, e1)
+            if j_opp_e1 >= 0 and bary[q_idx][j_opp_e1] >= delta:
+                records.append(_ef_record(
+                    e2, q_f, t[q_idx], u[q_idx], v[q_idx], xyz_hit[q_idx]
+                ))
+            else:
+                key = (min(e1, e2), max(e1, e2))
+                if key not in ee_keys:
+                    ee_keys.add(key)
+                    records.append(_ee_record(e1, e2, f2, t[k], u[k], v[k], xyz_hit[k]))
+
+        for s in (sib_e1_f2p, sib_e2_f1, sib_e2_f1p):
+            if s is not None:
+                consumed[s] = True
+
+    if not records:
+        return np.empty(0, dtype=dp_dtype)
+
+    out = np.empty(len(records), dtype=dp_dtype)
+    for i, rec in enumerate(records):
+        (out["xyz"][i], out["uv1"][i], out["uv2"][i], out["E1"][i],
+         out["E2"][i], out["F2"][i], out["A1"][i], out["A2"][i],
+         out["type"][i], out["ptype"][i], out["on_boundary"][i]) = rec
+    return out

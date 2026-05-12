@@ -73,6 +73,24 @@ def mobius_v(perturb: bool = True) -> SurfaceParams:
     )
 
 
+def fig8(perturb: bool = True) -> SurfaceParams:
+    """Fig-8 torus immersion (roadmap line 653); cy-cy on (0, 2π)².
+
+    Self-intersects along a closed SIC. Used as the canonical SIC fixture
+    for C8-C12 tests.
+    """
+    domain = Domain(
+        type="rect", bounds=(0.0, TWO_PI, 0.0, TWO_PI),
+        u_identify="cy", v_identify="cy",
+    )
+    return SurfaceParams(
+        "(2 + cos(u))*cos(v)",
+        "(2 + cos(u))*sin(v)",
+        "sin(2*u)",
+        "u v", domain, perturb=perturb,
+    )
+
+
 def disk_paraboloid_po(perturb: bool = True) -> SurfaceParams:
     """Paraboloid Z = r² over the unit disk, polar parametrization."""
     domain = Domain(type="disk", bounds=(0.0, 1.0, 0.0, TWO_PI), coord_type="po")
@@ -98,7 +116,7 @@ import pytest
 
 @pytest.mark.parametrize(
     "factory",
-    [helicoid, paraboloid, cylinder_cy, torus, mobius_u, mobius_v,
+    [helicoid, paraboloid, cylinder_cy, torus, mobius_u, mobius_v, fig8,
      disk_paraboloid_po, disk_paraboloid_ca],
 )
 def test_fixture_builds(factory):
