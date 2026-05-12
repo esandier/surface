@@ -13,12 +13,14 @@ import numpy as np
 import pytest
 
 from surface_play.test_fixtures import (
-    helicoid, paraboloid, mobius_u,
-    helicoid_ortho_view, paraboloid_side_view, mobius_ortho_view,
+    helicoid, paraboloid, torus, mobius_u,
+    helicoid_ortho_view, paraboloid_side_view, torus_ortho_view, mobius_ortho_view,
 )
 from surface_play.mesh import build_mesh as _build_mesh
 from surface_play.projection import Projection
-from surface_play.contour import find_contour_points, build_contour_segments
+from surface_play.contour import (
+    find_contour_points, build_contour_segments, build_contour_curves,
+)
 
 RES = 20
 
@@ -205,3 +207,70 @@ def test_build_contour_segments_splits_initialised():
 
     assert np.all(css["split1"] == -1), "split1 must be -1"
     assert np.all(css["split2"] == -1), "split2 must be -1"
+
+
+# ══ O3: build_contour_curves ══════════════════════════════════════════════════
+
+def _pipeline(surface_factory, view, res=RES, perturb=True):
+    """Build mesh → CPs → CSs → CCs in one call."""
+    mesh, proj = _make(surface_factory, view, res=res, perturb=perturb)
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+    ccs = build_contour_curves(css, cps)
+    return mesh, proj, cps, css, ccs
+
+
+# ── test 1: empty input ────────────────────────────────────────────────────────
+
+def test_build_contour_curves_empty():
+    """Empty css → empty CC list."""
+    from surface_play.contour import cp_dtype, cs_dtype
+    cps = np.zeros(0, dtype=cp_dtype)
+    css = np.zeros(0, dtype=cs_dtype)
+    ccs = build_contour_curves(css, cps)
+    assert ccs == []
+
+
+# ── test 2: helicoid rect-no-no gives open CC(s) ──────────────────────────────
+
+def test_build_contour_curves_helicoid_open():
+    """Helicoid on a non-identified rectangle: contour at u=0 is an open curve.
+    Expect ≥1 CC and no closed CC (rect-no-no cannot close the contour).
+    """
+    _, _, _, _, ccs = _pipeline(helicoid, helicoid_ortho_view)
+    assert len(ccs) >= 1, "expected at least one CC"
+    assert all(not cc.is_closed for cc in ccs), (
+        "helicoid rect-no-no should produce only open CCs"
+    )
+
+
+# ── test 3: cylinder_cy gives closed CC(s) ────────────────────────────────────
+
+def test_build_contour_curves_torus_closed():
+    """Torus (u_cy, v_cy) viewed along Z: the two silhouette circles are closed CCs."""
+    _, _, _, _, ccs = _pipeline(torus, torus_ortho_view)
+    assert len(ccs) >= 1, "expected at least one CC"
+    assert any(cc.is_closed for cc in ccs), (
+        "torus should produce at least one closed CC"
+    )
+
+
+# ── test 4: boundary CPs appear only at chain endpoints ───────────────────────
+
+def test_build_contour_curves_boundary_cps_are_endpoints():
+    """A boundary CP (ptype=4) belongs to exactly 1 CS, so it must be a
+    degree-1 node in the CS graph — i.e., an open-chain endpoint, never interior.
+    """
+    _, _, cps, css, ccs = _pipeline(paraboloid, paraboloid_side_view)
+
+    bcp_indices = set(int(i) for i in np.where(cps["ptype"] == 4)[0])
+    if not bcp_indices:
+        pytest.skip("no boundary CPs found for this fixture/view — adjust if needed")
+
+    # Each boundary CP must appear in exactly 1 CS
+    all_ends = np.concatenate([css["p_cp"], css["q_cp"]])
+    for bcp in bcp_indices:
+        count = int(np.sum(all_ends == bcp))
+        assert count == 1, (
+            f"boundary CP {bcp} referenced by {count} CSs (must be 1 → chain endpoint)"
+        )

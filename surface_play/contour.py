@@ -172,3 +172,35 @@ def build_contour_segments(cps: np.ndarray, mesh: Mesh) -> np.ndarray:
     out["split1"] = -1
     out["split2"] = -1
     return out
+
+
+# ── O3 ────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ContourCurve:
+    cs_indices: np.ndarray  # 1D int array; sign-encoded as in make_lines output
+    is_closed: bool
+
+
+def build_contour_curves(css: np.ndarray, cps: np.ndarray) -> list[ContourCurve]:
+    """Chain contour segments into contour curves via make_lines.
+
+    Two CSs share an endpoint iff they share a CP index (p_cp / q_cp).
+    CCs are closed iff make_lines returns a chain whose first and last
+    signed indices have the same absolute value.
+    """
+    if len(css) == 0:
+        return []
+
+    segments = np.column_stack([
+        css["p_cp"].astype(np.intp),
+        css["q_cp"].astype(np.intp),
+    ])
+    chains = make_lines(segments)
+
+    result = []
+    for chain in chains:
+        ch = np.asarray(chain, dtype=np.intp)
+        is_closed = len(ch) > 1 and abs(int(ch[0])) == abs(int(ch[-1]))
+        result.append(ContourCurve(cs_indices=ch, is_closed=is_closed))
+    return result
