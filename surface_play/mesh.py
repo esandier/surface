@@ -76,86 +76,44 @@ def _generate_rect_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np
     return uv, tris
 
 
-SIDE_NONE = 0
-SIDE_U_MIN = 1
-SIDE_U_MAX = 2
-SIDE_V_MIN = 3
-SIDE_V_MAX = 4
-
-
 def _build_edges_faces(
     uv: np.ndarray,
     tris: np.ndarray,
-    vertex_class: np.ndarray,
     SN_per_vertex: np.ndarray,
+    on_u_seam: np.ndarray,
+    on_v_seam: np.ndarray,
     domain: Domain,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Build edges and faces structured arrays. `tris` carries PRE-id vertex labels
-    (from C4). Edges merge across identified sides by the geometric rule of G13 —
-    two pre-id edges merge iff both endpoints lie on a single identified side and
-    their endpoints correspond under that side's pairing. Faces are never merged.
-    Per-element geometric fields are direct pre-id subtractions (no seam lifting).
+    Build edges and faces from compacted `uv`/`tris` (one row per equivalence class
+    in `uv`, canonical indices in `tris`). Edges are keyed by their canonical vertex
+    pair, so seam-paired edges (whose two physical sides relabel to the same canonical
+    pair) merge automatically into a single edge with two adjacent faces.
+
+    Flip detection: an edge has `flip = -1` iff both endpoints lie on a seam of an
+    axis whose identification is `mo` (Möbius reversal); otherwise the edge takes the
+    sign of `dot(SN[p], SN[q])`, which is +1 for smooth surfaces.
     """
-    N = len(uv)
     M = len(tris)
 
-    is_rect = domain.type == "rect"
-    u_identified = is_rect and domain.u_identify in ("cy", "mo")
-    v_identified = is_rect and domain.v_identify in ("cy", "mo")
+    u_is_mo = domain.type == "rect" and domain.u_identify == "mo"
+    v_is_mo = domain.type == "rect" and domain.v_identify == "mo"
 
-    on_u_min = np.zeros(N, dtype=bool)
-    on_u_max = np.zeros(N, dtype=bool)
-    on_v_min = np.zeros(N, dtype=bool)
-    on_v_max = np.zeros(N, dtype=bool)
-    if is_rect:
-        n = _boundary_edge_count(tris) // 4
-        if n > 0:
-            on_v_min[0:n] = True
-            on_u_max[n:2 * n] = True
-            on_v_max[2 * n:3 * n] = True
-            on_u_min[3 * n:4 * n] = True
-            on_u_min[0] = True
-            on_v_min[n] = True
-            on_u_max[2 * n] = True
-            on_v_max[3 * n] = True
-
-    def edge_side(a: int, b: int) -> int:
-        if u_identified:
-            if on_u_min[a] and on_u_min[b]:
-                return SIDE_U_MIN
-            if on_u_max[a] and on_u_max[b]:
-                return SIDE_U_MAX
-        if v_identified:
-            if on_v_min[a] and on_v_min[b]:
-                return SIDE_V_MIN
-            if on_v_max[a] and on_v_max[b]:
-                return SIDE_V_MAX
-        return SIDE_NONE
-
-    records: dict[tuple[int, int], list[tuple[int, int, int, int, int]]] = {}
+    records: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
     face_edge_idx = np.empty((M, 3), dtype=np.int32)
-
-    def key_of(a: int, b: int, side: int) -> tuple[int, int]:
-        if side == SIDE_NONE:
-            return (a, b) if a < b else (b, a)
-        ca = int(vertex_class[a])
-        cb = int(vertex_class[b])
-        return (ca, cb) if ca < cb else (cb, ca)
 
     for f_idx in range(M):
         i = int(tris[f_idx, 0])
         j = int(tris[f_idx, 1])
         k = int(tris[f_idx, 2])
         local_edges = ((i, j, k), (j, k, i), (k, i, j))
-        for local_pos, (a, b, third) in enumerate(local_edges):
-            side = edge_side(a, b)
-            key = key_of(a, b, side)
+        for a, b, third in local_edges:
+            key = (a, b) if a < b else (b, a)
             rec_list = records.get(key)
             if rec_list is None:
                 rec_list = []
                 records[key] = rec_list
-            rec_list.append((f_idx, third, a, b, side))
+            rec_list.append((f_idx, third, a, b))
 
     key_to_idx = {key: idx for idx, key in enumerate(records.keys())}
 
@@ -165,40 +123,22 @@ def _build_edges_faces(
         k = int(tris[f_idx, 2])
         local_edges = ((i, j, k), (j, k, i), (k, i, j))
         for local_pos, (a, b, _third) in enumerate(local_edges):
-            side = edge_side(a, b)
-            key = key_of(a, b, side)
+            key = (a, b) if a < b else (b, a)
             face_edge_idx[f_idx, local_pos] = key_to_idx[key]
 
     n_edges = len(records)
     edges = np.zeros(n_edges, dtype=edge_dtype)
 
-    canonical_sides = (SIDE_U_MIN, SIDE_V_MIN)
-
     for key, recs in records.items():
         e_idx = key_to_idx[key]
         if len(recs) > 2:
             raise ValueError(
-                f"Edge key {key} has {len(recs)} face references (expected 1 or 2). "
+                f"Edge {key} has {len(recs)} face references (expected 1 or 2). "
                 f"Records: {recs}"
             )
 
-        if len(recs) == 2:
-            r0, r1 = recs
-            if r0[4] in canonical_sides:
-                canonical_rec, partner_rec = r0, r1
-            elif r1[4] in canonical_sides:
-                canonical_rec, partner_rec = r1, r0
-            else:
-                canonical_rec, partner_rec = r0, r1
-        else:
-            canonical_rec, partner_rec = recs[0], None
-
-        f_idx, third, a, b, side = canonical_rec
-        if a < b:
-            p_idx, q_idx = a, b
-        else:
-            p_idx, q_idx = b, a
-
+        f_idx, third, a, b = recs[0]
+        p_idx, q_idx = key  # already sorted
         p = uv[p_idx]
         pq = uv[q_idx] - p
         edges[e_idx]["p_idx"] = p_idx
@@ -206,7 +146,7 @@ def _build_edges_faces(
         edges[e_idx]["p"] = p
         edges[e_idx]["pq"] = pq
 
-        if partner_rec is None:
+        if len(recs) == 1:
             edges[e_idx]["f"] = f_idx
             edges[e_idx]["g"] = -1
             d = np.array([-pq[1], pq[0]], dtype=np.float64)
@@ -219,19 +159,14 @@ def _build_edges_faces(
             edges[e_idx]["dir"] = d
         else:
             edges[e_idx]["f"] = f_idx
-            edges[e_idx]["g"] = partner_rec[0]
+            edges[e_idx]["g"] = recs[1][0]
             edges[e_idx]["dir"] = (0.0, 0.0)
 
-        if partner_rec is not None and side != SIDE_NONE:
-            pa, pb = partner_rec[2], partner_rec[3]
-            if int(vertex_class[pa]) == int(vertex_class[p_idx]):
-                p_partner = pa
-            else:
-                p_partner = pb
-            edges[e_idx]["flip"] = (
-                1 if float(np.dot(SN_per_vertex[p_idx], SN_per_vertex[p_partner])) > 0.0
-                else -1
-            )
+        on_u = on_u_seam[p_idx] and on_u_seam[q_idx]
+        on_v = on_v_seam[p_idx] and on_v_seam[q_idx]
+        is_mo_seam = (u_is_mo and on_u) or (v_is_mo and on_v)
+        if is_mo_seam and len(recs) == 2:
+            edges[e_idx]["flip"] = -1
         else:
             edges[e_idx]["flip"] = (
                 1 if float(np.dot(SN_per_vertex[p_idx], SN_per_vertex[q_idx])) > 0.0
@@ -307,27 +242,54 @@ def _apply_identifications(
     uv_jittered: np.ndarray,
     tris: np.ndarray,
     domain: Domain,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute vertex equivalence classes induced by the side-identification rules.
-    `tris` is NOT relabeled — pre-id indices are preserved (G13). Identification of
-    edges and faces is a geometric matter handled in C5, not a label rewrite here.
+    Identify seam-paired vertices, compact `uv` to one row per equivalence class,
+    and rewrite `tris` to those compacted indices. Non-canonical vertex copies are
+    removed outright.
 
-    Returns (uv_unchanged, tris_filtered, vertex_class):
-      - tris_filtered drops any triangle whose three vertices map to fewer than three
-        distinct equivalence classes (geometrically degenerate post-id). Pre-id labels
-        are preserved on surviving rows.
-      - vertex_class[i] is the canonical (smallest pre-id index) representative of i's
-        class. Vertices not on identified sides keep vertex_class[i] == i.
+    (mo, mo) identification is rejected: a smooth immersion cannot be parametrized
+    by a square with both Möbius identifications. RP² and similar non-orientables
+    are handled later via disk-based parametrizations.
+
+    Returns (uv_compacted, tris_canonical, on_u_seam, on_v_seam, corner_idx):
+      - uv_compacted: (K, 2) — one row per equivalence class, in canonical order.
+      - tris_canonical: (M, 3) — original tris rewritten to compacted indices.
+      - on_u_seam: (K,) bool — True if the canonical class includes any vertex on
+        an identified u-side (u_min or u_max). Used by C5 for mo-seam flip detection.
+      - on_v_seam: (K,) bool — analogous for v.
+      - corner_idx: (≤4,) int32 — compacted indices of the original four rect corners,
+        deduplicated via identification. Empty for non-rect.
     """
     N = len(uv_jittered)
 
-    if domain.type != "rect" or (
-        domain.u_identify == "no" and domain.v_identify == "no"
-    ):
-        return uv_jittered, tris.copy(), np.arange(N, dtype=np.int32)
+    if domain.type != "rect":
+        return (
+            uv_jittered.copy(),
+            tris.astype(np.int32, copy=True),
+            np.zeros(N, dtype=bool),
+            np.zeros(N, dtype=bool),
+            np.array([], dtype=np.int32),
+        )
 
     n = _boundary_edge_count(tris) // 4
+    pre_corners = np.array([0, n, 2 * n, 3 * n], dtype=np.int32) if n > 0 else \
+                  np.array([], dtype=np.int32)
+
+    if domain.u_identify == "no" and domain.v_identify == "no":
+        return (
+            uv_jittered.copy(),
+            tris.astype(np.int32, copy=True),
+            np.zeros(N, dtype=bool),
+            np.zeros(N, dtype=bool),
+            pre_corners,
+        )
+
+    if domain.u_identify == "mo" and domain.v_identify == "mo":
+        raise ValueError(
+            "(mo, mo) identification is not supported: a smooth immersion cannot "
+            "be parametrized this way. Use a disk-based parametrization for RP²."
+        )
 
     pairs: list[tuple[int, int]] = []
 
@@ -364,32 +326,64 @@ def _apply_identifications(
                 ra, rb = rb, ra
             parent[rb] = ra
 
-    vertex_class = np.array([find(i) for i in range(N)], dtype=np.int32)
+    canonical_old = np.array([find(i) for i in range(N)], dtype=np.int32)
 
-    classes_per_tri = vertex_class[tris]
-    distinct = (
-        (classes_per_tri[:, 0] != classes_per_tri[:, 1])
-        & (classes_per_tri[:, 1] != classes_per_tri[:, 2])
-        & (classes_per_tri[:, 0] != classes_per_tri[:, 2])
-    )
-    tris_filtered = tris[distinct].astype(np.int32)
+    # Per-vertex IDENTIFIED-seam membership flags in PRE-ID indexing.
+    # Only set for axes whose identification is cy or mo; unidentified-axis
+    # sides are plain boundary, not seams.
+    pre_on_u = np.zeros(N, dtype=bool)
+    pre_on_v = np.zeros(N, dtype=bool)
+    u_seam = domain.u_identify in ("cy", "mo")
+    v_seam = domain.v_identify in ("cy", "mo")
+    if n > 0:
+        if v_seam:
+            pre_on_v[0:n] = True            # v_min interior side
+            pre_on_v[2 * n:3 * n] = True    # v_max interior side
+        if u_seam:
+            pre_on_u[n:2 * n] = True        # u_max interior side
+            pre_on_u[3 * n:4 * n] = True    # u_min interior side
+        # Corners belong to both adjacent sides — set per-axis as identified.
+        for corner in (0, n, 2 * n, 3 * n):
+            if u_seam:
+                pre_on_u[corner] = True
+            if v_seam:
+                pre_on_v[corner] = True
 
-    return uv_jittered, tris_filtered, vertex_class
+    # Map each canonical to a new compacted index.
+    canonical_indices = np.unique(canonical_old)
+    K = len(canonical_indices)
+    old_to_new = np.full(N, -1, dtype=np.int32)
+    old_to_new[canonical_indices] = np.arange(K, dtype=np.int32)
+    # Members of a class inherit the new index of their canonical.
+    new_idx = old_to_new[canonical_old]
+
+    uv_compacted = uv_jittered[canonical_indices]
+    tris_canonical = new_idx[tris].astype(np.int32)
+
+    # Seam membership of each compacted class: True if ANY class member was on
+    # that seam. Computed by OR-reducing per pre-id membership into classes.
+    on_u_seam = np.zeros(K, dtype=bool)
+    on_v_seam = np.zeros(K, dtype=bool)
+    np.logical_or.at(on_u_seam, new_idx, pre_on_u)
+    np.logical_or.at(on_v_seam, new_idx, pre_on_v)
+
+    corner_idx = np.unique(new_idx[pre_corners]).astype(np.int32)
+
+    return uv_compacted, tris_canonical, on_u_seam, on_v_seam, corner_idx
 
 
 @dataclass
 class Mesh:
     domain: Domain
     surface: SurfaceParams
-    uv: np.ndarray           # (N, 2) — pre-id, jittered
-    tris: np.ndarray         # (M, 3) — pre-id labels (G13)
-    vertex_class: np.ndarray # (N,)
+    uv: np.ndarray           # (K, 2) — compacted to one row per equivalence class
+    tris: np.ndarray         # (M, 3) — compacted indices into uv
     edges: np.ndarray        # structured array, edge_dtype
     faces: np.ndarray        # structured array, face_dtype
-    SN: np.ndarray           # (N, 3) — pre-id evaluation
-    xyz: np.ndarray          # (N, 3) — pre-id evaluation
+    SN: np.ndarray           # (K, 3)
+    xyz: np.ndarray          # (K, 3)
     boundary_edge_idx: np.ndarray  # indices into edges where g == -1
-    corner_idx: np.ndarray         # corner vertex-class indices (rect only)
+    corner_idx: np.ndarray         # corner indices in compacted uv (rect only)
 
 
 def build_mesh(
@@ -407,27 +401,22 @@ def build_mesh(
 
     uv_jittered = _jitter(uv_raw, tris_raw, domain, seed=seed) if jitter else uv_raw
 
-    uv, tris, vertex_class = _apply_identifications(uv_jittered, tris_raw, domain)
+    uv, tris, on_u_seam, on_v_seam, corner_idx = _apply_identifications(
+        uv_jittered, tris_raw, domain
+    )
 
     xyz = surface.S(uv[:, 0], uv[:, 1]).T
     SN = surface.SN(uv[:, 0], uv[:, 1]).T
 
-    edges, faces = _build_edges_faces(uv, tris, vertex_class, SN, domain)
+    edges, faces = _build_edges_faces(uv, tris, SN, on_u_seam, on_v_seam, domain)
 
     boundary_edge_idx = np.nonzero(edges["g"] == -1)[0]
-
-    if domain.type == "rect":
-        n = _boundary_edge_count(tris) // 4
-        corner_idx = np.unique(vertex_class[[0, n, 2 * n, 3 * n]])
-    else:
-        corner_idx = np.array([], dtype=np.int32)
 
     return Mesh(
         domain=domain,
         surface=surface,
         uv=uv,
         tris=tris,
-        vertex_class=vertex_class,
         edges=edges,
         faces=faces,
         SN=SN,

@@ -8,6 +8,7 @@ import pytest
 
 from surface_play.domain import Domain
 from surface_play.intersections import (
+    build_sics,
     build_sis_pairs,
     candidate_pairs,
     dp_dtype,
@@ -476,3 +477,39 @@ def test_build_sis_pairs_splits_init():
     assert len(sis) > 0
     assert (sis["split1"] == -1).all()
     assert (sis["split2"] == -1).all()
+
+
+# --- C11: build_sics --------------------------------------------------------
+
+def test_build_sics_empty():
+    """Empty SIS input → empty list."""
+    out = build_sics(np.empty(0, dtype=sis_dtype))
+    assert out == []
+
+
+def test_build_sics_fig8_single_closed():
+    """Fig-8 cy-cy res=20: exactly 1 SIC, closed; covers all SIS exactly once."""
+    surface = fig8()
+    mesh = _build(surface, resolution=20)
+    dps = find_double_points(mesh, surface)
+    sis = build_sis_pairs(dps)
+    sics = build_sics(sis)
+
+    assert len(sics) == 1
+    assert sics[0].is_closed is True
+
+    seen = {abs(int(s)) - 1 for s in sics[0].sis_indices}
+    assert seen == set(range(len(sis)))
+
+
+@pytest.mark.parametrize("res", [30, 40])
+def test_build_sics_fig8_no_fragmentation(res):
+    """Fig-8 cy-cy at higher res: still exactly 1 closed SIC (regression for G16)."""
+    surface = fig8()
+    mesh = _build(surface, resolution=res)
+    dps = find_double_points(mesh, surface)
+    sis = build_sis_pairs(dps)
+    sics = build_sics(sis)
+
+    assert len(sics) == 1, f"res={res}: expected 1 SIC, got {len(sics)}"
+    assert sics[0].is_closed is True

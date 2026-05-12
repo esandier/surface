@@ -480,7 +480,9 @@ def _jitter(uv: np.ndarray, tris: np.ndarray, domain: Domain, *,
 
 ---
 
-### C4 — `mesh.py`: `_apply_identifications` (vertex equivalence only)
+### C4 — `mesh.py`: `_apply_identifications` (vertex compaction)
+
+**Update (2026-05-13, supersedes the G13 design below):** `_apply_identifications` now **compacts** `uv` to one row per equivalence class and **rewrites `tris`** to those canonical indices. Non-canonical vertex copies are removed. `(mo, mo)` identification is rejected (`raise ValueError`) — a smooth immersion cannot be parametrized by a square with both Möbius identifications; RP² is deferred to a disk-based parametrization. Whitney cusps are a separate matter (later). The `vertex_class` array is gone; downstream code uses canonical indices directly. Return signature: `(uv_compacted, tris_canonical, on_u_seam, on_v_seam, corner_idx)`, where `on_u_seam`/`on_v_seam` flag classes touching an *identified* side (used by C5 only for mo-flip detection), and `corner_idx` lists the compacted indices of the original four rect corners. The degenerate-tris filter is dropped (cannot fire under the supported identifications). The G13-era text below is kept for archival reference only.
 
 **Spec:** §"Mesh" lines 162-176, §"Data stored — Identification of edges and faces" lines 111-119, §"User specification" lines 95-99.
 **Files:** extend [surface_play/mesh.py](surface_play/mesh.py); add tests.
@@ -537,6 +539,8 @@ def _apply_identifications(uv_jittered: np.ndarray, tris: np.ndarray, domain: Do
 ---
 
 ### C5 — `mesh.py`: `_build_edges_faces`
+
+**Update (2026-05-13, supersedes the G13 design below):** Since C4 now compacts vertices and relabels `tris` to canonical indices, `_build_edges_faces` is much simpler: edges are keyed by plain `(min(a, b), max(a, b))` of canonical labels. Seam-paired edges merge automatically (their two physical sides relabel to the same canonical pair). The `vertex_class` parameter is gone. Signature: `_build_edges_faces(uv, tris, SN, on_u_seam, on_v_seam, domain)`. Mo-flip detection: an edge has `flip = -1` iff (`u_identify == "mo"` and both endpoints on u-seam) or (`v_identify == "mo"` and both endpoints on v-seam); otherwise `flip = sign(dot(SN[p], SN[q]))` (`+1` for smooth surfaces). Per-element `p`/`pq`/`pr` remain direct uv subtractions. The G13-era text below is kept for archival reference only.
 
 **Spec:** §"Data stored" (lines 103-119), §"Mesh" lines 162-176.
 **Files:** extend [surface_play/mesh.py](surface_play/mesh.py); add tests.
@@ -611,6 +615,8 @@ Notation: a pre-id boundary vertex's *side* is one of `{u_min, u_max, v_min, v_m
 ---
 
 ### C6 — `mesh.py`: `Mesh` dataclass + `build_mesh` orchestrator
+
+**Update (2026-05-13, supersedes design below):** `Mesh.vertex_class` field removed. `uv`/`xyz`/`SN` are now `(K, 3)` with K = number of equivalence classes (compacted). `tris` carries compacted indices. `xyz` and `SN` are evaluated once per canonical class — non-canonical jitter no longer affects the surface geometry. `corner_idx` comes from C4's return value (compacted indices of the four original corners, deduplicated).
 
 **Spec:** consolidates spec §"Mesh" (lines 162-176).
 **Files:** extend [surface_play/mesh.py](surface_play/mesh.py); add integration test.
@@ -799,7 +805,7 @@ Set membership uses the legacy trick (legacy line 347-348): `(a[:, :, None] == b
 
 ---
 
-### C11 — `intersections.py`: `build_sics`
+### C11 — `intersections.py`: `build_sics`  *(DONE 2026-05-13)*
 
 **Spec:** §"Self-intersecting curves" (lines 191-200).
 **Files:** extend [surface_play/intersections.py](surface_play/intersections.py).

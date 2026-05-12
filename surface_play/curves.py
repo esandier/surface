@@ -176,17 +176,18 @@ class BoundaryCurve:
 
 def build_bcs(mesh: Mesh) -> list[BoundaryCurve]:
     """
-    Assemble boundary curves from mesh boundary edges.
-    Vertex indices are mapped through vertex_class so that mo-identified
-    corners are recognized as the same chain node.
+    Assemble boundary curves from mesh boundary edges. Vertex indices on edges
+    are already canonical post-compaction, so chain nodes are taken directly
+    from `p_idx`/`q_idx` without a `vertex_class` indirection.
     """
     if len(mesh.boundary_edge_idx) == 0:
         return []
 
     bnd_edges = mesh.edges[mesh.boundary_edge_idx]
-    p_class = mesh.vertex_class[bnd_edges["p_idx"].astype(np.intp)]
-    q_class = mesh.vertex_class[bnd_edges["q_idx"].astype(np.intp)]
-    segments = np.column_stack([p_class, q_class]).astype(np.intp)
+    segments = np.column_stack([
+        bnd_edges["p_idx"].astype(np.intp),
+        bnd_edges["q_idx"].astype(np.intp),
+    ])
 
     chains = make_lines(segments)
 

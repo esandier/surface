@@ -168,21 +168,12 @@ def test_build_bcs():
     assert len(bcs) == 1
     assert bcs[0].is_closed
 
-    # 5. Rect mo-mo: 0 BCs.
-    domain_momo = Domain(
-        type="rect", bounds=(0.0, TWO_PI, -0.3, 0.3),
-        u_identify="mo", v_identify="mo",
-    )
-    surf_momo = SurfaceParams("cos(u)", "sin(u)", "v", "u v", domain_momo, perturb=False)
-    bcs = build_bcs(build_mesh(domain_momo, surf_momo, resolution=8, seed=42))
-    assert len(bcs) == 0
-
-    # 6. Disk: 1 closed BC.
+    # 5. Disk: 1 closed BC.
     bcs = _bcs(disk_paraboloid_ca(perturb=False), resolution=20)
     assert len(bcs) == 1
     assert bcs[0].is_closed
 
-    # 7. Annulus: 2 closed BCs.
+    # 6. Annulus: 2 closed BCs.
     domain_ann = Domain(type="annulus", bounds=(0.3, 1.0, 0.0, TWO_PI))
     surf_ann = SurfaceParams("x", "y", "x**2 + y**2", "x y", domain_ann, perturb=False)
     bcs = build_bcs(build_mesh(domain_ann, surf_ann, resolution=20, seed=42))

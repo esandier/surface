@@ -1,5 +1,5 @@
 """intersections.py — P5: sweep_segments; C8: candidate_pairs (BVH broad phase);
-C9: find_double_points; C10: build_sis_pairs.
+C9: find_double_points; C10: build_sis_pairs; C11: build_sics.
 
 Shared 2D segment-segment intersection primitive used by the domain sweep
 (self-intersection preimages, CS×SIS, etc.) and the view-plane sweep.
@@ -7,7 +7,9 @@ See Modular_rewrite_roadmap.md §P5; G3 (close-aware) is enforced when
 `domain` is a rectangular domain with identification.
 
 C8: `candidate_pairs(e_bbox, f_bbox)` returns overlapping AABB pairs via a
-stack-based BVH with axis-cycling partitioning, Numba-JIT compiled. See G14.
+stack-based spatial-split BVH with axis-cycling partitioning, Numba-JIT
+compiled. Straddling AABBs recurse into both children (unlike object-split).
+See G14.
 
 C9: `find_double_points(mesh, surface)` returns DP records (edge-vs-face hits
 in 3D), with sibling-pair consumption (G2) and seam-aware vertex-class skip
@@ -16,13 +18,19 @@ in 3D), with sibling-pair consumption (G2) and seam-aware vertex-class skip
 C10: `build_sis_pairs(dps)` returns SIS records (DP-DP edges of the
 self-intersection graph) with vectorized A1/A2 face-sharing test and flip
 detection. See G17 for split sentinel.
+
+C11: `build_sics(sis_pairs)` chains SIS records into SelfIntersectingCurve
+objects by delegating to P4 `make_lines` on the DP-index graph.
 """
 
 import warnings
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 from numba import njit
+
+from surface_play.curves import make_lines
 
 
 intersect_dtype = np.dtype([
@@ -211,69 +219,187 @@ def sweep_segments(
 
 @njit(cache=True)
 def _bvh_kernel(e_bbox, f_bbox):
+    """Spatial-split BVH: AABBs straddling a partition appear in both children.
+
+    Unlike object-split, an item with `min <= mid` AND `max > mid` is recursed
+    into both halves. This avoids the legacy bug where wide AABBs were placed
+    in one child only and missed overlap pairs in the other (see
+    `bvh_object_split_limitation.md`).
+
+    Guards: bail to brute-force in-node if (1) the split would inflate total
+    work (no-progress: parent items mostly straddle), or (2) the workspace /
+    output buffer runs out. Output is raw pairs (with duplicates from
+    spatial overlap of leaves); `candidate_pairs` dedupes downstream.
+    """
     n_e = e_bbox.shape[0]
     n_f = f_bbox.shape[0]
 
-    max_res = n_e * 15
+    max_depth = 15
+    leaf_threshold = 5000
+
+    # Workspace: indices into original arrays, growing append-only as items
+    # are duplicated into children. 32× the input is generous for typical
+    # geometries; overflow falls back to brute force in-node (still correct).
+    e_capacity = n_e * 32 + 64
+    f_capacity = n_f * 32 + 64
+    e_workspace = np.empty(e_capacity, dtype=np.int32)
+    f_workspace = np.empty(f_capacity, dtype=np.int32)
+
+    for i in range(n_e):
+        e_workspace[i] = i
+    for i in range(n_f):
+        f_workspace[i] = i
+    e_next = n_e
+    f_next = n_f
+
+    stack_capacity = 4096
+    stack = np.empty((stack_capacity, 5), dtype=np.int32)
+    stack[0, 0] = 0
+    stack[0, 1] = n_e
+    stack[0, 2] = 0
+    stack[0, 3] = n_f
+    stack[0, 4] = 0
+    stack_ptr = 1
+
+    # Generous output buffer: spatial split can repeat true pairs across
+    # straddling leaves; dedup happens in `candidate_pairs`.
+    max_res = (n_e + n_f) * 50 + 4096
     out_e = np.empty(max_res, dtype=np.int32)
     out_f = np.empty(max_res, dtype=np.int32)
     count = 0
 
-    e_indices = np.arange(n_e, dtype=np.int32)
-    f_indices = np.arange(n_f, dtype=np.int32)
-
-    stack = np.empty((64, 5), dtype=np.int32)
-    stack[0] = [0, n_e, 0, n_f, 0]
-    stack_ptr = 1
-
     while stack_ptr > 0:
         stack_ptr -= 1
-        e_start, e_end, f_start, f_end, depth = stack[stack_ptr]
-
+        e_start = stack[stack_ptr, 0]
+        e_end = stack[stack_ptr, 1]
+        f_start = stack[stack_ptr, 2]
+        f_end = stack[stack_ptr, 3]
+        depth = stack[stack_ptr, 4]
         n_curr_e = e_end - e_start
         n_curr_f = f_end - f_start
 
-        if n_curr_e * n_curr_f < 5000 or depth > 15:
+        # Leaf or fallback: brute-force this node.
+        if n_curr_e * n_curr_f < leaf_threshold or depth >= max_depth:
             for i in range(e_start, e_end):
-                ie = e_indices[i]
-                eb = e_bbox[ie]
+                ie = e_workspace[i]
+                eb0 = e_bbox[ie, 0]; eb1 = e_bbox[ie, 1]; eb2 = e_bbox[ie, 2]
+                eb3 = e_bbox[ie, 3]; eb4 = e_bbox[ie, 4]; eb5 = e_bbox[ie, 5]
                 for j in range(f_start, f_end):
-                    iface = f_indices[j]
-                    fb = f_bbox[iface]
-                    if (eb[0] <= fb[3] and eb[3] >= fb[0] and
-                        eb[1] <= fb[4] and eb[4] >= fb[1] and
-                        eb[2] <= fb[5] and eb[5] >= fb[2]):
+                    iface = f_workspace[j]
+                    if (eb0 <= f_bbox[iface, 3] and eb3 >= f_bbox[iface, 0] and
+                        eb1 <= f_bbox[iface, 4] and eb4 >= f_bbox[iface, 1] and
+                        eb2 <= f_bbox[iface, 5] and eb5 >= f_bbox[iface, 2]):
                         if count < max_res:
-                            out_e[count], out_f[count] = ie, iface
+                            out_e[count] = ie
+                            out_f[count] = iface
                             count += 1
             continue
 
         axis = depth % 3
+        axis_max = axis + 3
 
-        f_coords = f_bbox[f_indices[f_start:f_end], axis]
-        mid = (np.min(f_coords) + np.max(f_coords)) * 0.5
+        # Midpoint over f's full extent on this axis.
+        f_min_a = f_bbox[f_workspace[f_start], axis]
+        f_max_a = f_bbox[f_workspace[f_start], axis_max]
+        for j in range(f_start + 1, f_end):
+            idx = f_workspace[j]
+            v_min = f_bbox[idx, axis]
+            v_max = f_bbox[idx, axis_max]
+            if v_min < f_min_a: f_min_a = v_min
+            if v_max > f_max_a: f_max_a = v_max
+        mid = (f_min_a + f_max_a) * 0.5
 
-        f_split = f_start
-        for i in range(f_start, f_end):
-            if f_bbox[f_indices[i], axis] <= mid:
-                tmp = f_indices[f_split]
-                f_indices[f_split] = f_indices[i]
-                f_indices[i] = tmp
-                f_split += 1
+        # Need worst-case 2× current size on each side (every item straddles).
+        # If workspace can't accommodate, fall back to brute-force this node.
+        if (e_next + 2 * n_curr_e > e_capacity or
+            f_next + 2 * n_curr_f > f_capacity or
+            stack_ptr + 2 > stack_capacity):
+            for i in range(e_start, e_end):
+                ie = e_workspace[i]
+                eb0 = e_bbox[ie, 0]; eb1 = e_bbox[ie, 1]; eb2 = e_bbox[ie, 2]
+                eb3 = e_bbox[ie, 3]; eb4 = e_bbox[ie, 4]; eb5 = e_bbox[ie, 5]
+                for j in range(f_start, f_end):
+                    iface = f_workspace[j]
+                    if (eb0 <= f_bbox[iface, 3] and eb3 >= f_bbox[iface, 0] and
+                        eb1 <= f_bbox[iface, 4] and eb4 >= f_bbox[iface, 1] and
+                        eb2 <= f_bbox[iface, 5] and eb5 >= f_bbox[iface, 2]):
+                        if count < max_res:
+                            out_e[count] = ie
+                            out_f[count] = iface
+                            count += 1
+            continue
 
-        e_split = e_start
+        e_left_start = e_next
         for i in range(e_start, e_end):
-            if e_bbox[e_indices[i], axis] <= mid:
-                tmp = e_indices[e_split]
-                e_indices[e_split] = e_indices[i]
-                e_indices[i] = tmp
-                e_split += 1
+            idx = e_workspace[i]
+            if e_bbox[idx, axis] <= mid:
+                e_workspace[e_next] = idx
+                e_next += 1
+        e_left_end = e_next
+        e_right_start = e_next
+        for i in range(e_start, e_end):
+            idx = e_workspace[i]
+            if e_bbox[idx, axis_max] > mid:
+                e_workspace[e_next] = idx
+                e_next += 1
+        e_right_end = e_next
 
-        if e_split > e_start and f_split > f_start:
-            stack[stack_ptr] = [e_start, e_split, f_start, f_split, depth + 1]
+        f_left_start = f_next
+        for i in range(f_start, f_end):
+            idx = f_workspace[i]
+            if f_bbox[idx, axis] <= mid:
+                f_workspace[f_next] = idx
+                f_next += 1
+        f_left_end = f_next
+        f_right_start = f_next
+        for i in range(f_start, f_end):
+            idx = f_workspace[i]
+            if f_bbox[idx, axis_max] > mid:
+                f_workspace[f_next] = idx
+                f_next += 1
+        f_right_end = f_next
+
+        e_left_n = e_left_end - e_left_start
+        e_right_n = e_right_end - e_right_start
+        f_left_n = f_left_end - f_left_start
+        f_right_n = f_right_end - f_right_start
+
+        # No-progress guard: if total child work doesn't reduce parent work
+        # by ≥25%, bail. Prevents pathological recursion when items straddle.
+        parent_work = n_curr_e * n_curr_f
+        child_work = e_left_n * f_left_n + e_right_n * f_right_n
+        if child_work * 4 >= parent_work * 3:
+            # Rewind appended workspace; brute-force this node.
+            e_next = e_left_start
+            f_next = f_left_start
+            for i in range(e_start, e_end):
+                ie = e_workspace[i]
+                eb0 = e_bbox[ie, 0]; eb1 = e_bbox[ie, 1]; eb2 = e_bbox[ie, 2]
+                eb3 = e_bbox[ie, 3]; eb4 = e_bbox[ie, 4]; eb5 = e_bbox[ie, 5]
+                for j in range(f_start, f_end):
+                    iface = f_workspace[j]
+                    if (eb0 <= f_bbox[iface, 3] and eb3 >= f_bbox[iface, 0] and
+                        eb1 <= f_bbox[iface, 4] and eb4 >= f_bbox[iface, 1] and
+                        eb2 <= f_bbox[iface, 5] and eb5 >= f_bbox[iface, 2]):
+                        if count < max_res:
+                            out_e[count] = ie
+                            out_f[count] = iface
+                            count += 1
+            continue
+
+        if e_left_n > 0 and f_left_n > 0:
+            stack[stack_ptr, 0] = e_left_start
+            stack[stack_ptr, 1] = e_left_end
+            stack[stack_ptr, 2] = f_left_start
+            stack[stack_ptr, 3] = f_left_end
+            stack[stack_ptr, 4] = depth + 1
             stack_ptr += 1
-        if e_split < e_end and f_split < f_end:
-            stack[stack_ptr] = [e_split, e_end, f_split, f_end, depth + 1]
+        if e_right_n > 0 and f_right_n > 0:
+            stack[stack_ptr, 0] = e_right_start
+            stack[stack_ptr, 1] = e_right_end
+            stack[stack_ptr, 2] = f_right_start
+            stack[stack_ptr, 3] = f_right_end
+            stack[stack_ptr, 4] = depth + 1
             stack_ptr += 1
 
     return out_e[:count], out_f[:count]
@@ -367,7 +493,6 @@ def find_double_points(mesh, surface, *, delta: float = 1e-6) -> np.ndarray:
     faces = mesh.faces
     tris = mesh.tris
     xyz = mesh.xyz
-    vertex_class = mesh.vertex_class
 
     n_e = len(edges)
     n_f = len(faces)
@@ -391,10 +516,11 @@ def find_double_points(mesh, surface, *, delta: float = 1e-6) -> np.ndarray:
     if len(ei) == 0:
         return np.empty(0, dtype=dp_dtype)
 
-    # 3. Vertex-class skip (G13).
-    cls_ep = vertex_class[ep[ei]]                      # (K,)
-    cls_eq = vertex_class[eq[ei]]
-    cls_fv = vertex_class[tris[fi]]                    # (K, 3)
+    # 3. Skip pairs sharing a vertex. Vertex labels are already canonical (compacted
+    # mesh), so plain label equality is sufficient — no vertex_class lookup needed.
+    cls_ep = ep[ei]                                    # (K,)
+    cls_eq = eq[ei]
+    cls_fv = tris[fi]                                  # (K, 3)
     shared = (
         (cls_ep[:, None] == cls_fv).any(axis=1)
         | (cls_eq[:, None] == cls_fv).any(axis=1)
@@ -435,11 +561,11 @@ def find_double_points(mesh, surface, *, delta: float = 1e-6) -> np.ndarray:
 
     def _vertex_opposite_to_edge_in_face(f_idx: int, e_idx: int) -> int:
         tri = tris[f_idx]
-        pe = int(vertex_class[int(ep[e_idx])])
-        qe = int(vertex_class[int(eq[e_idx])])
+        pe = int(ep[e_idx])
+        qe = int(eq[e_idx])
         for j in range(3):
-            cls_v = int(vertex_class[int(tri[j])])
-            if cls_v != pe and cls_v != qe:
+            v = int(tri[j])
+            if v != pe and v != qe:
                 return j
         return -1
 
@@ -588,3 +714,33 @@ def build_sis_pairs(dps: np.ndarray) -> np.ndarray:
     out["split1"] = -1
     out["split2"] = -1
     return out
+
+
+@dataclass
+class SelfIntersectingCurve:
+    sis_indices: np.ndarray   # 1D int array; signs encode reversal as in make_lines output
+    is_closed: bool
+
+
+def build_sics(sis_pairs: np.ndarray) -> list[SelfIntersectingCurve]:
+    """Chain SIS records into SICs via P4 `make_lines` on the DP-index graph (C11).
+
+    Nodes = DP indices, edges = SIS records. Each chain returned by `make_lines`
+    is a 1D array of signed 1-indexed SIS ids: `+k` means SIS k-1 traversed
+    `p_dp → q_dp`, `-k` means the reverse. Closed chains duplicate the first
+    token at the end (`chain[0] == chain[-1]`).
+    """
+    if len(sis_pairs) == 0:
+        return []
+
+    segments = np.column_stack([sis_pairs["p_dp"], sis_pairs["q_dp"]]).astype(np.intp)
+    chains = make_lines(segments)
+
+    result = []
+    for chain in chains:
+        is_closed = bool(chain[0] == chain[-1])
+        result.append(SelfIntersectingCurve(
+            sis_indices=np.asarray(chain, dtype=np.intp),
+            is_closed=is_closed,
+        ))
+    return result
