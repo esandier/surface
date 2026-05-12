@@ -131,3 +131,44 @@ def find_contour_points(
     result["d"]     = d_arr
     result["ptype"] = ptype_arr
     return result
+
+
+# ── O2 ────────────────────────────────────────────────────────────────────────
+
+def build_contour_segments(cps: np.ndarray, mesh: Mesh) -> np.ndarray:
+    """Pair contour points within each face to form contour segments (CS).
+
+    For each face: collect CPs whose edge belongs to that face; if exactly 2,
+    emit one CS.  By the sign-change parity argument a face always has 0 or 2
+    such CPs, never 1 or 3.  Splits initialised to -1 (G17).
+    """
+    if len(cps) == 0:
+        return np.zeros(0, dtype=cs_dtype)
+
+    # edge index → CP index; -1 where no CP (each edge carries at most one CP)
+    edge_to_cp = np.full(len(mesh.edges), -1, dtype=np.int32)
+    edge_to_cp[cps["e"]] = np.arange(len(cps), dtype=np.int32)
+
+    # For every face look up its 3 edges' CP indices: shape (M, 3)
+    face_edges  = mesh.faces["edges"]          # (M, 3) — edge indices per face
+    cp_in_face  = edge_to_cp[face_edges]       # (M, 3) — CP index or -1
+
+    # Faces with exactly 2 CPs
+    cp_count = (cp_in_face >= 0).sum(axis=1)  # (M,)
+    paired   = np.nonzero(cp_count == 2)[0]   # face indices
+
+    if len(paired) == 0:
+        return np.zeros(0, dtype=cs_dtype)
+
+    # Extract the two valid CP indices per paired face.
+    # np.sort puts the -1 entry first (smallest), so columns 1 and 2 are valid.
+    cp_vals    = cp_in_face[paired]              # (n, 3)
+    sorted_cp  = np.sort(cp_vals, axis=1)        # (n, 3): [-1, p, q]
+
+    out = np.zeros(len(paired), dtype=cs_dtype)
+    out["p_cp"]   = sorted_cp[:, 1]
+    out["q_cp"]   = sorted_cp[:, 2]
+    out["face"]   = paired
+    out["split1"] = -1
+    out["split2"] = -1
+    return out

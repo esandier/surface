@@ -18,7 +18,7 @@ from surface_play.test_fixtures import (
 )
 from surface_play.mesh import build_mesh as _build_mesh
 from surface_play.projection import Projection
-from surface_play.contour import find_contour_points
+from surface_play.contour import find_contour_points, build_contour_segments
 
 RES = 20
 
@@ -146,3 +146,62 @@ def test_find_contour_points_mobius_no_seam_duplication():
     assert len(edge_indices) == len(np.unique(edge_indices)), (
         "duplicate edge indices detected — seam edges counted twice"
     )
+
+
+# ══ O2: build_contour_segments ════════════════════════════════════════════════
+
+# ── test 1: helicoid CS count > 0 and matches pairing ─────────────────────────
+
+def test_build_contour_segments_helicoid_count():
+    """Helicoid ortho-Z: every paired face produces one CS; count > 0."""
+    mesh, proj = _make(helicoid, helicoid_ortho_view)
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+
+    assert len(css) >= 1, "expected at least one contour segment"
+
+
+# ── test 2: each CS's endpoints lie on different edges of the same face ────────
+
+def test_build_contour_segments_endpoints_on_same_face():
+    """Each CS's p_cp and q_cp must be on different edges of cs.face."""
+    mesh, proj = _make(paraboloid, paraboloid_side_view)
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+
+    assert len(css) >= 1
+    for cs in css:
+        face = mesh.faces[cs["face"]]
+        face_edge_set = set(face["edges"].tolist())
+        ep = int(cps[cs["p_cp"]]["e"])
+        eq = int(cps[cs["q_cp"]]["e"])
+        assert ep in face_edge_set, f"p_cp edge {ep} not in face {cs['face']} edges"
+        assert eq in face_edge_set, f"q_cp edge {eq} not in face {cs['face']} edges"
+        assert ep != eq, "both endpoints on the same edge"
+
+
+# ── test 3: CPs referenced by CSs are strictly interior (s in (0, 1)) ─────────
+
+def test_build_contour_segments_no_vertex_crossing():
+    """No CS passes through a vertex: s of every referenced CP must be in (0, 1)."""
+    mesh, proj = _make(helicoid, helicoid_ortho_view)
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+
+    cp_indices_used = np.unique(np.concatenate([css["p_cp"], css["q_cp"]]))
+    s_vals = cps[cp_indices_used]["s"]
+    assert np.all(s_vals > 0.0) and np.all(s_vals < 1.0), (
+        "CP used in a CS has s outside (0, 1)"
+    )
+
+
+# ── test 4: splits initialised to -1 (G17) ────────────────────────────────────
+
+def test_build_contour_segments_splits_initialised():
+    """split1 and split2 must both be -1 on every freshly built CS (G17)."""
+    mesh, proj = _make(paraboloid, paraboloid_side_view)
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+
+    assert np.all(css["split1"] == -1), "split1 must be -1"
+    assert np.all(css["split2"] == -1), "split2 must be -1"
