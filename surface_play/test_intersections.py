@@ -13,12 +13,16 @@ from surface_play.intersections import (
     candidate_pairs,
     dp_dtype,
     find_double_points,
+    find_triple_points,
     intersect_dtype,
     sis_dtype,
     sweep_segments,
+    tp_dtype,
 )
 from surface_play.mesh import build_mesh
-from surface_play.test_fixtures import fig8, helicoid, mobius_u
+from surface_play.test_fixtures import (
+    fig8, helicoid, mobius_u, paraboloid, torus,
+)
 
 
 TWO_PI = 2 * math.pi
@@ -513,3 +517,142 @@ def test_build_sics_fig8_no_fragmentation(res):
 
     assert len(sics) == 1, f"res={res}: expected 1 SIC, got {len(sics)}"
     assert sics[0].is_closed is True
+
+
+# --- C12: find_triple_points ------------------------------------------------
+
+def _synthetic_three_sis_fixture():
+    """Three SISs whose preimages form a TP interlock on three faces (10, 20, 30).
+
+    Faces are arbitrary distinct integer labels; the algorithm only inspects
+    A1/A2 sets, not real face geometry. Three diagonal-cross pairs are placed
+    on three disjoint sub-rectangles of (0, 1)² so each pair crosses once
+    cleanly (strict 0 < t < 1).
+    """
+    from types import SimpleNamespace
+
+    from surface_play.domain import Domain
+
+    dps = np.zeros(6, dtype=dp_dtype)
+    # Faces: F1=10, F2=20, F3=30.
+    dps["A1"] = np.array(
+        [(10, -1), (10, -1), (10, -1), (10, -1), (20, -1), (20, -1)],
+        dtype=np.int32,
+    )
+    dps["A2"] = np.array(
+        [(20, -1), (20, -1), (30, -1), (30, -1), (30, -1), (30, -1)],
+        dtype=np.int32,
+    )
+    # SIS_12 (DP 0-1): preimage on F1 crosses SIS_13's F1-preimage at (0.1, 0.1).
+    # SIS_13 (DP 2-3): preimage on F1 at (0.1, 0.1); on F3 at (0.1, 0.5).
+    # SIS_23 (DP 4-5): preimage on F2 at (0.5, 0.1); on F3 at (0.1, 0.5).
+    dps["uv1"] = np.array([
+        [0.0, 0.0], [0.2, 0.2],     # SIS_12 on F1: diag /
+        [0.0, 0.2], [0.2, 0.0],     # SIS_13 on F1: diag \
+        [0.4, 0.2], [0.6, 0.0],     # SIS_23 on F2: diag \
+    ])
+    dps["uv2"] = np.array([
+        [0.4, 0.0], [0.6, 0.2],     # SIS_12 on F2: diag /
+        [0.0, 0.4], [0.2, 0.6],     # SIS_13 on F3: diag /
+        [0.0, 0.6], [0.2, 0.4],     # SIS_23 on F3: diag \
+    ])
+    dps["on_boundary"] = False
+
+    sis = np.zeros(3, dtype=sis_dtype)
+    sis["p_dp"] = [0, 2, 4]
+    sis["q_dp"] = [1, 3, 5]
+    sis["flip"] = [1, 1, 1]
+    sis["split1"] = -1
+    sis["split2"] = -1
+
+    class _FakeSurface:
+        def S(self, u, v):
+            # All preimages map to a single 3D point → 3D verification passes.
+            return np.zeros(3)
+
+    mesh = SimpleNamespace(domain=Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0)))
+    return sis, dps, mesh, _FakeSurface()
+
+
+def test_find_triple_points_empty():
+    """Empty `sis_pairs` (and `dps`) → empty TP array with correct dtype."""
+    from types import SimpleNamespace
+
+    from surface_play.domain import Domain
+
+    mesh = SimpleNamespace(domain=Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0)))
+
+    class _S:
+        def S(self, u, v):
+            return np.zeros(3)
+
+    tps = find_triple_points(
+        np.empty(0, dtype=sis_dtype),
+        np.empty(0, dtype=dp_dtype),
+        mesh, _S(),
+    )
+    assert tps.dtype == tp_dtype
+    assert len(tps) == 0
+
+
+def test_find_triple_points_fig8_zero():
+    """Fig-8 cy-cy res=20: single closed SIC, no self-tangency → 0 TPs."""
+    surface = fig8()
+    mesh = _build(surface, resolution=20)
+    dps = find_double_points(mesh, surface)
+    sis = build_sis_pairs(dps)
+    tps = find_triple_points(sis, dps, mesh, surface)
+    assert tps.dtype == tp_dtype
+    assert len(tps) == 0
+
+
+def test_find_triple_points_synthetic():
+    """Hand-crafted 3-SIS interlock → exactly 1 TP, sis_indices = {0, 1, 2}."""
+    sis, dps, mesh, surface = _synthetic_three_sis_fixture()
+    tps = find_triple_points(sis, dps, mesh, surface)
+
+    assert tps.dtype == tp_dtype
+    assert len(tps) == 1
+    assert sorted(tps[0]["sis_indices"].tolist()) == [0, 1, 2]
+    assert sorted(tps[0]["faces"].tolist()) == [10, 20, 30]
+    # P_i positioned at face-cross midpoints (see fixture).
+    expected_uv = {(0.1, 0.1), (0.5, 0.1), (0.1, 0.5)}
+    got_uv = {(round(p[0], 6), round(p[1], 6)) for p in tps[0]["uv"]}
+    assert got_uv == expected_uv
+
+
+@pytest.mark.xfail(
+    reason="No 'immersion with triple point' surface in the DB fixture yet",
+    strict=False,
+)
+def test_find_triple_points_db_immersion_with_tp():
+    """TODO: add an immersion-with-TP surface to test_fixtures + assert ≥1 TP."""
+    raise AssertionError("DB fixture for an immersion with TPs not yet added")
+
+
+@pytest.mark.parametrize("factory", [helicoid, torus, paraboloid, mobius_u])
+def test_find_triple_points_no_spurious(factory):
+    """Embedded fixtures: no DPs → no SISs → no TPs."""
+    surface = factory()
+    mesh = _build(surface, resolution=15)
+    dps = find_double_points(mesh, surface)
+    sis = build_sis_pairs(dps)
+    tps = find_triple_points(sis, dps, mesh, surface)
+    assert len(tps) == 0
+
+
+def test_find_triple_points_3d_consistency():
+    """Every emitted TP has all three pairwise ‖S(P_i) − S(P_j)‖ < xyz_tol."""
+    sis, dps, mesh, surface = _synthetic_three_sis_fixture()
+    xyz_tol = 1e-3
+    tps = find_triple_points(sis, dps, mesh, surface, xyz_tol=xyz_tol)
+    assert len(tps) > 0
+
+    for tp in tps:
+        P1, P2, P3 = tp["uv"][0], tp["uv"][1], tp["uv"][2]
+        S1 = np.asarray(surface.S(float(P1[0]), float(P1[1]))).reshape(3)
+        S2 = np.asarray(surface.S(float(P2[0]), float(P2[1]))).reshape(3)
+        S3 = np.asarray(surface.S(float(P3[0]), float(P3[1]))).reshape(3)
+        assert np.linalg.norm(S1 - S2) < xyz_tol
+        assert np.linalg.norm(S1 - S3) < xyz_tol
+        assert np.linalg.norm(S2 - S3) < xyz_tol

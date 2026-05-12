@@ -1,5 +1,6 @@
 """intersections.py — P5: sweep_segments; C8: candidate_pairs (BVH broad phase);
-C9: find_double_points; C10: build_sis_pairs; C11: build_sics.
+C9: find_double_points; C10: build_sis_pairs; C11: build_sics; C12:
+find_triple_points.
 
 Shared 2D segment-segment intersection primitive used by the domain sweep
 (self-intersection preimages, CS×SIS, etc.) and the view-plane sweep.
@@ -21,6 +22,12 @@ detection. See G17 for split sentinel.
 
 C11: `build_sics(sis_pairs)` chains SIS records into SelfIntersectingCurve
 objects by delegating to P4 `make_lines` on the DP-index graph.
+
+C12: `find_triple_points(sis_pairs, dps, mesh, surface)` reconstructs the
+two preimage segments of every SIS and sweeps them in self-mode (G3
+close-aware). Three preimages meeting at one 3D point produce three domain
+hits whose `f_other` values pair up as (F2,F3), (F1,F3), (F1,F2); 3D
+verification (`‖S(P_i)-S(P_j)‖ < xyz_tol`) discards spurious interlocks.
 """
 
 import warnings
@@ -63,6 +70,23 @@ sis_dtype = np.dtype([
     ("flip",   "i1"),
     ("split1", "i4"),
     ("split2", "i4"),
+])
+
+
+tp_dtype = np.dtype([
+    ("xyz",         "f8", 3),
+    ("sis_indices", "i4", 3),
+    ("uv",          "f8", (3, 2)),
+    ("faces",       "i4", 3),
+])
+
+
+_tp_seg_dtype = np.dtype([
+    ("uv0",     "f8", 2),
+    ("uv1",     "f8", 2),
+    ("f_here",  "i4"),
+    ("f_other", "i4"),
+    ("sis_idx", "i4"),
 ])
 
 
@@ -720,6 +744,191 @@ def build_sis_pairs(dps: np.ndarray) -> np.ndarray:
 class SelfIntersectingCurve:
     sis_indices: np.ndarray   # 1D int array; signs encode reversal as in make_lines output
     is_closed: bool
+
+
+def _first_shared_face(a: np.ndarray, b: np.ndarray) -> int:
+    """Lowest-index face shared by length-2 A-sets `a` and `b` (-1 if none).
+
+    `-1` entries are sentinel padding (see C9 dp_dtype) and ignored.
+    """
+    a_set = {int(x) for x in a if int(x) >= 0}
+    b_set = {int(y) for y in b if int(y) >= 0}
+    common = a_set & b_set
+    return min(common) if common else -1
+
+
+def find_triple_points(
+    sis_pairs: np.ndarray,
+    dps: np.ndarray,
+    mesh,
+    surface,
+    *,
+    xyz_tol: float = 1e-3,
+) -> np.ndarray:
+    """Detect triple points: three SIS preimages meeting at one 3D point (C12).
+
+    Pipeline: build 2 preimage segments per SIS (using `flip`, `uv1/uv2`,
+    `A1/A2`) → G3 close-aware self-sweep → keep hits where both preimages
+    share a face (`f_here[a] == f_here[b]`) → group by `(f_other, f_other)`
+    pair-key, look for triples (F1, F2, F3) where all three sorted pair-keys
+    (F2,F3), (F1,F3), (F1,F2) are present → 3D verify via `surface.S`.
+
+    Returns a structured array of `tp_dtype` (empty if no TPs).
+    """
+    K = len(sis_pairs)
+    if K < 3:
+        return np.empty(0, dtype=tp_dtype)
+
+    # 1. Build per-SIS preimage segments (two per SIS).
+    segs = np.empty(2 * K, dtype=_tp_seg_dtype)
+    n_seg = 0
+    for k in range(K):
+        p = int(sis_pairs["p_dp"][k])
+        q = int(sis_pairs["q_dp"][k])
+        f = int(sis_pairs["flip"][k])
+
+        A_p_uv = dps["uv1"][p]
+        A_q_uv = dps["uv1"][q] if f == 1 else dps["uv2"][q]
+        B_p_uv = dps["uv2"][p]
+        B_q_uv = dps["uv2"][q] if f == 1 else dps["uv1"][q]
+
+        A_p_set = dps["A1"][p]
+        A_q_set = dps["A1"][q] if f == 1 else dps["A2"][q]
+        B_p_set = dps["A2"][p]
+        B_q_set = dps["A2"][q] if f == 1 else dps["A1"][q]
+
+        f_here_A = _first_shared_face(A_p_set, A_q_set)
+        f_here_B = _first_shared_face(B_p_set, B_q_set)
+        if f_here_A < 0 or f_here_B < 0:
+            continue
+
+        segs[n_seg] = (A_p_uv, A_q_uv, f_here_A, f_here_B, k)
+        segs[n_seg + 1] = (B_p_uv, B_q_uv, f_here_B, f_here_A, k)
+        n_seg += 2
+
+    segs = segs[:n_seg]
+    if n_seg < 3:
+        return np.empty(0, dtype=tp_dtype)
+
+    # 2. Close-aware self-sweep on all preimage segments.
+    domain = getattr(mesh, "domain", None)
+    hits = sweep_segments(
+        segs["uv0"], segs["uv1"], None, None, domain, self_sweep=True
+    )
+    if len(hits) == 0:
+        return np.empty(0, dtype=tp_dtype)
+
+    # 3. Keep hits where both preimages share a face.
+    same_face = segs["f_here"][hits["a"]] == segs["f_here"][hits["b"]]
+    hits = hits[same_face]
+    if len(hits) == 0:
+        return np.empty(0, dtype=tp_dtype)
+
+    fo_a = segs["f_other"][hits["a"]]
+    fo_b = segs["f_other"][hits["b"]]
+    pair_lo = np.minimum(fo_a, fo_b).astype(np.int64)
+    pair_hi = np.maximum(fo_a, fo_b).astype(np.int64)
+
+    pair_map: dict[tuple[int, int], list[int]] = {}
+    face_partners: dict[int, set[int]] = {}
+    for i in range(len(hits)):
+        key = (int(pair_lo[i]), int(pair_hi[i]))
+        pair_map.setdefault(key, []).append(i)
+        face_partners.setdefault(key[0], set()).add(key[1])
+        face_partners.setdefault(key[1], set()).add(key[0])
+
+    # 4. Iterate ordered triples (F1, F2, F3) and verify in 3D.
+    out: list[np.ndarray] = []
+    seen: set[tuple[int, int, int]] = set()
+    for F1 in sorted(face_partners.keys()):
+        plist = sorted(face_partners[F1])
+        for ia in range(len(plist)):
+            F2 = plist[ia]
+            if F2 <= F1:
+                continue
+            for ib in range(ia + 1, len(plist)):
+                F3 = plist[ib]
+                if F3 <= F2:
+                    continue
+                if (F2, F3) not in pair_map:
+                    continue
+                triple = (F1, F2, F3)
+                if triple in seen:
+                    continue
+                seen.add(triple)
+
+                cands_F1 = pair_map[(F2, F3)]   # hit on F1
+                cands_F2 = pair_map[(F1, F3)]   # hit on F2
+                cands_F3 = pair_map[(F1, F2)]   # hit on F3
+
+                rec = _try_emit_tp(
+                    cands_F1, cands_F2, cands_F3,
+                    F1, F2, F3, hits, segs, surface, xyz_tol,
+                )
+                if rec is not None:
+                    out.append(rec)
+
+    if not out:
+        return np.empty(0, dtype=tp_dtype)
+
+    result = np.empty(len(out), dtype=tp_dtype)
+    for i, r in enumerate(out):
+        result[i] = r
+    # Stable order: by sorted sis_indices tuple, then by faces.
+    order = np.lexsort((
+        result["faces"][:, 2], result["faces"][:, 1], result["faces"][:, 0],
+        result["sis_indices"][:, 2],
+        result["sis_indices"][:, 1],
+        result["sis_indices"][:, 0],
+    ))
+    return result[order]
+
+
+def _try_emit_tp(
+    cands_F1, cands_F2, cands_F3,
+    F1, F2, F3, hits, segs, surface, xyz_tol,
+):
+    """Iterate hit combinations for face triple (F1<F2<F3); emit first that
+    passes 3D verification. Returns a 0-d tp_dtype record or None.
+    """
+    for h1 in cands_F1:
+        for h2 in cands_F2:
+            for h3 in cands_F3:
+                P1 = hits["uv"][h1]
+                P2 = hits["uv"][h2]
+                P3 = hits["uv"][h3]
+                S1 = np.asarray(surface.S(float(P1[0]), float(P1[1])),
+                                dtype=float).reshape(3)
+                S2 = np.asarray(surface.S(float(P2[0]), float(P2[1])),
+                                dtype=float).reshape(3)
+                S3 = np.asarray(surface.S(float(P3[0]), float(P3[1])),
+                                dtype=float).reshape(3)
+                d12 = float(np.linalg.norm(S1 - S2))
+                d13 = float(np.linalg.norm(S1 - S3))
+                d23 = float(np.linalg.norm(S2 - S3))
+                if max(d12, d13, d23) >= xyz_tol:
+                    continue
+
+                sis_set = {
+                    int(segs["sis_idx"][hits["a"][h1]]),
+                    int(segs["sis_idx"][hits["b"][h1]]),
+                    int(segs["sis_idx"][hits["a"][h2]]),
+                    int(segs["sis_idx"][hits["b"][h2]]),
+                    int(segs["sis_idx"][hits["a"][h3]]),
+                    int(segs["sis_idx"][hits["b"][h3]]),
+                }
+                if len(sis_set) != 3:
+                    continue
+
+                rec = np.zeros((), dtype=tp_dtype)
+                rec["xyz"] = (S1 + S2 + S3) / 3.0
+                rec["sis_indices"] = sorted(sis_set)
+                rec["uv"][0] = P1
+                rec["uv"][1] = P2
+                rec["uv"][2] = P3
+                rec["faces"] = (F1, F2, F3)
+                return rec
+    return None
 
 
 def build_sics(sis_pairs: np.ndarray) -> list[SelfIntersectingCurve]:
