@@ -109,6 +109,24 @@ def disk_paraboloid_ca(perturb: bool = True) -> SurfaceParams:
     )
 
 
+# ── Canonical viewpoints for Layer O tests ────────────────────────────────────
+# Each entry: (I, J, eye).  eye=None → orthographic.
+
+# Helicoid: ortho, axis = I×J = (0,0,1) — top-down Z view; contour at u=0.
+helicoid_ortho_view = ([1, 0, 0], [0, 1, 0], None)
+
+# Paraboloid: ortho, axis = I×J = (0,-1,0) — side Y view; contour at v=0.
+paraboloid_side_view = ([1, 0, 0], [0, 0, 1], None)
+
+# Torus: ortho, axis = (0,0,1) — Z view; gives a rich silhouette with cusps.
+torus_ortho_view = ([1, 0, 0], [0, 1, 0], None)
+
+# Möbius: ortho, axis = (0,0,1); used for seam/flip regression tests.
+mobius_ortho_view = ([1, 0, 0], [0, 1, 0], None)
+
+# Fig-8: perspective from Z=5; used for SIC visibility integration tests.
+fig8_persp_view = ([1, 0, 0], [0, 1, 0], [0, 0, 5])
+
 # ── Smoke: each fixture builds without error ─────────────────────────────────
 
 import pytest
