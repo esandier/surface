@@ -8,10 +8,12 @@ import pytest
 
 from surface_play.domain import Domain
 from surface_play.intersections import (
+    build_sis_pairs,
     candidate_pairs,
     dp_dtype,
     find_double_points,
     intersect_dtype,
+    sis_dtype,
     sweep_segments,
 )
 from surface_play.mesh import build_mesh
@@ -379,3 +381,98 @@ def test_find_double_points_performance():
     elapsed = time.perf_counter() - t0
     assert len(dps) > 0
     assert elapsed < 5.0, f"find_double_points took {elapsed:.2f}s, expected < 5s"
+
+
+# --- C10: build_sis_pairs ---------------------------------------------------
+
+def _shares_pair(a, b):
+    """Reference set-intersection on length-2 face slots, ignoring -1."""
+    a_set = {int(x) for x in a if int(x) >= 0}
+    b_set = {int(x) for x in b if int(x) >= 0}
+    return bool(a_set & b_set)
+
+
+def test_build_sis_pairs_empty():
+    """Empty/singleton input → empty SIS array with correct dtype."""
+    out0 = build_sis_pairs(np.empty(0, dtype=dp_dtype))
+    assert out0.dtype == sis_dtype
+    assert len(out0) == 0
+
+    out1 = build_sis_pairs(np.zeros(1, dtype=dp_dtype))
+    assert out1.dtype == sis_dtype
+    assert len(out1) == 0
+
+
+def test_build_sis_pairs_straight_match():
+    """Two DPs with matching A1/A1 and A2/A2 → one SIS, flip=+1."""
+    dps = np.zeros(2, dtype=dp_dtype)
+    dps["A1"][0] = (10, -1); dps["A2"][0] = (20, -1)
+    dps["A1"][1] = (10, -1); dps["A2"][1] = (20, -1)
+
+    sis = build_sis_pairs(dps)
+    assert sis.dtype == sis_dtype
+    assert len(sis) == 1
+    assert int(sis["p_dp"][0]) == 0
+    assert int(sis["q_dp"][0]) == 1
+    assert int(sis["flip"][0]) == 1
+
+
+def test_build_sis_pairs_crossed_match():
+    """Two DPs with A1[0]==A2[1] and A2[0]==A1[1] → one SIS, flip=-1."""
+    dps = np.zeros(2, dtype=dp_dtype)
+    dps["A1"][0] = (10, -1); dps["A2"][0] = (20, -1)
+    dps["A1"][1] = (20, -1); dps["A2"][1] = (10, -1)
+
+    sis = build_sis_pairs(dps)
+    assert len(sis) == 1
+    assert int(sis["flip"][0]) == -1
+
+
+def test_build_sis_pairs_fig8_count():
+    """Fig-8 cy-cy res=20: SIS count is in [0.5·DP, 2·DP] (one closed SIC)."""
+    surface = fig8()
+    mesh = _build(surface, resolution=20)
+    dps = find_double_points(mesh, surface)
+    assert len(dps) > 0
+
+    sis = build_sis_pairs(dps)
+    n_dp = len(dps)
+    n_sis = len(sis)
+    assert n_sis > 0
+    assert 0.5 * n_dp <= n_sis <= 2 * n_dp, (
+        f"SIS count {n_sis} out of [0.5·DP, 2·DP] = "
+        f"[{0.5 * n_dp:.1f}, {2 * n_dp}] (DPs={n_dp})"
+    )
+
+
+def test_build_sis_pairs_no_spurious_sharing():
+    """Every emitted SIS connects DPs that actually share faces (in some orientation)."""
+    surface = fig8()
+    mesh = _build(surface, resolution=20)
+    dps = find_double_points(mesh, surface)
+    sis = build_sis_pairs(dps)
+    assert len(sis) > 0
+
+    for k in range(len(sis)):
+        i = int(sis["p_dp"][k])
+        j = int(sis["q_dp"][k])
+        A1i, A2i = dps["A1"][i], dps["A2"][i]
+        A1j, A2j = dps["A1"][j], dps["A2"][j]
+        unflipped = _shares_pair(A1i, A1j) and _shares_pair(A2i, A2j)
+        flipped = _shares_pair(A1i, A2j) and _shares_pair(A2i, A1j)
+        assert unflipped or flipped, (
+            f"SIS {k} = ({i}, {j}) connects DPs that share no faces"
+        )
+        # Determinism: p_dp < q_dp (from triu_indices).
+        assert i < j
+
+
+def test_build_sis_pairs_splits_init():
+    """G17: all emitted SIS have split1 == split2 == -1 (Layer O populates)."""
+    surface = fig8()
+    mesh = _build(surface, resolution=20)
+    dps = find_double_points(mesh, surface)
+    sis = build_sis_pairs(dps)
+    assert len(sis) > 0
+    assert (sis["split1"] == -1).all()
+    assert (sis["split2"] == -1).all()

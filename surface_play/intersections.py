@@ -1,5 +1,5 @@
 """intersections.py — P5: sweep_segments; C8: candidate_pairs (BVH broad phase);
-C9: find_double_points.
+C9: find_double_points; C10: build_sis_pairs.
 
 Shared 2D segment-segment intersection primitive used by the domain sweep
 (self-intersection preimages, CS×SIS, etc.) and the view-plane sweep.
@@ -12,8 +12,13 @@ stack-based BVH with axis-cycling partitioning, Numba-JIT compiled. See G14.
 C9: `find_double_points(mesh, surface)` returns DP records (edge-vs-face hits
 in 3D), with sibling-pair consumption (G2) and seam-aware vertex-class skip
 (G13). Uses C5 per-element (p, pq, pr) for uv recovery (G15).
+
+C10: `build_sis_pairs(dps)` returns SIS records (DP-DP edges of the
+self-intersection graph) with vectorized A1/A2 face-sharing test and flip
+detection. See G17 for split sentinel.
 """
 
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -41,6 +46,15 @@ dp_dtype = np.dtype([
     ("type",        "U2"),
     ("ptype",       "i4"),
     ("on_boundary", "?"),
+])
+
+
+sis_dtype = np.dtype([
+    ("p_dp",   "i4"),
+    ("q_dp",   "i4"),
+    ("flip",   "i1"),
+    ("split1", "i4"),
+    ("split2", "i4"),
 ])
 
 
@@ -524,4 +538,53 @@ def find_double_points(mesh, surface, *, delta: float = 1e-6) -> np.ndarray:
         (out["xyz"][i], out["uv1"][i], out["uv2"][i], out["E1"][i],
          out["E2"][i], out["F2"][i], out["A1"][i], out["A2"][i],
          out["type"][i], out["ptype"][i], out["on_boundary"][i]) = rec
+    return out
+
+
+def build_sis_pairs(dps: np.ndarray) -> np.ndarray:
+    """Pair DPs into SIS records by A1/A2 face-sharing (C10).
+
+    Two DPs `i < j` are an SIS edge iff their `A1`/`A2` face-pair fields share
+    faces in one of two orientations:
+      - unflipped: `A1[i] ∩ A1[j] ≠ ∅` and `A2[i] ∩ A2[j] ≠ ∅` → flip=+1
+      - flipped:   `A1[i] ∩ A2[j] ≠ ∅` and `A2[i] ∩ A1[j] ≠ ∅` → flip=-1
+    If both match (pathological), warn and default to flip=+1.
+    `split1`, `split2` are initialized to -1 (G17 — populated in Layer O).
+    """
+    n = len(dps)
+    if n < 2:
+        return np.empty(0, dtype=sis_dtype)
+
+    i_arr, j_arr = np.triu_indices(n, k=1)
+    A1i = dps["A1"][i_arr]
+    A2i = dps["A2"][i_arr]
+    A1j = dps["A1"][j_arr]
+    A2j = dps["A2"][j_arr]
+
+    def _shares(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        return ((a[:, :, None] == b[:, None, :]) & (a[:, :, None] >= 0)).any(axis=(1, 2))
+
+    unflipped = _shares(A1i, A1j) & _shares(A2i, A2j)
+    flipped = _shares(A1i, A2j) & _shares(A2i, A1j)
+
+    ambiguous = unflipped & flipped
+    if ambiguous.any():
+        amb_idx = np.flatnonzero(ambiguous)
+        for k in amb_idx:
+            warnings.warn(
+                f"ambiguous A1/A2 match for SIS pair "
+                f"({int(i_arr[k])}, {int(j_arr[k])}); defaulting to flip=+1",
+                stacklevel=2,
+            )
+
+    keep = unflipped | flipped
+    n_out = int(keep.sum())
+    out = np.empty(n_out, dtype=sis_dtype)
+    if n_out == 0:
+        return out
+    out["p_dp"] = i_arr[keep].astype(np.int32)
+    out["q_dp"] = j_arr[keep].astype(np.int32)
+    out["flip"] = np.where(unflipped[keep], 1, -1).astype(np.int8)
+    out["split1"] = -1
+    out["split2"] = -1
     return out
