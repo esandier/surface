@@ -356,17 +356,35 @@ def test_find_double_points_no_fragmentation():
 
 
 def test_find_double_points_uv_in_bounds():
-    """uv1, uv2 lie within domain bounds (with tolerance for jitter)."""
+    """uv1, uv2 lie within domain bounds (with tolerance for jitter).
+
+    Per roadmap line 552, edge/face pq are pre-identification subtractions
+    (short-way vectors).  On seam-crossing faces the recovered uv can land
+    just outside the canonical bounds — that uv is a valid periodic alias
+    of an in-bounds point.  Canonicalize identified axes via modulo, then
+    assert in-bounds within a small jitter tolerance.
+    """
     surface = fig8()
     mesh = _build(surface, resolution=20)
     dps = find_double_points(mesh, surface)
     assert len(dps) > 0
 
     u_min, u_max, v_min, v_max = surface.domain.bounds
-    tol = 1e-3 * max(u_max - u_min, v_max - v_min)
+    period_u = u_max - u_min
+    period_v = v_max - v_min
+    u_id, v_id = surface.domain.u_identify, surface.domain.v_identify
+    tol = 1e-3 * max(period_u, period_v)
+
+    def _canon(uvs):
+        out = uvs.copy()
+        if u_id in ("cy", "mo"):
+            out[:, 0] = ((out[:, 0] - u_min) % period_u) + u_min
+        if v_id in ("cy", "mo"):
+            out[:, 1] = ((out[:, 1] - v_min) % period_v) + v_min
+        return out
 
     for field in ("uv1", "uv2"):
-        uvs = dps[field]
+        uvs = _canon(dps[field])
         assert (uvs[:, 0] >= u_min - tol).all(), f"{field} u below u_min"
         assert (uvs[:, 0] <= u_max + tol).all(), f"{field} u above u_max"
         assert (uvs[:, 1] >= v_min - tol).all(), f"{field} v below v_min"

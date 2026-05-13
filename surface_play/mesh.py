@@ -79,6 +79,8 @@ def _generate_rect_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np
 def _build_edges_faces(
     uv: np.ndarray,
     tris: np.ndarray,
+    uv_pre: np.ndarray,
+    tris_pre: np.ndarray,
     SN_per_vertex: np.ndarray,
     on_u_seam: np.ndarray,
     on_v_seam: np.ndarray,
@@ -86,34 +88,56 @@ def _build_edges_faces(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Build edges and faces from compacted `uv`/`tris` (one row per equivalence class
-    in `uv`, canonical indices in `tris`). Edges are keyed by their canonical vertex
-    pair, so seam-paired edges (whose two physical sides relabel to the same canonical
-    pair) merge automatically into a single edge with two adjacent faces.
+    in `uv`, canonical indices in `tris`).  Edges are keyed by their canonical
+    vertex pair, so seam-paired edges (whose two physical sides relabel to the
+    same canonical pair) merge automatically into a single edge with two
+    adjacent faces.
 
-    Flip detection: an edge has `flip = -1` iff both endpoints lie on a seam of an
-    axis whose identification is `mo` (Möbius reversal); otherwise the edge takes the
-    sign of `dot(SN[p], SN[q])`, which is +1 for smooth surfaces.
+    `p`, `q_idx`, etc. use compacted indices.  `pq` / `pr` are pre-identification
+    subtractions: per roadmap line 552, `pq = uv_pre[bp] − uv_pre[ap]` where
+    `(ap, bp)` are the pre-id labels of the canonical pair from one incident
+    face's row of `tris_pre`.  This keeps the vector representing the *physical*
+    edge (short way) even when the canonical endpoints sit on opposite sides of
+    a cy/mo seam — without that, `p + s·pq` would interpolate across the
+    "long way" and surface evaluation at a periodic alias of the true edge
+    point breaks every downstream consumer that cares about which period the
+    point lives in (notably O1 contour points on multi-branch silhouettes).
+
+    Flip detection: an edge has `flip = -1` iff both endpoints lie on a seam
+    of an axis whose identification is `mo` (Möbius reversal); otherwise the
+    edge takes the sign of `dot(SN[p], SN[q])`, which is +1 for smooth surfaces.
     """
     M = len(tris)
 
     u_is_mo = domain.type == "rect" and domain.u_identify == "mo"
     v_is_mo = domain.type == "rect" and domain.v_identify == "mo"
 
-    records: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
+    # records[key] : list of (f_idx, third_compacted, a_compacted, b_compacted, pre_pair)
+    # where pre_pair = (pre_p, pre_q) ordered to match key = (min, max) on canonical labels.
+    records: dict[tuple[int, int], list[tuple[int, int, int, int, tuple[int, int]]]] = {}
     face_edge_idx = np.empty((M, 3), dtype=np.int32)
 
     for f_idx in range(M):
-        i = int(tris[f_idx, 0])
-        j = int(tris[f_idx, 1])
-        k = int(tris[f_idx, 2])
-        local_edges = ((i, j, k), (j, k, i), (k, i, j))
-        for a, b, third in local_edges:
-            key = (a, b) if a < b else (b, a)
+        i  = int(tris[f_idx, 0]);  ip = int(tris_pre[f_idx, 0])
+        j  = int(tris[f_idx, 1]);  jp = int(tris_pre[f_idx, 1])
+        k  = int(tris[f_idx, 2]);  kp = int(tris_pre[f_idx, 2])
+        local_edges = (
+            (i, j, k, ip, jp),
+            (j, k, i, jp, kp),
+            (k, i, j, kp, ip),
+        )
+        for a, b, third, ap, bp in local_edges:
+            if a < b:
+                key = (a, b)
+                pre_pair = (ap, bp)
+            else:
+                key = (b, a)
+                pre_pair = (bp, ap)
             rec_list = records.get(key)
             if rec_list is None:
                 rec_list = []
                 records[key] = rec_list
-            rec_list.append((f_idx, third, a, b))
+            rec_list.append((f_idx, third, a, b, pre_pair))
 
     key_to_idx = {key: idx for idx, key in enumerate(records.keys())}
 
@@ -137,10 +161,11 @@ def _build_edges_faces(
                 f"Records: {recs}"
             )
 
-        f_idx, third, a, b = recs[0]
-        p_idx, q_idx = key  # already sorted
-        p = uv[p_idx]
-        pq = uv[q_idx] - p
+        f_idx, third, a, b, pre_pair = recs[0]
+        p_idx, q_idx = key  # already sorted (compacted)
+        pre_p, pre_q = pre_pair
+        p  = uv[p_idx]
+        pq = uv_pre[pre_q] - uv_pre[pre_p]   # pre-id subtraction (G15-compliant)
         edges[e_idx]["p_idx"] = p_idx
         edges[e_idx]["q_idx"] = q_idx
         edges[e_idx]["p"] = p
@@ -150,7 +175,7 @@ def _build_edges_faces(
             edges[e_idx]["f"] = f_idx
             edges[e_idx]["g"] = -1
             d = np.array([-pq[1], pq[0]], dtype=np.float64)
-            offset = uv[third] - p
+            offset = uv[third] - p  # boundary triangle: never spans a seam
             if float(np.dot(d, offset)) < 0.0:
                 d = -d
             nrm = float(np.linalg.norm(d))
@@ -178,15 +203,14 @@ def _build_edges_faces(
 
     faces = np.zeros(M, dtype=face_dtype)
     for f_idx in range(M):
-        i = int(tris[f_idx, 0])
-        j = int(tris[f_idx, 1])
-        k = int(tris[f_idx, 2])
-        p = uv[i]
+        i  = int(tris[f_idx, 0]);  ip = int(tris_pre[f_idx, 0])
+        j  = int(tris[f_idx, 1]);  jp = int(tris_pre[f_idx, 1])
+        k  = int(tris[f_idx, 2]);  kp = int(tris_pre[f_idx, 2])
         faces[f_idx]["verts"] = (i, j, k)
         faces[f_idx]["edges"] = face_edge_idx[f_idx]
-        faces[f_idx]["p"] = p
-        faces[f_idx]["pq"] = uv[j] - p
-        faces[f_idx]["pr"] = uv[k] - p
+        faces[f_idx]["p"]  = uv[i]
+        faces[f_idx]["pq"] = uv_pre[jp] - uv_pre[ip]   # pre-id subtraction
+        faces[f_idx]["pr"] = uv_pre[kp] - uv_pre[ip]   # pre-id subtraction
 
     return edges, faces
 
@@ -408,7 +432,9 @@ def build_mesh(
     xyz = surface.S(uv[:, 0], uv[:, 1]).T
     SN = surface.SN(uv[:, 0], uv[:, 1]).T
 
-    edges, faces = _build_edges_faces(uv, tris, SN, on_u_seam, on_v_seam, domain)
+    edges, faces = _build_edges_faces(
+        uv, tris, uv_jittered, tris_raw, SN, on_u_seam, on_v_seam, domain
+    )
 
     boundary_edge_idx = np.nonzero(edges["g"] == -1)[0]
 

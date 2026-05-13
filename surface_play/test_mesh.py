@@ -296,14 +296,19 @@ def test_apply_identifications():
 
 
 def _build_post_id(u_id, v_id, resolution, seed=42):
-    """Helper: generate raw mesh, jitter, apply identifications. Returns
-    (domain, uv_compacted, tris_canonical, on_u_seam, on_v_seam)."""
+    """Helper: generate raw mesh, jitter, apply identifications.
+
+    Returns ``(domain, uv_compacted, tris_canonical, on_u_seam, on_v_seam,
+    uv_pre, tris_pre)`` — the trailing pair are the pre-identification
+    `_jitter`-ed uv and the original `_generate_rect_mesh` tris (needed by
+    `_build_edges_faces` for pre-id pq/pr subtractions, per roadmap line 552).
+    """
     d = Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0),
                u_identify=u_id, v_identify=v_id)
     uv, tris = _generate_rect_mesh(d, resolution=resolution)
     uv_j = _jitter(uv, tris, d, seed=seed)
     uv_c, tris_c, on_u, on_v, _ = _apply_identifications(uv_j, tris, d)
-    return d, uv_c, tris_c, on_u, on_v
+    return d, uv_c, tris_c, on_u, on_v, uv_j, tris
 
 
 def test_build_edges_faces():
@@ -329,9 +334,9 @@ def test_build_edges_faces():
     }
 
     for (u_id, v_id), bnd_expected in expected_boundary.items():
-        d, uv, tris, on_u, on_v = _build_post_id(u_id, v_id, resolution=res)
+        d, uv, tris, on_u, on_v, uv_pre, tris_pre = _build_post_id(u_id, v_id, resolution=res)
         SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
-        edges, faces = _build_edges_faces(uv, tris, SN, on_u, on_v, d)
+        edges, faces = _build_edges_faces(uv, tris, uv_pre, tris_pre, SN, on_u, on_v, d)
         assert edges.dtype == edge_dtype
         assert faces.dtype == face_dtype
 
@@ -354,17 +359,17 @@ def test_build_edges_faces():
         )
 
     # 2. flip on cy-no with constant SN: every edge has flip=+1.
-    d, uv, tris, on_u, on_v = _build_post_id("cy", "no", resolution=res)
+    d, uv, tris, on_u, on_v, uv_pre, tris_pre = _build_post_id("cy", "no", resolution=res)
     SN_const = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
-    edges_cy, _ = _build_edges_faces(uv, tris, SN_const, on_u, on_v, d)
+    edges_cy, _ = _build_edges_faces(uv, tris, uv_pre, tris_pre, SN_const, on_u, on_v, d)
     assert (edges_cy["flip"] == 1).all(), (
         "cy-no with constant SN: every edge should have flip=+1"
     )
 
     # 3. flip on mo-no: edges with both endpoints on the u-seam have flip=-1.
-    d, uv, tris, on_u, on_v = _build_post_id("mo", "no", resolution=res)
+    d, uv, tris, on_u, on_v, uv_pre, tris_pre = _build_post_id("mo", "no", resolution=res)
     SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
-    edges_mo, _ = _build_edges_faces(uv, tris, SN, on_u, on_v, d)
+    edges_mo, _ = _build_edges_faces(uv, tris, uv_pre, tris_pre, SN, on_u, on_v, d)
     interior = edges_mo["g"] >= 0
     assert (edges_mo["flip"][interior] == -1).any(), (
         "mo-no: some merged u-seam edges should have flip=-1"
@@ -372,9 +377,9 @@ def test_build_edges_faces():
     assert (edges_mo["flip"] == 1).sum() > (edges_mo["flip"] == -1).sum()
 
     # 4. dir: boundary edges have dir ⟂ pq and pointing toward third vertex.
-    d, uv, tris, on_u, on_v = _build_post_id("no", "no", resolution=res)
+    d, uv, tris, on_u, on_v, uv_pre, tris_pre = _build_post_id("no", "no", resolution=res)
     SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
-    edges_nn, _ = _build_edges_faces(uv, tris, SN, on_u, on_v, d)
+    edges_nn, _ = _build_edges_faces(uv, tris, uv_pre, tris_pre, SN, on_u, on_v, d)
     bmask = edges_nn["g"] == -1
     pq_b = edges_nn["pq"][bmask]
     dir_b = edges_nn["dir"][bmask]
@@ -389,21 +394,43 @@ def test_build_edges_faces():
             "boundary dir must point inward toward the third vertex"
         )
 
-    # 5. p, pq, pr are exact uv subtractions (no float drift from close()).
-    d, uv, tris, on_u, on_v = _build_post_id("cy", "cy", resolution=res)
+    # 5. p, pq, pr are pre-identification subtractions (roadmap line 552).
+    #    Geometric contract: every edge/face pq, pr is the *short* vector
+    #    between its endpoints, bounded above by a few mesh edge lengths.
+    #    Compacted subtraction `uv[j] - uv[i]` agrees on non-seam edges and
+    #    differs by exactly ±period (modulo jitter noise) on seam-crossing
+    #    edges.
+    d, uv, tris, on_u, on_v, uv_pre, tris_pre = _build_post_id("cy", "cy", resolution=res)
     SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
-    edges_cc, faces_cc = _build_edges_faces(uv, tris, SN, on_u, on_v, d)
+    edges_cc, faces_cc = _build_edges_faces(uv, tris, uv_pre, tris_pre, SN, on_u, on_v, d)
+    typical = max(d.period_u, d.period_v) / res  # ~ regular-grid edge length
+
     for e in edges_cc:
         i, j = int(e["p_idx"]), int(e["q_idx"])
         assert np.array_equal(e["p"], uv[i]), "edge p must equal uv[p_idx] exactly"
-        assert np.array_equal(e["pq"], uv[j] - uv[i]), (
-            "edge pq must equal uv[q_idx] - uv[p_idx] exactly"
+        # The pre-id pq must be a short vector: well under the domain extent.
+        assert float(np.linalg.norm(e["pq"])) < 5.0 * typical, (
+            f"edge {i}-{j}: pre-id pq must be short, got |pq|="
+            f"{np.linalg.norm(e['pq']):.4f}, expected ≤ {5*typical:.4f}"
         )
     for f in faces_cc:
         i, j, k = int(f["verts"][0]), int(f["verts"][1]), int(f["verts"][2])
         assert np.array_equal(f["p"], uv[i])
-        assert np.array_equal(f["pq"], uv[j] - uv[i])
-        assert np.array_equal(f["pr"], uv[k] - uv[i])
+        assert float(np.linalg.norm(f["pq"])) < 5.0 * typical
+        assert float(np.linalg.norm(f["pr"])) < 5.0 * typical
+
+    # Seam-crossing edges *must* exist on cy-cy and *must* differ from the
+    # naive compacted subtraction (otherwise the fix is a no-op).
+    seam_diff_count = 0
+    for e in edges_cc:
+        i, j = int(e["p_idx"]), int(e["q_idx"])
+        naive = uv[j] - uv[i]
+        if not np.allclose(e["pq"], naive, atol=1e-10):
+            seam_diff_count += 1
+    assert seam_diff_count > 0, (
+        "expected at least one seam-crossing edge to use pre-id pq distinct "
+        "from `uv[q_idx] - uv[p_idx]` on a cy-cy mesh"
+    )
 
     # 6. Splits initialized to -1.
     assert (edges_cc["split1"] == -1).all()
@@ -413,9 +440,9 @@ def test_build_edges_faces():
 
     # 7. Manifoldness for closed surfaces: every edge has 2 incident faces.
     for combo in (("cy", "cy"), ("cy", "mo"), ("mo", "cy")):
-        d, uv, tris, on_u, on_v = _build_post_id(*combo, resolution=res)
+        d, uv, tris, on_u, on_v, uv_pre, tris_pre = _build_post_id(*combo, resolution=res)
         SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
-        edges, faces = _build_edges_faces(uv, tris, SN, on_u, on_v, d)
+        edges, faces = _build_edges_faces(uv, tris, uv_pre, tris_pre, SN, on_u, on_v, d)
         edge_face_count = collections.Counter()
         for f in faces:
             for e_idx in f["edges"]:
