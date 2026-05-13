@@ -15,6 +15,7 @@ import numpy as np
 from surface_play.curves import sign_changes, make_lines
 from surface_play.mesh import Mesh
 from surface_play.projection import Projection
+from surface_play.surface import SurfaceParams
 
 
 # ── dtype definitions ─────────────────────────────────────────────────────────
@@ -24,7 +25,9 @@ cp_dtype = np.dtype([
     ("s",     "f8"),    # parametric position on the edge, in (0, 1)
     ("uv",    "2f8"),   # domain coord = e.p + s·e.pq
     ("xyz",   "3f8"),   # 3D position
-    ("d",     "2f8"),   # projected ker_param (view-plane 2D), oriented toward viewer
+    ("d",     "2f8"),   # unit 2D curvature direction of the projected contour at the
+                        # CP (see _compute_d_at): non-zero at non-cusp CPs and reverses
+                        # across cusps.  Drives O4 sign-change detection.
     ("ptype", "u1"),    # 0 = interior CP; 4 = on boundary edge
 ])
 
@@ -35,6 +38,48 @@ cs_dtype = np.dtype([
     ("split1", "i4"),   # SPT index (G17); -1 initially
     ("split2", "i4"),   # SPT index (G17); -1 initially
 ])
+
+
+# ── O1 helpers ────────────────────────────────────────────────────────────────
+
+def _compute_d_at(uv: np.ndarray, surface: SurfaceParams,
+                  projection: Projection) -> np.ndarray:
+    """2D curvature direction of the projected contour at uv.
+
+    Legacy silhouette.py "dir_vec" (lines 2025-2034): project the second
+    derivative of S in the kernel direction, then strip the tangent
+    component (so the result lies on the contour's normal in image space).
+
+    At non-cusp CPs the result is a non-zero unit vector; near a cusp the
+    magnitude collapses and reverses across the cusp.  Returned vector is
+    always normalized (or all-zero only at a perfectly degenerate point).
+    """
+    uv = np.asarray(uv, dtype=float).reshape(2)
+    u_, v_ = float(uv[0]), float(uv[1])
+    ker = projection.ker_param(uv)           # (2,), unit length
+
+    Su  = np.asarray(surface.Su (u_, v_), dtype=float).reshape(3)
+    Sv  = np.asarray(surface.Sv (u_, v_), dtype=float).reshape(3)
+    Suu = np.asarray(surface.Suu(u_, v_), dtype=float).reshape(3)
+    Suv = np.asarray(surface.Suv(u_, v_), dtype=float).reshape(3)
+    Svv = np.asarray(surface.Svv(u_, v_), dtype=float).reshape(3)
+
+    # d²S in kernel direction (3D); quadratic so sign of ker is irrelevant.
+    d2S = Suu * ker[0] ** 2 + 2.0 * Suv * ker[0] * ker[1] + Svv * ker[1] ** 2
+    # dS perpendicular to ker in uv → image-plane tangent of the contour
+    tan = Su * (-ker[1]) + Sv * ker[0]
+
+    diff2 = projection.proj_vec(uv, d2S)     # (2,)
+    im    = projection.proj_vec(uv, tan)     # (2,)
+
+    im_sq = float(im @ im)
+    if im_sq > 0.0:
+        diff2 = diff2 - (float(diff2 @ im) / im_sq) * im
+
+    n = float(np.linalg.norm(diff2))
+    if n > 0.0:
+        return diff2 / n
+    return diff2  # degenerate (very rare; e.g. exactly at a cusp)
 
 
 # ── O1 ────────────────────────────────────────────────────────────────────────
@@ -111,14 +156,12 @@ def find_contour_points(
     uv_arr  = np.stack([u_f, v_f], axis=-1)   # (N, 2)
     xyz_arr = mesh.surface.S(u_f, v_f).T       # (N, 3)
 
-    # 5. d field: project kerdS, orient toward viewer (positive depth component)
+    # 5. d field: 2D curvature direction of the projected contour at each CP
+    #    (legacy silhouette.py "dir_vec" — second derivative of S in the kernel
+    #    direction, projected, with the contour-tangent component removed).
     d_arr = np.zeros((len(cand_idx), 2))
     for i in range(len(cand_idx)):
-        uv_i     = uv_arr[i]
-        kerdS_3d = projection.kerdS(uv_i)
-        if projection._axis @ kerdS_3d < 0.0:
-            kerdS_3d = -kerdS_3d
-        d_arr[i] = projection.proj_vec(uv_i, kerdS_3d)
+        d_arr[i] = _compute_d_at(uv_arr[i], mesh.surface, projection)
 
     # 6. ptype: 4 on boundary edge (g == -1), else 0
     ptype_arr = np.where(cand["g"] == -1, np.uint8(4), np.uint8(0))

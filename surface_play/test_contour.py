@@ -150,6 +150,28 @@ def test_find_contour_points_mobius_no_seam_duplication():
     )
 
 
+# ── test 6: d field is unit-length on a smooth silhouette (regression) ───────
+
+def test_find_contour_points_d_field_unit_length():
+    """The d field is the 2D curvature direction of the projected contour
+    (legacy silhouette.py "dir_vec"), not the projection of kerdS_3d.
+
+    Regression: on a torus top-view silhouette (two smooth circles, no cusps)
+    every CP must carry a unit-length d vector.  An earlier impl returned
+    proj_vec(uv, kerdS_3d), which is identically zero at every CP because
+    kerdS_3d lies in the tangent plane and at a CP the view axis does too,
+    so the projection vanishes.
+    """
+    mesh, proj = _make(torus, torus_ortho_view)
+    cps = find_contour_points(mesh, proj)
+
+    norms = np.linalg.norm(cps["d"], axis=1)
+    assert np.all(np.abs(norms - 1.0) < 1e-9), (
+        f"d field must be unit-length; got |d| range "
+        f"[{norms.min():.3e}, {norms.max():.3e}]"
+    )
+
+
 # ══ O2: build_contour_segments ════════════════════════════════════════════════
 
 # ── test 1: helicoid CS count > 0 and matches pairing ─────────────────────────
