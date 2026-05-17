@@ -334,3 +334,196 @@ def build_contour_curves(css: np.ndarray, cps: np.ndarray) -> list[ContourCurve]
     return result
 
 
+# ── O4 ────────────────────────────────────────────────────────────────────────
+
+vp_dtype = np.dtype([
+    ("cs",         "i4"),   # CS index where the VP sits
+    ("s",          "f8"),   # parametric position on the CS — kept at 0.5 (the
+                            # chord midpoint between the two d-sign-change CPs);
+                            # refinement adjusts uv off the chord but s is the
+                            # initial bracket midpoint that O10 consumes.
+    ("uv",         "2f8"),  # domain coord of the VP (refined if refine=True)
+    ("xyz",        "3f8"),  # 3D position S(uv)
+    ("vis_change", "i1"),   # ±1 — G10
+])
+
+
+def _cp_sequence(cc: ContourCurve, css: np.ndarray) -> list[int]:
+    """Ordered CP indices along a CC chain.
+
+    Open chain of N CSs → N+1 entries; closed → N+1 with seq[0] == seq[-1].
+    Chain position j connects ``seq[j] → seq[j+1]`` via ``cs_indices[j]``
+    (sign of cs_indices[j] tells which endpoint of the CS comes first).
+    """
+    seq: list[int] = []
+    for j, si in enumerate(cc.cs_indices):
+        cs = css[abs(int(si)) - 1]
+        start_cp = int(cs["p_cp"]) if si > 0 else int(cs["q_cp"])
+        end_cp   = int(cs["q_cp"]) if si > 0 else int(cs["p_cp"])
+        if j == 0:
+            seq.append(start_cp)
+        seq.append(end_cp)
+    return seq
+
+
+def _newton_orthogonal_cp(
+    uv_mid: np.ndarray, n_hat: np.ndarray,
+    surface: SurfaceParams, projection: Projection, *,
+    n_iter: int = 10,
+) -> np.ndarray:
+    """Run Newton from ``uv_mid`` along ``n_hat`` to find a CP (SN·viewer_dir = 0).
+
+    f(t)  = SN(uv_mid + t·n_hat) · viewer_dir
+    f'(t) = (dSN/du · n_hat[0] + dSN/dv · n_hat[1]) · viewer_dir
+        with dSN/du = Suu×Sv + Su×Suv, dSN/dv = Suv×Sv + Su×Svv.
+    For perspective viewer_dir = S(uv) − eye; SN · dS/dt = 0 because SN ⊥ Su,
+    Sv, so the extra term vanishes.
+
+    No (0,1) clamping — the caller's bisection brackets the cusp.
+    """
+    t = 0.0
+    for _ in range(n_iter):
+        uv_t = uv_mid + t * n_hat
+        u_t, v_t = float(uv_t[0]), float(uv_t[1])
+        vals = surface._eval_all(u_t, v_t)
+        Su   = np.asarray(vals[1], dtype=float).reshape(3)
+        Sv   = np.asarray(vals[2], dtype=float).reshape(3)
+        Suu  = np.asarray(vals[3], dtype=float).reshape(3)
+        Suv  = np.asarray(vals[4], dtype=float).reshape(3)
+        Svv  = np.asarray(vals[5], dtype=float).reshape(3)
+        SN_  = np.asarray(vals[6], dtype=float).reshape(3)
+
+        dSN_du = np.cross(Suu, Sv) + np.cross(Su, Suv)
+        dSN_dv = np.cross(Suv, Sv) + np.cross(Su, Svv)
+        dSN_dt = dSN_du * n_hat[0] + dSN_dv * n_hat[1]
+
+        if projection.mode == "ortho":
+            axis = projection._axis
+            f_t  = float(SN_ @ axis)
+            fp_t = float(dSN_dt @ axis)
+        else:
+            S_t = np.asarray(vals[0], dtype=float).reshape(3)
+            vd  = S_t - projection.eye
+            f_t  = float(SN_ @ vd)
+            fp_t = float(dSN_dt @ vd)
+
+        if abs(fp_t) < 1e-15:
+            break
+        step = f_t / fp_t
+        t -= step
+        if abs(step) < 1e-14:
+            break
+    return uv_mid + t * n_hat
+
+
+def _refine_cusp(
+    p_uv: np.ndarray, q_uv: np.ndarray,
+    surface: SurfaceParams, projection: Projection, *,
+    max_iter: int = 20, tol: float = 1e-10,
+) -> np.ndarray:
+    """Newton-bisection refinement of a cusp bracketed by two CPs.
+
+    Pre: d(p_uv)·d(q_uv) < 0 (caller verified the d-field sign change).
+
+    Each iteration takes the midpoint M of [p, q], runs Newton orthogonally
+    to (q-p) at M to land on a true CP M', then keeps whichever of [p, M']
+    or [M', q] still brackets the d sign change.  Terminates on
+    ``|q - p| < tol`` or after ``max_iter`` halvings.
+    """
+    p = p_uv.copy()
+    q = q_uv.copy()
+    d_p = _compute_d_at(p, surface, projection)
+    d_q = _compute_d_at(q, surface, projection)
+
+    for _ in range(max_iter):
+        diff = q - p
+        if float(np.linalg.norm(diff)) < tol:
+            break
+        mid = 0.5 * (p + q)
+        perp = np.array([-diff[1], diff[0]])  # 90° rotation of (q-p) in 2D
+        n_hat = perp / float(np.linalg.norm(perp))
+
+        new_uv = _newton_orthogonal_cp(mid, n_hat, surface, projection)
+        d_new  = _compute_d_at(new_uv, surface, projection)
+
+        if float(d_p @ d_new) < 0.0:
+            q, d_q = new_uv, d_new
+        else:
+            p, d_p = new_uv, d_new
+
+    return 0.5 * (p + q)
+
+
+def find_vps(
+    ccs: list[ContourCurve],
+    css: np.ndarray,
+    cps: np.ndarray,
+    surface: SurfaceParams,
+    projection: Projection,
+    *,
+    refine: bool = False,
+) -> np.ndarray:
+    """Find cusp points (VPs) on contour curves.
+
+    Walks each CC chain in order, flags a sign change of the d field between
+    consecutive CPs (``d_i · d_j < 0``); each such CS hosts one VP.
+
+    refine=False : VP location = midpoint of the CS in uv.
+    refine=True  : Newton-bisection refinement orthogonal to the chord
+                   (spec §"Cusp points (VPs)" — Newton refinement bullet).
+
+    Visibility change (G10): ``+1 if dS(p, q-p) · axis > 0 else -1``, with
+    dS evaluated at the *left* CP p (Reorganization §"Cusp points" line 373).
+    axis = projection._axis (image-plane normal; the view direction in ortho).
+    """
+    axis = projection._axis
+    rows: list[tuple] = []
+
+    for cc in ccs:
+        seq = _cp_sequence(cc, css)
+        # For a closed chain seq[-1] == seq[0]; drop the wrap-around pair.
+        n_pairs = len(cc.cs_indices) - (1 if cc.is_closed else 0)
+
+        for j in range(n_pairs):
+            i_cp = seq[j]
+            k_cp = seq[j + 1]
+
+            d_i = cps[i_cp]["d"]
+            d_k = cps[k_cp]["d"]
+            if float(d_i @ d_k) >= 0.0:
+                continue
+
+            cs_idx = abs(int(cc.cs_indices[j])) - 1
+
+            p_uv = cps[i_cp]["uv"].copy()
+            q_uv = surface.domain.close(p_uv, cps[k_cp]["uv"])  # wrap-adjusted
+
+            if refine:
+                uv_vp = _refine_cusp(p_uv, q_uv, surface, projection)
+            else:
+                uv_vp = 0.5 * (p_uv + q_uv)
+
+            u_, v_ = float(uv_vp[0]), float(uv_vp[1])
+            xyz_vp = np.asarray(surface.S(u_, v_), dtype=float).reshape(3)
+
+            dir_uv = q_uv - p_uv
+            up_, vp_ = float(p_uv[0]), float(p_uv[1])
+            Su_p = np.asarray(surface.Su(up_, vp_), dtype=float).reshape(3)
+            Sv_p = np.asarray(surface.Sv(up_, vp_), dtype=float).reshape(3)
+            dS_3d = Su_p * dir_uv[0] + Sv_p * dir_uv[1]
+            vis = np.int8(1) if float(dS_3d @ axis) > 0.0 else np.int8(-1)
+
+            rows.append((cs_idx, 0.5, uv_vp, xyz_vp, vis))
+
+    if not rows:
+        return np.zeros(0, dtype=vp_dtype)
+
+    out = np.zeros(len(rows), dtype=vp_dtype)
+    for k, (cs_idx, s_vp, uv_vp, xyz_vp, vis) in enumerate(rows):
+        out[k]["cs"]         = cs_idx
+        out[k]["s"]          = s_vp
+        out[k]["uv"]         = uv_vp
+        out[k]["xyz"]        = xyz_vp
+        out[k]["vis_change"] = vis
+    return out
+

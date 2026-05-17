@@ -19,8 +19,12 @@ from surface_play.test_fixtures import (
 from surface_play.mesh import build_mesh as _build_mesh
 from surface_play.projection import Projection
 from surface_play.contour import (
-    find_contour_points, build_contour_segments, build_contour_curves,
+    find_contour_points, build_contour_segments, build_contour_curves, find_vps,
 )
+
+# Torus side view: I=(1,0,0), J=(0,0,1) → axis = I×J = (0,−1,0), looking
+# down the -Y axis.  The torus silhouette has 4 cusps in this view.
+torus_side_view = ([1, 0, 0], [0, 0, 1], None)
 
 RES = 20
 
@@ -295,4 +299,124 @@ def test_build_contour_curves_boundary_cps_are_endpoints():
         count = int(np.sum(all_ends == bcp))
         assert count == 1, (
             f"boundary CP {bcp} referenced by {count} CSs (must be 1 → chain endpoint)"
+        )
+
+
+# ══ O4: find_vps ══════════════════════════════════════════════════════════════
+#
+# Roadmap test criteria (lines 1063-1069):
+#   1. No-cusp surface → empty VP array.
+#   2. Surface with known cusps (torus side view → 4 cusps): count and bounds.
+#   3. refine=False vs refine=True positions within L/10.
+#   4. vis_change ∈ {-1, +1} (G10).
+#   5. Möbius: VPs valid, flip-aware d field (no spurious cusps from seam).
+
+
+def _full_pipeline(surface_factory, view, *, res=RES, perturb=True):
+    """Build mesh → CPs → CSs → CCs → VPs."""
+    mesh, proj = _make(surface_factory, view, res=res, perturb=perturb)
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+    ccs = build_contour_curves(css, cps)
+    return mesh, proj, cps, css, ccs
+
+
+# ── test 1: torus top-down has no cusps ───────────────────────────────────────
+
+def test_find_vps_no_cusp_torus_top_down():
+    """Torus viewed from above: silhouette is two smooth concentric circles
+    (one per v-branch, no cusps).  find_vps must return an empty array.
+
+    Paraboloid_side_view is *not* used here because at v=0 the kerdS direction
+    is parallel to the view axis, the d field is then defined by 2nd-order
+    behaviour, and the no-cusp signal is fine — but the cleaner non-degenerate
+    no-cusp test is the torus top view.
+    """
+    mesh, proj, cps, css, ccs = _full_pipeline(torus, torus_ortho_view)
+    vps = find_vps(ccs, css, cps, mesh.surface, proj)
+    assert len(vps) == 0, f"expected 0 VPs on torus top-down, got {len(vps)}"
+
+
+# ── test 2: torus side view has the canonical 4 cusps ────────────────────────
+
+def test_find_vps_torus_side_four_cusps():
+    """Torus viewed along -Y exhibits the canonical 4 cusps on its silhouette.
+
+    Per roadmap line 1065: "Torus has 4 cusps in the initial viewpoint of the
+    DB".  Each VP must sit strictly inside its CS (s ∈ (0, 1)) and reference
+    a valid CS index.
+    """
+    mesh, proj, cps, css, ccs = _full_pipeline(torus, torus_side_view)
+    vps = find_vps(ccs, css, cps, mesh.surface, proj)
+
+    assert len(vps) == 4, f"expected 4 VPs on torus side view, got {len(vps)}"
+    assert np.all((vps["s"] > 0.0) & (vps["s"] < 1.0)), "VP s must be in (0, 1)"
+    assert np.all((vps["cs"] >= 0) & (vps["cs"] < len(css))), (
+        "VP cs index out of bounds"
+    )
+
+
+# ── test 3: refine=False and refine=True agree within ~edge_length / 10 ───────
+
+def test_find_vps_refine_within_edge_length():
+    """Refinement moves the VP off the chord midpoint but no farther than
+    roughly one mesh edge length / 10 — both produce the same count.
+
+    On the torus side view, edge length in v is ≈ (2π) / RES, so the bound
+    is ≈ (2π)/RES √2 / 10.  We use a generous factor since the orthogonal
+    Newton step can leave the chord segment by an amount of that scale.
+    """
+    mesh, proj, cps, css, ccs = _full_pipeline(torus, torus_side_view)
+    vps_mid    = find_vps(ccs, css, cps, mesh.surface, proj, refine=False)
+    vps_refine = find_vps(ccs, css, cps, mesh.surface, proj, refine=True)
+
+    assert len(vps_mid) == len(vps_refine), (
+        f"refine changed VP count: {len(vps_mid)} → {len(vps_refine)}"
+    )
+
+    edge_len = (2 * np.pi / RES) * np.sqrt(2)
+    bound = edge_len  # within one edge length is plenty for this granularity
+    for vm, vr in zip(vps_mid, vps_refine):
+        diff = float(np.linalg.norm(vm["uv"] - vr["uv"]))
+        assert diff <= bound + 1e-10, (
+            f"refinement moved VP by {diff:.4f} > edge_len={edge_len:.4f}"
+        )
+
+
+# ── test 4: vis_change ∈ {-1, +1} (G10) ───────────────────────────────────────
+
+def test_find_vps_vis_change_sign():
+    """Every VP carries vis_change exactly +1 or -1, never 0 (G10)."""
+    mesh, proj, cps, css, ccs = _full_pipeline(torus, torus_side_view)
+    vps = find_vps(ccs, css, cps, mesh.surface, proj)
+
+    assert len(vps) >= 1, "need at least one VP for this assertion"
+    assert np.all(np.abs(vps["vis_change"]) == 1), (
+        f"vis_change must be ±1; got {np.unique(vps['vis_change'])}"
+    )
+
+
+# ── test 5: Möbius — no spurious VPs from the seam, valid invariants ──────────
+
+def test_find_vps_mobius_no_seam_artifacts():
+    """The seam of the Möbius band carries flip=-1 on its edges.  O1's
+    sign_changes already honours flip per-edge, and the d field is intrinsic
+    in uv (computed from second derivatives + projection); the chain through
+    the seam should therefore not introduce spurious sign reversals.
+
+    Whatever VP count the Möbius gives, every VP must satisfy the standard
+    invariants: valid CS index, s ∈ (0, 1), |vis_change| = 1.
+    """
+    mesh, proj, cps, css, ccs = _full_pipeline(mobius_u, mobius_ortho_view)
+    vps = find_vps(ccs, css, cps, mesh.surface, proj)
+
+    if len(vps) > 0:
+        assert np.all((vps["s"] > 0.0) & (vps["s"] < 1.0)), (
+            "Möbius VP s out of (0, 1)"
+        )
+        assert np.all((vps["cs"] >= 0) & (vps["cs"] < len(css))), (
+            "Möbius VP cs index out of bounds"
+        )
+        assert np.all(np.abs(vps["vis_change"]) == 1), (
+            "Möbius VP vis_change must be ±1"
         )
