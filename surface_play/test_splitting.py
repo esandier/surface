@@ -8,6 +8,7 @@ from surface_play.contour import (
     build_contour_curves,
     build_contour_segments,
     find_contour_points,
+    find_vps,
 )
 from surface_play.curves import build_bcs
 from surface_play.intersections import dp_dtype, sis_dtype, tp_dtype
@@ -21,6 +22,7 @@ from surface_play.splitting import (
     split_bcs_at_bcps,
     split_bcs_at_bdps,
     split_bcs_at_corners,
+    split_ccs_at_vps,
     split_sics_at_tps,
     spt_dtype,
 )
@@ -608,3 +610,86 @@ def test_tp_splits_sign_regression():
         assert abs(float(spt["bary"]) - 0.5) < 1e-9, (
             f"SIS {s_idx}: expected bary=0.5, got {float(spt['bary'])}"
         )
+
+
+# ── O10: split_ccs_at_vps ────────────────────────────────────────────────────
+
+def _torus_side_proj(surf):
+    """Torus viewed along -Y — the canonical 4-cusp configuration (see
+    test_contour.torus_side_view).
+    """
+    return Projection(surf, I=[1.0, 0.0, 0.0], J=[0.0, 0.0, 1.0])
+
+
+def test_vp_splits_no_cusps():
+    # (1) No-cusp surface (torus top-down) → 0 VP SPs.
+    surf = torus(perturb=False)
+    mesh = build_mesh(surf.domain, surf, resolution=20, jitter=True, seed=42)
+    proj = _ortho_proj(surf)  # top-down — no cusps
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+    ccs = build_contour_curves(css, cps)
+    vps = find_vps(ccs, css, cps, surf, proj)
+    assert len(vps) == 0, f"torus top-down should have 0 VPs, got {len(vps)}"
+
+    splits = SplitArrays()
+    split_ccs_at_vps(vps, css, ccs, splits, surf, proj)
+    assert len(splits.sps) == 0
+    assert len(splits.spts) == 0
+    # No CS got a split slot filled.
+    filled = int(((css["split1"] != -1) | (css["split2"] != -1)).sum())
+    assert filled == 0
+
+
+def test_vp_splits_torus_side_four_cusps():
+    # (2) Torus side view — canonical 4 cusps → 4 VP SPs.
+    # (4) Each VP creates exactly 1 SPT (only on its CS).
+    surf = torus(perturb=False)
+    mesh = build_mesh(surf.domain, surf, resolution=20, jitter=True, seed=42)
+    proj = _torus_side_proj(surf)
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+    ccs = build_contour_curves(css, cps)
+    vps = find_vps(ccs, css, cps, surf, proj)
+    assert len(vps) == 4, f"torus side view should have 4 VPs, got {len(vps)}"
+
+    splits = SplitArrays()
+    split_ccs_at_vps(vps, css, ccs, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    vp_mask = sps["type"] == "vp"
+    assert int(vp_mask.sum()) == len(vps), (
+        f"expected {len(vps)} vp SPs, got {int(vp_mask.sum())}"
+    )
+
+    # Exactly 1 SPT per VP SP.
+    for k in np.flatnonzero(vp_mask):
+        n = int((spts["sp_idx"] == int(k)).sum())
+        assert n == 1, f"vp SP {int(k)} has {n} SPTs, expected 1"
+
+    # (3) G10: vis_chge ∈ {-1, +1} for every VP SPT.
+    vp_sp_indices = set(int(k) for k in np.flatnonzero(vp_mask))
+    vp_vis_vals = [
+        int(t["vis_chge"]) for t in spts if int(t["sp_idx"]) in vp_sp_indices
+    ]
+    assert set(vp_vis_vals) <= {-1, 1}, (
+        f"VP SPT vis_chge must be ±1, got {sorted(set(vp_vis_vals))}"
+    )
+
+    # Each VP's SPT bary equals vp.s, vis equals vp.vis_change (verbatim from O4).
+    # Walk in vp order — SPs and SPTs were appended in vp order.
+    vp_sp_list = sorted(int(k) for k in np.flatnonzero(vp_mask))
+    for vp, sp_idx in zip(vps, vp_sp_list):
+        own = spts[spts["sp_idx"] == sp_idx]
+        assert len(own) == 1
+        spt = own[0]
+        assert abs(float(spt["bary"]) - float(vp["s"])) < 1e-12
+        assert int(spt["vis_chge"]) == int(vp["vis_change"])
+
+    # Each VP's host CS got a split slot filled.
+    for vp in vps:
+        cs_idx = int(vp["cs"])
+        s1 = int(css[cs_idx]["split1"])
+        s2 = int(css[cs_idx]["split2"])
+        assert s1 != -1 or s2 != -1, f"CS {cs_idx} got no split for its VP"

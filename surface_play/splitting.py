@@ -617,3 +617,47 @@ def split_sics_at_tps(
             spt_idx = splits.add_spt(sp_idx=sp_idx, bary=bary, vis_chge=vis_chge)
             splits.attach_to_segment(sis_pairs, s_idx, spt_idx,
                                      segment_label="SIS")
+
+
+# ── O10 ───────────────────────────────────────────────────────────────────────
+
+def _vp_uv_for_sp(vp: np.void) -> np.ndarray:
+    """The VP's uv in the domain — used as the SP's uv anchor."""
+    return np.asarray(vp["uv"], dtype=float).reshape(2)
+
+
+def split_ccs_at_vps(
+    vps: np.ndarray,
+    css: np.ndarray,
+    ccs: list,
+    splits: SplitArrays,
+    surface: "SurfaceParams",
+    projection: "Projection",
+) -> None:
+    """Split CSs at every cusp (VP). One 'vp' SP and one SPT per VP.
+
+    For each VP:
+      - Create SP with `type="vp"`, `xyz=vp.xyz`, `xy=projection.XY(xyz)`,
+        `uv=vp.uv`.
+      - Attach a single SPT on the host CS (index `vp["cs"]`) with
+        `bary = vp.s` and `vis_chge = vp.vis_change` (G10 — already ±1 from O4).
+
+    `ccs` and `surface` are unused (no geometry — VPs already carry vis_change);
+    kept in the signature for API parity with the roadmap.
+    """
+    del ccs, surface  # API parity only; algorithm reads vp + writes css.
+
+    if len(vps) == 0:
+        return
+
+    for vp in vps:
+        uv = _vp_uv_for_sp(vp)
+        xyz = np.asarray(vp["xyz"], dtype=float).reshape(3)
+        xy = projection.XY(xyz)
+        sp_idx = splits.add_sp(uv=uv, xyz=xyz, xy=xy, sp_type="vp")
+
+        cs_idx = int(vp["cs"])
+        bary = float(vp["s"])
+        vis = int(vp["vis_change"])
+        spt_idx = splits.add_spt(sp_idx=sp_idx, bary=bary, vis_chge=vis)
+        splits.attach_to_segment(css, cs_idx, spt_idx, segment_label="CS")
