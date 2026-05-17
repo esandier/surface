@@ -495,3 +495,125 @@ def split_bcs_at_bdps(
             spt_be = splits.add_spt(sp_idx=sp_idx, bary=s_here, vis_chge=vis)
             splits.attach_to_segment(mesh.edges, e_idx, spt_be,
                                      segment_label="BE")
+
+
+# ── O9 ────────────────────────────────────────────────────────────────────────
+
+def _sis_preimage_faces(sis_pair_row: np.void, dps: np.ndarray) -> tuple[int, int]:
+    """Two faces on which the SIS's preimages live.
+
+    Mirrors `intersections.py:_first_shared_face` usage at lines 800-801 / 805-806
+    of `find_triple_points`: the SIS has two preimage segments, one on
+    `_first_shared_face(A_p.A1, A_q.A1|A2)` and one on `_first_shared_face(
+    A_p.A2, A_q.A2|A1)`, where the |A2/|A1 alternative is selected by `flip`.
+    """
+    from surface_play.intersections import _first_shared_face
+
+    p = int(sis_pair_row["p_dp"])
+    q = int(sis_pair_row["q_dp"])
+    f = int(sis_pair_row["flip"])
+    f_A = _first_shared_face(
+        dps["A1"][p], dps["A1"][q] if f == 1 else dps["A2"][q],
+    )
+    f_B = _first_shared_face(
+        dps["A2"][p], dps["A2"][q] if f == 1 else dps["A1"][q],
+    )
+    return f_A, f_B
+
+
+def split_sics_at_tps(
+    tps: np.ndarray,
+    sis_pairs: np.ndarray,
+    dps: np.ndarray,
+    splits: SplitArrays,
+    surface: "SurfaceParams",
+    projection: "Projection",
+) -> None:
+    """Split SISs at every triple point. One 'tp' SP and 3 SPTs (one per SIS).
+
+    For each TP and each `i ∈ {0, 1, 2}` (local index over `tp["faces"]`):
+      - `Fl = tp["faces"][i]`, `Pl = tp["uv"][i]` (preimage on Fl).
+      - Identify the SIS "Si" in `tp["sis_indices"]` whose preimages do NOT
+        live on Fl (the OTHER two SISs share Fl).
+      - `N = SN(Pl)`, flipped so `axis · N > 0` (spec line 345 says `Z(N) > 0`
+        but Projection.Z subtracts an anchor and is wrong for normals — see
+        the O7 `_bvis_chge` precedent and `resume_O7_DONE.md` point 2).
+      - `T_Si = dps[q_dp].xyz - dps[p_dp].xyz` (chord — adequate for sign).
+      - `vis_chge = +1 if T_Si · N > 0 else -1` (G10 — TP splits never 0).
+      - `bary = ‖TP - p_xyz‖ / ‖q_xyz - p_xyz‖`, clipped to [0, 1].
+
+    Mutates `sis_pairs` (split1/split2 on the 3 involved SISs) and `splits`.
+    """
+    if projection.mode != "ortho":
+        raise NotImplementedError("split_sics_at_tps: perspective not yet supported")
+
+    if len(tps) == 0:
+        return
+
+    axis = projection._axis
+
+    for tp in tps:
+        tp_xyz = np.asarray(tp["xyz"], dtype=float).reshape(3)
+        tp_xy = projection.XY(tp_xyz)
+        # SP uv anchor: pick the first preimage uv (any of the three would do;
+        # it is only metadata since the TP is a single 3D point).
+        sp_uv = np.asarray(tp["uv"][0], dtype=float).reshape(2)
+        sp_idx = splits.add_sp(uv=sp_uv, xyz=tp_xyz, xy=tp_xy, sp_type="tp")
+
+        sis_idx_arr = np.asarray(tp["sis_indices"], dtype=np.int64).reshape(3)
+        face_arr = np.asarray(tp["faces"], dtype=np.int64).reshape(3)
+        uv_arr = np.asarray(tp["uv"], dtype=float).reshape(3, 2)
+
+        # Precompute (f_A, f_B) for each of the 3 SISs.
+        sis_pre_faces = [
+            _sis_preimage_faces(sis_pairs[int(sis_idx_arr[k])], dps)
+            for k in range(3)
+        ]
+
+        for i in range(3):
+            Fl = int(face_arr[i])
+            Pl = uv_arr[i]
+
+            # Find Si: the SIS not preimaging on Fl.
+            si_local = -1
+            for k in range(3):
+                f_A, f_B = sis_pre_faces[k]
+                if Fl != f_A and Fl != f_B:
+                    si_local = k
+                    break
+            if si_local < 0:
+                raise RuntimeError(
+                    f"O9: no SIS in tp.sis_indices={sis_idx_arr.tolist()} avoids "
+                    f"face Fl={Fl}; preimage-faces={sis_pre_faces}"
+                )
+            s_idx = int(sis_idx_arr[si_local])
+
+            # Normal at Pl, oriented so axis · N > 0.
+            N = np.asarray(surface.SN(float(Pl[0]), float(Pl[1])),
+                           dtype=float).reshape(3)
+            if float(axis @ N) < 0.0:
+                N = -N
+
+            # Chord tangent of Si.
+            row = sis_pairs[s_idx]
+            p_dp = int(row["p_dp"])
+            q_dp = int(row["q_dp"])
+            p_xyz = np.asarray(dps["xyz"][p_dp], dtype=float).reshape(3)
+            q_xyz = np.asarray(dps["xyz"][q_dp], dtype=float).reshape(3)
+            chord = q_xyz - p_xyz
+            chord_norm = float(np.linalg.norm(chord))
+
+            vis_chge = 1 if float(np.dot(chord, N)) > 0.0 else -1
+
+            if chord_norm == 0.0:
+                bary = 0.5
+            else:
+                bary = float(np.linalg.norm(tp_xyz - p_xyz) / chord_norm)
+                if bary < 0.0:
+                    bary = 0.0
+                elif bary > 1.0:
+                    bary = 1.0
+
+            spt_idx = splits.add_spt(sp_idx=sp_idx, bary=bary, vis_chge=vis_chge)
+            splits.attach_to_segment(sis_pairs, s_idx, spt_idx,
+                                     segment_label="SIS")

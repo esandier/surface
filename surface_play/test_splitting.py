@@ -10,7 +10,7 @@ from surface_play.contour import (
     find_contour_points,
 )
 from surface_play.curves import build_bcs
-from surface_play.intersections import dp_dtype, sis_dtype
+from surface_play.intersections import dp_dtype, sis_dtype, tp_dtype
 from surface_play.mesh import build_mesh, edge_dtype
 from surface_play.projection import Projection
 from surface_play.splitting import (
@@ -21,6 +21,7 @@ from surface_play.splitting import (
     split_bcs_at_bcps,
     split_bcs_at_bdps,
     split_bcs_at_corners,
+    split_sics_at_tps,
     spt_dtype,
 )
 from surface_play.test_fixtures import (
@@ -443,3 +444,167 @@ def test_bvis_chge_handcrafted():
     for s in (0.25, 0.5, 0.75):
         v = _bvis_chge(surf, proj, edge, s)
         assert v in (-1, 0, 1), f"_bvis_chge returned {v} for s={s}"
+
+
+# ── O9: split_sics_at_tps ────────────────────────────────────────────────────
+
+def _synthetic_tp_for_o9(chord_zs):
+    """Build a 1-TP synthetic fixture for O9.
+
+    `chord_zs` is a 3-tuple of +1 / -1 — the sign of the z-chord (q_xyz.z -
+    p_xyz.z) for each of the 3 SISs. Combined with SN ≡ (0, 0, 1) and axis ≡
+    (0, 0, 1) (I=[1,0,0], J=[0,1,0]), this lets the test predict each
+    SPT's vis_chge: vis = +1 if chord_z > 0 else -1.
+
+    The geometry mirrors `test_intersections._synthetic_three_sis_fixture`:
+    three SISs interlocking on three faces (F1=10, F2=20, F3=30); 3D
+    verification trivially passes because `S(u, v) ≡ 0`.
+    """
+    from types import SimpleNamespace
+
+    from surface_play.domain import Domain
+
+    dps = np.zeros(6, dtype=dp_dtype)
+    dps["A1"] = np.array(
+        [(10, -1), (10, -1), (10, -1), (10, -1), (20, -1), (20, -1)],
+        dtype=np.int32,
+    )
+    dps["A2"] = np.array(
+        [(20, -1), (20, -1), (30, -1), (30, -1), (30, -1), (30, -1)],
+        dtype=np.int32,
+    )
+    dps["uv1"] = np.array([
+        [0.0, 0.0], [0.2, 0.2],
+        [0.0, 0.2], [0.2, 0.0],
+        [0.4, 0.2], [0.6, 0.0],
+    ])
+    dps["uv2"] = np.array([
+        [0.4, 0.0], [0.6, 0.2],
+        [0.0, 0.4], [0.2, 0.6],
+        [0.0, 0.6], [0.2, 0.4],
+    ])
+    dps["on_boundary"] = False
+    # Chord xyz per SIS: p_xyz at z=-1 (or +1), q_xyz at z=+1 (or -1).
+    for k, sign in enumerate(chord_zs):
+        p = 2 * k
+        q = 2 * k + 1
+        dps["xyz"][p] = [0.0, 0.0, -float(sign)]
+        dps["xyz"][q] = [0.0, 0.0, +float(sign)]
+
+    sis_pairs = np.zeros(3, dtype=sis_dtype)
+    sis_pairs["p_dp"] = [0, 2, 4]
+    sis_pairs["q_dp"] = [1, 3, 5]
+    sis_pairs["flip"] = 1
+    sis_pairs["split1"] = -1
+    sis_pairs["split2"] = -1
+
+    class _FakeSurface:
+        def S(self, u, v):
+            return np.zeros(3)
+
+        def SN(self, u, v):
+            return np.array([0.0, 0.0, 1.0])
+
+    mesh = SimpleNamespace(domain=Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0)))
+    return sis_pairs, dps, mesh, _FakeSurface()
+
+
+def _fake_ortho_projection():
+    """An ortho Projection with I=+x, J=+y (axis=+z). The surface attribute is
+    only needed for ker_param/proj_vec; O9 uses only `_axis` and `XY`, neither
+    of which touches surface methods, so a None placeholder via object() works.
+    """
+    return Projection(object(), I=[1.0, 0.0, 0.0], J=[0.0, 1.0, 0.0])
+
+
+def test_tp_splits_no_tps():
+    # (1) No-TP surfaces: the full Layer-C pipeline through find_triple_points
+    #     yields no TPs; split_sics_at_tps produces 0 SPs.
+    from surface_play.intersections import (
+        build_sis_pairs,
+        find_double_points,
+        find_triple_points,
+    )
+    for factory in (paraboloid, torus, helicoid, mobius_u):
+        surf = factory(perturb=False)
+        mesh = build_mesh(surf.domain, surf, resolution=10, jitter=True, seed=42)
+        proj = _ortho_proj(surf)
+        dps = find_double_points(mesh, surf)
+        sis_pairs = build_sis_pairs(dps)
+        tps = find_triple_points(sis_pairs, dps, mesh, surf)
+        splits = SplitArrays()
+        split_sics_at_tps(tps, sis_pairs, dps, splits, surf, proj)
+        assert len(splits.sps) == 0, (
+            f"{factory.__name__}: expected 0 tp SPs, got {len(splits.sps)}"
+        )
+        assert len(splits.spts) == 0
+
+
+def test_tp_splits_synthetic_one_tp():
+    # (2) Synthetic 1-TP fixture: exactly 1 SP type='tp' and 3 SPTs (one per SIS).
+    from surface_play.intersections import find_triple_points
+
+    sis_pairs, dps, mesh, surf = _synthetic_tp_for_o9(chord_zs=(+1, +1, +1))
+    tps = find_triple_points(sis_pairs, dps, mesh, surf)
+    assert len(tps) == 1, f"expected 1 TP from fixture, got {len(tps)}"
+
+    proj = _fake_ortho_projection()
+    splits = SplitArrays()
+    split_sics_at_tps(tps, sis_pairs, dps, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    tp_mask = sps["type"] == "tp"
+    assert int(tp_mask.sum()) == 1, f"expected 1 tp SP, got {int(tp_mask.sum())}"
+
+    sp_idx = int(np.flatnonzero(tp_mask)[0])
+    own = spts[spts["sp_idx"] == sp_idx]
+    assert len(own) == 3, f"expected 3 SPTs (one per SIS), got {len(own)}"
+
+    # Each of the 3 SISs gets a split slot filled.
+    filled = sum(
+        (int(sis_pairs[k]["split1"]) != -1) + (int(sis_pairs[k]["split2"]) != -1)
+        for k in range(3)
+    )
+    assert filled == 3, f"expected 3 SIS split slots filled, got {filled}"
+
+    # (3) G10: vis_chge ∈ {-1, +1} only (never 0 for TPs).
+    assert set(int(v) for v in own["vis_chge"]) <= {-1, 1}
+
+
+def test_tp_splits_sign_regression():
+    # (4) Handcrafted signs: SN ≡ +z, axis ≡ +z, chord_z = ±1 — so vis_chge
+    #     must equal sign(chord_z) for each SIS.
+    from surface_play.intersections import find_triple_points
+
+    chord_zs = (+1, -1, +1)  # SIS_0: +1, SIS_1: -1, SIS_2: +1
+    sis_pairs, dps, mesh, surf = _synthetic_tp_for_o9(chord_zs=chord_zs)
+    tps = find_triple_points(sis_pairs, dps, mesh, surf)
+    assert len(tps) == 1
+
+    proj = _fake_ortho_projection()
+    splits = SplitArrays()
+    split_sics_at_tps(tps, sis_pairs, dps, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    assert int((sps["type"] == "tp").sum()) == 1
+
+    # Map each filled SPT back to its SIS index, then check the sign.
+    for s_idx in range(3):
+        slot1 = int(sis_pairs[s_idx]["split1"])
+        slot2 = int(sis_pairs[s_idx]["split2"])
+        assert slot1 != -1 and slot2 == -1, (
+            f"SIS {s_idx}: expected exactly split1 filled, got "
+            f"split1={slot1} split2={slot2}"
+        )
+        spt = spts[slot1]
+        expected = 1 if chord_zs[s_idx] > 0 else -1
+        assert int(spt["vis_chge"]) == expected, (
+            f"SIS {s_idx}: chord_z sign {chord_zs[s_idx]} → expected vis_chge "
+            f"{expected}, got {int(spt['vis_chge'])}"
+        )
+        # bary = 0.5 because TP_xyz = (0, 0, 0) is the midpoint of (0,0,±1).
+        assert abs(float(spt["bary"]) - 0.5) < 1e-9, (
+            f"SIS {s_idx}: expected bary=0.5, got {float(spt['bary'])}"
+        )
