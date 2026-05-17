@@ -10,6 +10,7 @@ from surface_play.contour import (
     find_contour_points,
 )
 from surface_play.curves import build_bcs
+from surface_play.intersections import dp_dtype, sis_dtype
 from surface_play.mesh import build_mesh, edge_dtype
 from surface_play.projection import Projection
 from surface_play.splitting import (
@@ -18,6 +19,7 @@ from surface_play.splitting import (
     _bvis_chge,
     sp_dtype,
     split_bcs_at_bcps,
+    split_bcs_at_bdps,
     split_bcs_at_corners,
     spt_dtype,
 )
@@ -223,6 +225,208 @@ def test_bcp_splits():
     split_bcs_at_bcps(mesh_t, bcs_t, ccs_t, css_t, cps_t, splits_t, surf_t, proj_t)
     assert len(splits_t.sps) == 0
     assert len(splits_t.spts) == 0
+
+
+def _find_two_boundary_edges(mesh, *, parallel: bool = False):
+    """Return two boundary-edge indices from a real mesh.
+
+    parallel=False: any two BEs (typically perpendicular sides — fine for
+    case 2 mocks).
+    parallel=True: two BEs that share a side (same row of `g == -1` with
+    similar `pq` direction) — used for case 1 mocks where two boundary
+    edges meet at a "DP".
+    """
+    bnd = mesh.boundary_edge_idx
+    if parallel:
+        # Pick first two BEs on the same side: their `pq` should be ~parallel.
+        first = int(bnd[0])
+        first_pq = mesh.edges[first]["pq"]
+        for k in bnd[1:]:
+            pq_k = mesh.edges[int(k)]["pq"]
+            cos = abs(float(np.dot(first_pq, pq_k))) / (
+                np.linalg.norm(first_pq) * np.linalg.norm(pq_k) + 1e-30
+            )
+            if cos > 0.99:
+                return first, int(k)
+        return first, int(bnd[1])
+    return int(bnd[0]), int(bnd[1])
+
+
+def _make_synthetic_bdp(mesh, *, dp_type: str, e1: int, e2: int = -1,
+                        s1: float = 0.5, s2: float = 0.5,
+                        f2: int = -1, uv2_face=None):
+    """Build a 1-DP, 1-SIS pair of arrays anchored on real mesh edges.
+
+    Two records: one DP with on_boundary=True (the BDP) plus one anchor DP
+    so that `sis_pairs` can be non-empty. The SIS edge joins them.
+    """
+    dps = np.zeros(2, dtype=dp_dtype)
+
+    # BDP — record 0.
+    edge1 = mesh.edges[e1]
+    uv1 = edge1["p"] + s1 * edge1["pq"]
+    dps["E1"][0] = e1
+    dps["E2"][0] = e2
+    dps["F2"][0] = f2
+    dps["type"][0] = dp_type
+    dps["on_boundary"][0] = True
+    dps["uv1"][0] = uv1
+    dps["A1"][0] = (int(mesh.edges["f"][e1]), int(mesh.edges["g"][e1]))
+    if dp_type == "EF":
+        # uv2 on face f2 — caller supplies, or default to face centroid.
+        if uv2_face is None:
+            face = mesh.faces[f2]
+            uv2 = face["p"] + (face["pq"] + face["pr"]) / 3.0
+        else:
+            uv2 = np.asarray(uv2_face, dtype=float)
+        dps["uv2"][0] = uv2
+        dps["A2"][0] = (f2, -1)
+        dps["xyz"][0] = mesh.surface.S(float(uv2[0]), float(uv2[1]))
+    else:  # EE
+        edge2 = mesh.edges[e2]
+        uv2 = edge2["p"] + s2 * edge2["pq"]
+        dps["uv2"][0] = uv2
+        dps["A2"][0] = (int(mesh.edges["f"][e2]), int(mesh.edges["g"][e2]))
+        dps["xyz"][0] = mesh.surface.S(float(uv2[0]), float(uv2[1]))
+
+    # Anchor DP — record 1; off-boundary, just used as the other end of the SIS.
+    anchor_e = int(mesh.boundary_edge_idx[-1])  # any edge; data unused for vis
+    anchor_edge = mesh.edges[anchor_e]
+    anchor_uv = anchor_edge["p"] + 0.5 * anchor_edge["pq"]
+    dps["E1"][1] = anchor_e
+    dps["E2"][1] = -1
+    dps["F2"][1] = -1
+    dps["type"][1] = "EF"
+    dps["on_boundary"][1] = False
+    dps["uv1"][1] = anchor_uv
+    dps["uv2"][1] = anchor_uv
+    dps["A1"][1] = (int(mesh.edges["f"][anchor_e]), int(mesh.edges["g"][anchor_e]))
+    dps["A2"][1] = (-1, -1)
+    dps["xyz"][1] = mesh.surface.S(float(anchor_uv[0]), float(anchor_uv[1]))
+
+    sis_pairs = np.zeros(1, dtype=sis_dtype)
+    sis_pairs["p_dp"] = 0
+    sis_pairs["q_dp"] = 1
+    sis_pairs["flip"] = 1
+    sis_pairs["split1"] = -1
+    sis_pairs["split2"] = -1
+    return dps, sis_pairs
+
+
+def test_bdp_splits_no_bdps():
+    # (1) Surfaces without self-intersection / without on_boundary DPs:
+    #     split_bcs_at_bdps creates 0 'bdp' SPs and leaves arrays untouched.
+    from surface_play.intersections import (
+        build_sis_pairs, find_double_points,
+    )
+    for factory in (paraboloid, torus, helicoid):
+        surf = factory(perturb=False)
+        mesh = build_mesh(surf.domain, surf, resolution=10, jitter=True, seed=42)
+        bcs = build_bcs(mesh)
+        proj = _ortho_proj(surf)
+        dps = find_double_points(mesh, surf)
+        sis_pairs = build_sis_pairs(dps)
+        splits = SplitArrays()
+        split_bcs_at_bdps(mesh, bcs, [], sis_pairs, dps, splits, surf, proj)
+        assert len(splits.sps) == 0, (
+            f"{factory.__name__}: expected 0 bdp SPs, got {len(splits.sps)}"
+        )
+
+
+def test_bdp_splits_mock_case2_ef():
+    # (2) Mock case-2 EF DP anchored on the helicoid (boundary E1, interior F2).
+    surf = helicoid(perturb=False)
+    mesh = build_mesh(surf.domain, surf, resolution=10, jitter=True, seed=42)
+    bcs = build_bcs(mesh)
+    proj = _ortho_proj(surf)
+
+    e1 = int(mesh.boundary_edge_idx[0])
+    # Pick an interior face — first non-boundary face works.
+    bnd_face_set = set(mesh.edges["f"][mesh.boundary_edge_idx].tolist())
+    f2 = next(i for i in range(len(mesh.faces)) if i not in bnd_face_set)
+
+    dps, sis_pairs = _make_synthetic_bdp(
+        mesh, dp_type="EF", e1=e1, f2=f2, s1=0.5,
+    )
+    splits = SplitArrays()
+    split_bcs_at_bdps(mesh, bcs, [], sis_pairs, dps, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    bdp_mask = sps["type"] == "bdp"
+    assert int(bdp_mask.sum()) == 1, f"expected 1 bdp SP, got {int(bdp_mask.sum())}"
+    sp_idx = int(np.flatnonzero(bdp_mask)[0])
+    own_spts = spts[spts["sp_idx"] == sp_idx]
+    assert len(own_spts) == 2, (
+        f"case-2 EF should make 2 SPTs (1 SIS + 1 BE); got {len(own_spts)}"
+    )
+    be_spts = [int(t["vis_chge"]) for t in own_spts if t["bary"] not in (0.0, 1.0)]
+    sis_spts = [int(t["vis_chge"]) for t in own_spts if t["bary"] in (0.0, 1.0)]
+    assert all(v == 0 for v in sis_spts), f"SIS-side vis_chge must be 0; got {sis_spts}"
+    assert all(v in (-1, 1) for v in be_spts), (
+        f"case-2 BE-side vis_chge ∈ {{-1, +1}}; got {be_spts}"
+    )
+
+
+def test_bdp_splits_mock_case2_ee_one_boundary():
+    # (3) Mock case-2 EE DP: E1 boundary, E2 interior.
+    surf = helicoid(perturb=False)
+    mesh = build_mesh(surf.domain, surf, resolution=10, jitter=True, seed=42)
+    bcs = build_bcs(mesh)
+    proj = _ortho_proj(surf)
+
+    e1 = int(mesh.boundary_edge_idx[0])
+    # Pick any interior edge (g != -1).
+    interior_mask = mesh.edges["g"] != -1
+    e2 = int(np.flatnonzero(interior_mask)[0])
+
+    dps, sis_pairs = _make_synthetic_bdp(
+        mesh, dp_type="EE", e1=e1, e2=e2, s1=0.4, s2=0.4,
+    )
+    splits = SplitArrays()
+    split_bcs_at_bdps(mesh, bcs, [], sis_pairs, dps, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    bdp_mask = sps["type"] == "bdp"
+    assert int(bdp_mask.sum()) == 1
+    sp_idx = int(np.flatnonzero(bdp_mask)[0])
+    own = spts[spts["sp_idx"] == sp_idx]
+    assert len(own) == 2, f"case-2 EE (one boundary): 2 SPTs; got {len(own)}"
+    be_spts = [int(t["vis_chge"]) for t in own if t["bary"] not in (0.0, 1.0)]
+    assert all(v in (-1, 1) for v in be_spts), be_spts
+
+
+def test_bdp_splits_mock_case1():
+    # (4) Mock case-1: EE DP with both E1 and E2 on the boundary.
+    surf = helicoid(perturb=False)
+    mesh = build_mesh(surf.domain, surf, resolution=10, jitter=True, seed=42)
+    bcs = build_bcs(mesh)
+    proj = _ortho_proj(surf)
+
+    e1, e2 = _find_two_boundary_edges(mesh, parallel=False)
+    assert e1 != e2
+
+    dps, sis_pairs = _make_synthetic_bdp(
+        mesh, dp_type="EE", e1=e1, e2=e2, s1=0.4, s2=0.4,
+    )
+    splits = SplitArrays()
+    split_bcs_at_bdps(mesh, bcs, [], sis_pairs, dps, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    bdp_mask = sps["type"] == "bdp"
+    assert int(bdp_mask.sum()) == 1
+    sp_idx = int(np.flatnonzero(bdp_mask)[0])
+    own = spts[spts["sp_idx"] == sp_idx]
+    # Case-1: one SIS SPT + 2 BE SPTs.
+    assert len(own) == 3, f"case-1 should make 3 SPTs (1 SIS + 2 BE); got {len(own)}"
+    be_spts = [int(t["vis_chge"]) for t in own if t["bary"] not in (0.0, 1.0)]
+    sis_spts = [int(t["vis_chge"]) for t in own if t["bary"] in (0.0, 1.0)]
+    assert all(v == 0 for v in sis_spts)
+    assert all(v in (-1, 0, 1) for v in be_spts), (
+        f"case-1 BE-side vis_chge ∈ {{-1, 0, +1}}; got {be_spts}"
+    )
 
 
 def test_bvis_chge_handcrafted():
