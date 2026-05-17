@@ -18,9 +18,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from surface_play.contour import ContourCurve
     from surface_play.curves import BoundaryCurve
     from surface_play.mesh import Mesh
     from surface_play.projection import Projection
+    from surface_play.surface import SurfaceParams
 
 
 sp_dtype = np.dtype([
@@ -142,3 +144,130 @@ def split_bcs_at_corners(
             bary = 0.0 if bool(p_mask[k]) else 1.0
             spt_idx = splits.add_spt(sp_idx=sp_idx, bary=bary, vis_chge=0)
             splits.attach_to_segment(mesh.edges, e_idx, spt_idx, segment_label="BE")
+
+
+# ── O7 ────────────────────────────────────────────────────────────────────────
+
+def _bvis_chge(
+    surface: "SurfaceParams",
+    projection: "Projection",
+    edge: np.void,
+    s: float,
+) -> int:
+    """Visibility change on a boundary edge at parametric position s ∈ (0, 1).
+
+    Translation of the spec pseudocode (Reorganization §"Splitting of BCs at
+    Contour Points (CPs)", lines 275-296) onto the current refactor:
+
+      - ker_param(p0)     ↔ spec's `kerdS(*p0)[0]` (2D kernel direction in uv).
+      - k0·Su + k1·Sv     ↔ `dS(*p0, *ker)` (3D image of the kernel direction).
+      - axis · v3         ↔ `Z(v3)` for a tangent vector (depth along view axis;
+                            see legacy silhouette.py:434 — the projection.Z
+                            method here subtracts an anchor which is wrong for
+                            tangents, so we inline the inner product).
+      - (axis·Su, axis·Sv) ↔ `SD_jac(*p0, *axis)` — 2D Jacobian in uv of (axis·S).
+
+    Nb sign convention: spec uses `Nb = e["dir"]` directly, and the current
+    mesh stores `dir` as the **inward** boundary normal (see _build_edges_faces
+    in mesh.py — `d` is flipped to point toward the boundary triangle's apex).
+    The legacy mesh (old stuff/silhouette.py:569) also stored an `inward`
+    vector under the same name, so the spec formula's `ker · Nb > 0` test is
+    the inward-normal version. No flip needed.
+
+    Perspective is not yet supported (the `axis · v3` shortcut for depth is
+    ortho-specific; perspective needs a per-point view direction `S - eye`).
+    """
+    if projection.mode != "ortho":
+        raise NotImplementedError("bvis_chge: perspective mode not yet supported")
+
+    p = np.asarray(edge["p"], dtype=float).reshape(2)
+    dp = np.asarray(edge["pq"], dtype=float).reshape(2)
+    Nb = np.asarray(edge["dir"], dtype=float).reshape(2)
+
+    p0 = p + float(s) * dp
+    u, v = float(p0[0]), float(p0[1])
+
+    ker = projection.ker_param(p0)
+
+    Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
+    Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+    axis = projection._axis
+
+    dS_ker = ker[0] * Su + ker[1] * Sv
+    if float(axis @ dS_ker) < 0.0:
+        ker = -ker
+
+    if float(np.dot(ker, Nb)) <= 0.0:
+        return 0
+
+    norm_dp = float(np.linalg.norm(dp))
+    if norm_dp == 0.0:
+        return 0
+    Tb = dp / norm_dp
+
+    Np = np.array([float(axis @ Su), float(axis @ Sv)])
+    if float(np.dot(Np, ker)) < 0.0:
+        Np = -Np
+
+    return 1 if float(np.dot(Tb, Np)) > 0.0 else -1
+
+
+def split_bcs_at_bcps(
+    mesh: "Mesh",
+    bcs: "list[BoundaryCurve]",
+    ccs: "list[ContourCurve]",
+    css: np.ndarray,
+    cps: np.ndarray,
+    splits: SplitArrays,
+    surface: "SurfaceParams",
+    projection: "Projection",
+) -> None:
+    """Split BCs and CSs at every CP with ptype==4 (CP on a boundary edge).
+
+    For each such CP: create one SP of type 'bcp', attach one SPT on the
+    unique CS containing the CP (per spec line 270, on the boundary there is
+    exactly one), and one SPT on the boundary edge `cp.e`. The CS-side SPT
+    has `vis_chge = 0`; the BE-side SPT carries `bvis_chge(e, s)` (G18).
+
+    Mutates `mesh.edges` (split1/split2 on BEs), `css` (split1/split2 on the
+    CSs), and `splits`. `bcs` and `ccs` are unused by the algorithm but kept
+    in the signature for consistency with O6/O8 and so callers can verify
+    sub-assert 4 (every boundary CP is an open-CC endpoint) downstream.
+    """
+    del bcs, ccs  # API parity only; algorithm uses cps[i]["e"] + css scan.
+
+    if len(cps) == 0:
+        return
+
+    bcp_idx = np.nonzero(cps["ptype"] == 4)[0]
+    if len(bcp_idx) == 0:
+        return
+
+    cs_p = css["p_cp"]
+    cs_q = css["q_cp"]
+
+    for i in bcp_idx:
+        cp = cps[i]
+        uv = np.asarray(cp["uv"], dtype=float)
+        xyz = np.asarray(cp["xyz"], dtype=float)
+        xy = projection.XY(xyz)
+        sp_idx = splits.add_sp(uv=uv, xyz=xyz, xy=xy, sp_type="bcp")
+
+        on_p = cs_p == int(i)
+        on_q = cs_q == int(i)
+        hits = np.nonzero(on_p | on_q)[0]
+        if len(hits) != 1:
+            raise RuntimeError(
+                f"O7: expected exactly one CS containing boundary CP {int(i)}, "
+                f"found {len(hits)} (spec line 270). hits={hits.tolist()}"
+            )
+        cs_idx = int(hits[0])
+        bary_cs = 0.0 if bool(on_p[cs_idx]) else 1.0
+        spt_cs = splits.add_spt(sp_idx=sp_idx, bary=bary_cs, vis_chge=0)
+        splits.attach_to_segment(css, cs_idx, spt_cs, segment_label="CS")
+
+        e_idx = int(cp["e"])
+        bary_be = float(cp["s"])
+        vis = _bvis_chge(surface, projection, mesh.edges[e_idx], bary_be)
+        spt_be = splits.add_spt(sp_idx=sp_idx, bary=bary_be, vis_chge=vis)
+        splits.attach_to_segment(mesh.edges, e_idx, spt_be, segment_label="BE")
