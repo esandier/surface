@@ -455,7 +455,9 @@ Curves need to be resampled because we will compute their intersections in proje
 
 The resampling is done as follows.
 
-For every SP, we consider the curves originating or ending at it, compute the smallest length **in projected space** of these curves, call it `L`. We let `d = min(L/10, M/GRID_RESOLUTION)`, where  `M`is an approximation of the diameter of the surface in projected space. Then every curve is cut in its middle (with respect to arclength in projected space). On each half curve, points are placed at arclengths coordinates `0,d,2d,3d,...` until we reach `L/2 - d` (by definition of `d`, there are at least 4 points per half-curve).
+For every SP, we consider the curves originating or ending at it, compute the smallest length **in projected space** of these curves, call it `L`. We let `d = min(L/10, M/RESOLUTION)`, where  `M`is an approximation of the diameter of the surface in projected space and `RESOLUTION` is the resampling density (distinct from the mesh `GRID_RESOLUTION`). Then every curve is cut in its middle (with respect to arclength in projected space). On each half curve, points are placed at arclengths coordinates `0,d,2d,3d,...` until we reach `L/2 - d` (by definition of `d`, there are at least 4 points per half-curve).
+
+**SP-less SubCurves.** A SubCurve with no Split Points at all (closed parent whose component was alone — e.g., a flat disk with only its boundary curve, no silhouette and no helper curve) is passed through to the resampled output without subdivision. Its polyline is taken verbatim from the chain. There is no `L` to derive a step size from, and no SP to anchor at.
 
 
 ## Projection of the new points.
