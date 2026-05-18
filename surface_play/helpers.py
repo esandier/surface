@@ -420,12 +420,152 @@ def build_helper_curves(
 
     # 3. Bridging loop. Active components keyed by representative root.
     hcs: list[SubCurve] = []
-    ha_dedup: dict[tuple, int] = {}   # sample.dedup_key -> SP index
+    ha_dedup: dict[tuple, int] = {}      # sample.dedup_key -> SP index
+    ha_dedup_uv: dict[tuple, int] = {}   # rounded uv -> SP index (G6 across parents)
+
+    def _resolve_parent(sample: _Sample):
+        """Return (seg_array, segment_label, parent_chain, chain_to_abs_map)."""
+        if sample.parent_kind == "BC":
+            return (mesh.edges, "BE", bcs[sample.parent_idx].edge_indices,
+                    mesh.boundary_edge_idx)
+        if sample.parent_kind == "CC":
+            return (css, "CS", ccs[sample.parent_idx].cs_indices, None)
+        return (sis_pairs, "SIS", sics[sample.parent_idx].sis_indices, None)
+
+    def _segment_full(seg_array, seg_idx: int) -> bool:
+        return (int(seg_array[seg_idx]["split1"]) != -1 and
+                int(seg_array[seg_idx]["split2"]) != -1)
+
+    def _find_neighbor_seg(sample: _Sample):
+        """Sample's vertex is shared with an adjacent chain segment. Return
+        (neighbor_seg_global, neighbor_bary) or None if no neighbor / full.
+        """
+        seg_array, _, chain, chain_to_abs = _resolve_parent(sample)
+        n_chain = len(chain)
+        if n_chain == 0:
+            return None
+
+        # Locate sample.seg_global in the chain.
+        target_pos = -1
+        for k in range(n_chain):
+            tok_local = abs(int(chain[k])) - 1
+            abs_seg = (int(chain_to_abs[tok_local]) if chain_to_abs is not None
+                       else tok_local)
+            if abs_seg == sample.seg_global:
+                target_pos = k
+                break
+        if target_pos < 0:
+            return None
+
+        is_closed_chain = (n_chain >= 2 and
+                           abs(int(chain[0])) == abs(int(chain[-1])))
+        # Unique segment count (drop wrap duplicate).
+        N_seg = n_chain - 1 if is_closed_chain else n_chain
+        if target_pos >= N_seg:
+            target_pos = 0  # the wrap-duplicate refers to the same segment as pos 0.
+
+        sign_k = 1 if int(chain[target_pos]) > 0 else -1
+        # sample.end == 0 → segment-native p; in chain dir, that's the ENTRY when
+        # sign_k == +1, EXIT when sign_k == -1.
+        is_entry = (sample.end == 0 and sign_k > 0) or (sample.end == 1 and sign_k < 0)
+
+        if is_entry:
+            if target_pos > 0:
+                neighbor_pos = target_pos - 1
+            elif is_closed_chain:
+                neighbor_pos = N_seg - 1
+            else:
+                return None
+        else:  # exit
+            if target_pos < N_seg - 1:
+                neighbor_pos = target_pos + 1
+            elif is_closed_chain:
+                neighbor_pos = 0
+            else:
+                return None
+
+        neighbor_signed = int(chain[neighbor_pos])
+        neighbor_local = abs(neighbor_signed) - 1
+        neighbor_seg = (int(chain_to_abs[neighbor_local]) if chain_to_abs is not None
+                        else neighbor_local)
+        if _segment_full(seg_array, neighbor_seg):
+            return None
+
+        neighbor_sign = 1 if neighbor_signed > 0 else -1
+        # The shared vertex is at the chain-direction EXIT of neighbor (if `is_entry`,
+        # i.e. we walked backward) or at its chain-direction ENTRY (otherwise).
+        # ENTRY in chain dir → segment-native p (bary=0) if neighbor forward, q (bary=1) if reversed.
+        # EXIT  in chain dir → segment-native q (bary=1) if neighbor forward, p (bary=0) if reversed.
+        if is_entry:  # vertex at neighbor's chain-EXIT
+            neighbor_bary = 1.0 if neighbor_sign > 0 else 0.0
+        else:         # vertex at neighbor's chain-ENTRY
+            neighbor_bary = 0.0 if neighbor_sign > 0 else 1.0
+        return (neighbor_seg, neighbor_bary)
+
+    def _reuse_sp_via_segment(seg_array, seg_idx: int, bary: float,
+                              tol: float = 1e-9) -> int:
+        """Return SP index of an existing SPT on `seg_idx` at the given bary,
+        or -1 if none. Spec line 415: reuse SP rather than create a duplicate.
+        """
+        for slot_name in ("split1", "split2"):
+            slot = int(seg_array[seg_idx][slot_name])
+            if slot < 0:
+                continue
+            spt = splits.spts[slot]
+            if abs(float(spt[1]) - bary) < tol:
+                return int(spt[0])
+        return -1
 
     def _ensure_ha(sample: _Sample) -> int:
         key = sample.dedup_key
         if key in ha_dedup:
             return ha_dedup[key]
+
+        # Cross-parent dedup by physical vertex: at a degree-3+ CP shared by
+        # multiple curves, only ONE HA SP should exist (spec line 415).
+        uv_key = (round(float(sample.uv[0]), 9), round(float(sample.uv[1]), 9))
+
+        seg_array, label, _, _ = _resolve_parent(sample)
+        natural_seg = sample.seg_global
+        natural_bary = 0.0 if sample.end == 0 else 1.0
+
+        # Reuse SP on natural segment at the natural bary.
+        existing = _reuse_sp_via_segment(seg_array, natural_seg, natural_bary)
+        if existing >= 0:
+            ha_dedup[key] = existing
+            ha_dedup_uv[uv_key] = existing
+            return existing
+
+        # Same vertex via chain neighbor.
+        nb = _find_neighbor_seg(sample)
+        if nb is not None:
+            existing = _reuse_sp_via_segment(seg_array, nb[0], nb[1])
+            if existing >= 0:
+                ha_dedup[key] = existing
+                ha_dedup_uv[uv_key] = existing
+                return existing
+
+        # Cross-parent reuse: another curve already placed an HA at this vertex.
+        if uv_key in ha_dedup_uv:
+            sp_idx_existing = ha_dedup_uv[uv_key]
+            ha_dedup[key] = sp_idx_existing
+            # Try to attach a SPT for THIS parent pointing to the shared SP, so
+            # the component-graph (which keys on SP membership) recognises this
+            # parent as part of the same component.
+            target_seg, target_bary = natural_seg, natural_bary
+            if _segment_full(seg_array, target_seg):
+                if nb is not None and not _segment_full(seg_array, nb[0]):
+                    target_seg, target_bary = nb
+                else:
+                    return sp_idx_existing  # both full; SP-sharing already done via ha_dedup
+            spt_idx = splits.add_spt(
+                sp_idx=sp_idx_existing, bary=target_bary, vis_chge=0,
+            )
+            splits.attach_to_segment(seg_array, target_seg, spt_idx,
+                                     segment_label=label)
+            return sp_idx_existing
+
+        # Create a new HA SP + SPT.
         uv = sample.uv
         xyz = np.asarray(
             surface.S(float(uv[0]), float(uv[1])), dtype=float,
@@ -433,21 +573,16 @@ def build_helper_curves(
         xy = projection.XY(xyz)
         sp_idx = splits.add_sp(uv=uv, xyz=xyz, xy=xy, sp_type="ha")
         ha_dedup[key] = sp_idx
+        ha_dedup_uv[uv_key] = sp_idx
 
-        bary = 0.0 if sample.end == 0 else 1.0
-        spt_idx = splits.add_spt(sp_idx=sp_idx, bary=bary, vis_chge=0)
-        if sample.parent_kind == "BC":
-            splits.attach_to_segment(
-                mesh.edges, sample.seg_global, spt_idx, segment_label="BE",
-            )
-        elif sample.parent_kind == "CC":
-            splits.attach_to_segment(
-                css, sample.seg_global, spt_idx, segment_label="CS",
-            )
-        else:  # SIC
-            splits.attach_to_segment(
-                sis_pairs, sample.seg_global, spt_idx, segment_label="SIS",
-            )
+        target_seg, target_bary = natural_seg, natural_bary
+        if _segment_full(seg_array, target_seg) and nb is not None \
+                and not _segment_full(seg_array, nb[0]):
+            target_seg, target_bary = nb
+
+        spt_idx = splits.add_spt(sp_idx=sp_idx, bary=target_bary, vis_chge=0)
+        splits.attach_to_segment(seg_array, target_seg, spt_idx,
+                                 segment_label=label)
         return sp_idx
 
     while len(comp_samples) > 1:
