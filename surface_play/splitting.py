@@ -661,3 +661,254 @@ def split_ccs_at_vps(
         vis = int(vp["vis_change"])
         spt_idx = splits.add_spt(sp_idx=sp_idx, bary=bary, vis_chge=vis)
         splits.attach_to_segment(css, cs_idx, spt_idx, segment_label="CS")
+
+
+# ── O11 ───────────────────────────────────────────────────────────────────────
+
+def _build_sis_preimage_segments(
+    sis_pairs: np.ndarray,
+    dps: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """For each SIS, build its two preimage segments (mirrors C12).
+
+    Returns six (2K,) / (2K, 2) arrays (K = len(sis_pairs)):
+      - seg_uv0, seg_uv1 : segment endpoints in uv (this preimage).
+      - other_uv0, other_uv1 : endpoints of the OTHER preimage (same SIS).
+      - sis_idx_of_seg : (2K,) — which sis_pair each segment belongs to.
+      - valid_mask : (2K,) bool — whether the segment is well-formed (skip
+        segments where flip / A-set determination fails).
+
+    Both preimages of a SIS walk from p_dp to q_dp with consistent
+    parameterization: segment k=2*pair is the "A" preimage, k=2*pair+1 is "B".
+    The OTHER preimage of segment k can therefore be linearly interpolated at
+    the same parameter t to recover an approximate uv on the other sheet.
+    """
+    K = len(sis_pairs)
+    if K == 0:
+        empty2 = np.empty((0, 2), dtype=float)
+        empty1 = np.empty(0, dtype=np.int32)
+        empty_b = np.empty(0, dtype=bool)
+        return empty2, empty2, empty2, empty2, empty1, empty_b
+
+    seg_uv0 = np.empty((2 * K, 2), dtype=float)
+    seg_uv1 = np.empty((2 * K, 2), dtype=float)
+    other_uv0 = np.empty((2 * K, 2), dtype=float)
+    other_uv1 = np.empty((2 * K, 2), dtype=float)
+    sis_idx_of_seg = np.empty(2 * K, dtype=np.int32)
+    valid = np.zeros(2 * K, dtype=bool)
+
+    for k in range(K):
+        p = int(sis_pairs["p_dp"][k])
+        q = int(sis_pairs["q_dp"][k])
+        f = int(sis_pairs["flip"][k])
+
+        A_p_uv = dps["uv1"][p]
+        A_q_uv = dps["uv1"][q] if f == 1 else dps["uv2"][q]
+        B_p_uv = dps["uv2"][p]
+        B_q_uv = dps["uv2"][q] if f == 1 else dps["uv1"][q]
+
+        # Segment 2k (A preimage), other is B.
+        seg_uv0[2 * k] = A_p_uv
+        seg_uv1[2 * k] = A_q_uv
+        other_uv0[2 * k] = B_p_uv
+        other_uv1[2 * k] = B_q_uv
+        sis_idx_of_seg[2 * k] = k
+        valid[2 * k] = True
+
+        # Segment 2k+1 (B preimage), other is A.
+        seg_uv0[2 * k + 1] = B_p_uv
+        seg_uv1[2 * k + 1] = B_q_uv
+        other_uv0[2 * k + 1] = A_p_uv
+        other_uv1[2 * k + 1] = A_q_uv
+        sis_idx_of_seg[2 * k + 1] = k
+        valid[2 * k + 1] = True
+
+    return seg_uv0, seg_uv1, other_uv0, other_uv1, sis_idx_of_seg, valid
+
+
+def _cs_vis_chge_at_cdp(
+    surface: "SurfaceParams",
+    projection: "Projection",
+    uv_hit: np.ndarray,
+    cs_dir_uv: np.ndarray,
+    other_uv: np.ndarray,
+) -> int:
+    """CS-side vis_chge at a CDP. Spec line 404 (= case-2 BDP formula reused).
+
+    `vis = +1 if (axis·SN') * (T·SN') > 0 else -1`,
+    where SN' is the OTHER sheet's 3D normal (at the SIS's other preimage uv)
+    and T is the 3D CS tangent at the CDP, computed as `Su*cs_dir[0] +
+    Sv*cs_dir[1]`. `cs_dir_uv` is the uv chord direction of the CS (close-
+    adjusted by the caller).
+    """
+    if projection.mode != "ortho":
+        raise NotImplementedError(
+            "_cs_vis_chge_at_cdp: perspective not yet supported"
+        )
+
+    u, v = float(uv_hit[0]), float(uv_hit[1])
+    Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
+    Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+    T = float(cs_dir_uv[0]) * Su + float(cs_dir_uv[1]) * Sv
+
+    ou, ov = float(other_uv[0]), float(other_uv[1])
+    SN_other = np.asarray(surface.SN(ou, ov), dtype=float).reshape(3)
+
+    axis = projection._axis
+    factor = float(axis @ SN_other) * float(T @ SN_other)
+    return 1 if factor > 0.0 else -1
+
+
+def _sis_vis_chge_at_cdp(
+    surface: "SurfaceParams",
+    projection: "Projection",
+    uv_hit: np.ndarray,
+    cs_dir_uv: np.ndarray,
+    sis_dir_uv: np.ndarray,
+) -> int:
+    """SIS-side vis_chge at a CDP. Spec line 408.
+
+    `vis = +1 if inner(T, N) > 0 else -1`, where:
+      - T is the 2D SIS preimage tangent in uv (close-adjusted by caller).
+      - N is the CS normal in uv, oriented toward the front sheet. "Front sheet"
+        per spec is interpretation (1) — intrinsic to THIS sheet: N points
+        into the half of the CS where THIS sheet curves toward the viewer.
+        Under "axis points toward viewer", that is the half where moving in
+        +N direction increases axis·S in 3D.
+
+    Implementation: take N0 = (-cs_dir_v, cs_dir_u) (perpendicular to CS
+    chord in uv), then orient N0 so that
+       `axis · (Su*N0[0] + Sv*N0[1]) > 0`
+    (a small step in +N0 moves the surface point toward the viewer).
+    """
+    if projection.mode != "ortho":
+        raise NotImplementedError(
+            "_sis_vis_chge_at_cdp: perspective not yet supported"
+        )
+
+    u, v = float(uv_hit[0]), float(uv_hit[1])
+    Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
+    Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+    axis = projection._axis
+
+    N = np.array([-float(cs_dir_uv[1]), float(cs_dir_uv[0])], dtype=float)
+    # Orient N toward the front sheet (axis·dS_N > 0 under axis-toward-viewer).
+    dS_N = N[0] * Su + N[1] * Sv
+    if float(axis @ dS_N) < 0.0:
+        N = -N
+
+    T = np.asarray(sis_dir_uv, dtype=float).reshape(2)
+    return 1 if float(T @ N) > 0.0 else -1
+
+
+def split_at_cdps(
+    mesh,
+    css: np.ndarray,
+    cps: np.ndarray,
+    sis_pairs: np.ndarray,
+    dps: np.ndarray,
+    splits: SplitArrays,
+    surface: "SurfaceParams",
+    projection: "Projection",
+) -> None:
+    """Split CSs and SISs at every CS×SIS domain intersection (CDP).
+
+    Pipeline:
+      1. Build CS preimage segments (1 per CS) from `cps[p_cp].uv → cps[q_cp].uv`.
+      2. Build SIS preimage segments (2 per SIS) — mirrors C12's
+         `find_triple_points` preimage-segment build (intersections.py:782-807).
+      3. Cross-mode sweep via `sweep_segments` (G3 close-aware via `mesh.domain`).
+      4. For each hit: create SP type='cdp'; attach SPT on CS with vis_chge
+         per spec line 404 (`_cs_vis_chge_at_cdp`); attach SPT on SIS with
+         vis_chge per spec line 408 (`_sis_vis_chge_at_cdp`).
+
+    The `cps` parameter is added to the signature (roadmap signature omits
+    it — but the CS preimage segments need `cps[*].uv`).
+
+    Mutates `css` (split1/split2), `sis_pairs` (split1/split2), and `splits`.
+    """
+    from surface_play.intersections import sweep_segments
+
+    if projection.mode != "ortho":
+        raise NotImplementedError("split_at_cdps: perspective not yet supported")
+
+    if len(css) == 0 or len(sis_pairs) == 0:
+        return
+
+    domain = getattr(mesh, "domain", None)
+
+    # Step 1: CS preimage segments.
+    cs_uv0 = cps["uv"][css["p_cp"]]      # (M, 2)
+    cs_uv1 = cps["uv"][css["q_cp"]]      # (M, 2)
+
+    # Step 2: SIS preimage segments (2 per SIS).
+    (sis_uv0, sis_uv1, other_uv0, other_uv1,
+     sis_idx_of_seg, sis_seg_valid) = _build_sis_preimage_segments(sis_pairs, dps)
+    if not sis_seg_valid.any():
+        return
+    # Drop invalid segments (none expected with current C10 output, but be safe).
+    if not sis_seg_valid.all():
+        sis_uv0 = sis_uv0[sis_seg_valid]
+        sis_uv1 = sis_uv1[sis_seg_valid]
+        other_uv0 = other_uv0[sis_seg_valid]
+        other_uv1 = other_uv1[sis_seg_valid]
+        sis_idx_of_seg = sis_idx_of_seg[sis_seg_valid]
+
+    # Step 3: cross-mode close-aware sweep.
+    hits = sweep_segments(cs_uv0, cs_uv1, sis_uv0, sis_uv1, domain)
+    if len(hits) == 0:
+        return
+
+    # Step 4: process hits.
+    for h in hits:
+        cs_idx = int(h["a"])
+        sis_seg_idx = int(h["b"])
+        sis_idx = int(sis_idx_of_seg[sis_seg_idx])
+        uv_hit = np.asarray(h["uv"], dtype=float).reshape(2)
+        t_a = float(h["t_a"])
+        t_b = float(h["t_b"])
+
+        # 3D position + screen XY of the CDP.
+        xyz_hit = np.asarray(
+            surface.S(float(uv_hit[0]), float(uv_hit[1])), dtype=float,
+        ).reshape(3)
+        xy_hit = projection.XY(xyz_hit)
+        sp_idx = splits.add_sp(uv=uv_hit, xyz=xyz_hit, xy=xy_hit, sp_type="cdp")
+
+        # OTHER preimage uv: lerp on the other preimage's segment at t_b.
+        # Both preimages walk from p_dp to q_dp (consistent flip-handled
+        # parametrization built in `_build_sis_preimage_segments`).
+        o_uv0 = np.asarray(other_uv0[sis_seg_idx], dtype=float).reshape(2)
+        o_uv1 = np.asarray(other_uv1[sis_seg_idx], dtype=float).reshape(2)
+        # Close-aware lerp: shift o_uv1 toward o_uv0 if domain identifies axes.
+        if domain is not None and getattr(domain, "type", None) == "rect":
+            o_uv1 = domain.close(o_uv0, o_uv1)
+        other_uv = o_uv0 + t_b * (o_uv1 - o_uv0)
+
+        # Direction vectors (close-adjusted) for the vis_chge formulas.
+        cs_p = np.asarray(cs_uv0[cs_idx], dtype=float).reshape(2)
+        cs_q = np.asarray(cs_uv1[cs_idx], dtype=float).reshape(2)
+        if domain is not None and getattr(domain, "type", None) == "rect":
+            cs_q = domain.close(cs_p, cs_q)
+        cs_dir_uv = cs_q - cs_p
+
+        sis_p = np.asarray(sis_uv0[sis_seg_idx], dtype=float).reshape(2)
+        sis_q = np.asarray(sis_uv1[sis_seg_idx], dtype=float).reshape(2)
+        if domain is not None and getattr(domain, "type", None) == "rect":
+            sis_q = domain.close(sis_p, sis_q)
+        sis_dir_uv = sis_q - sis_p
+
+        # CS-side SPT.
+        vis_cs = _cs_vis_chge_at_cdp(
+            surface, projection, uv_hit, cs_dir_uv, other_uv,
+        )
+        spt_cs = splits.add_spt(sp_idx=sp_idx, bary=t_a, vis_chge=vis_cs)
+        splits.attach_to_segment(css, cs_idx, spt_cs, segment_label="CS")
+
+        # SIS-side SPT.
+        vis_sis = _sis_vis_chge_at_cdp(
+            surface, projection, uv_hit, cs_dir_uv, sis_dir_uv,
+        )
+        spt_sis = splits.add_spt(sp_idx=sp_idx, bary=t_b, vis_chge=vis_sis)
+        splits.attach_to_segment(sis_pairs, sis_idx, spt_sis,
+                                 segment_label="SIS")

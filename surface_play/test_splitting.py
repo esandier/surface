@@ -19,6 +19,7 @@ from surface_play.splitting import (
     SplitSlotOverflowError,
     _bvis_chge,
     sp_dtype,
+    split_at_cdps,
     split_bcs_at_bcps,
     split_bcs_at_bdps,
     split_bcs_at_corners,
@@ -29,6 +30,7 @@ from surface_play.splitting import (
 from surface_play.test_fixtures import (
     cylinder_cy,
     disk_paraboloid_po,
+    fig8,
     helicoid,
     mobius_u,
     paraboloid,
@@ -693,3 +695,119 @@ def test_vp_splits_torus_side_four_cusps():
         s1 = int(css[cs_idx]["split1"])
         s2 = int(css[cs_idx]["split2"])
         assert s1 != -1 or s2 != -1, f"CS {cs_idx} got no split for its VP"
+
+
+# ── O11: split_at_cdps ───────────────────────────────────────────────────────
+
+def _build_full_layer_c_o(surf, *, resolution=20, view_J=(0.0, 1.0, 0.0)):
+    """Build mesh, BCs, CPs, CSs, CCs, dps, sis_pairs for O11 tests."""
+    from surface_play.intersections import (
+        build_sis_pairs,
+        find_double_points,
+    )
+
+    mesh = build_mesh(surf.domain, surf, resolution=resolution, jitter=True, seed=42)
+    proj = Projection(surf, I=[1.0, 0.0, 0.0], J=list(view_J))
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+    ccs = build_contour_curves(css, cps)
+    dps = find_double_points(mesh, surf)
+    sis_pairs = build_sis_pairs(dps)
+    return mesh, proj, cps, css, ccs, dps, sis_pairs
+
+
+def test_cdp_splits_no_intersections():
+    # (1) No-SIS surfaces (helicoid, torus, paraboloid): 0 CDP SPs because
+    #     sis_pairs is empty.
+    for factory in (helicoid, torus, paraboloid):
+        surf = factory(perturb=False)
+        mesh, proj, cps, css, ccs, dps, sis_pairs = _build_full_layer_c_o(
+            surf, resolution=15
+        )
+        assert len(sis_pairs) == 0, (
+            f"{factory.__name__}: unexpected SIS — fixture changed"
+        )
+        splits = SplitArrays()
+        split_at_cdps(mesh, css, cps, sis_pairs, dps, splits, surf, proj)
+        assert len(splits.sps) == 0, (
+            f"{factory.__name__}: expected 0 cdp SPs, got {len(splits.sps)}"
+        )
+
+
+# Side view of the fig-8 immersion (axis = I × J = (0, -1, 0)) — empirically
+# yields ~4 CDPs at res=20 (silhouette curve crosses each SIC preimage).
+_FIG8_SIDE_VIEW_J = (0.0, 0.0, 1.0)
+
+
+def test_cdp_splits_fig8_side_count():
+    # (2) Fig-8 immersion, side view: produces CDPs. Each yields 2 SPTs
+    #     (1 CS-side + 1 SIS-side).
+    surf = fig8(perturb=False)
+    mesh, proj, cps, css, ccs, dps, sis_pairs = _build_full_layer_c_o(
+        surf, resolution=20, view_J=_FIG8_SIDE_VIEW_J,
+    )
+    assert len(sis_pairs) > 0, "fig8 should produce SISs"
+
+    splits = SplitArrays()
+    split_at_cdps(mesh, css, cps, sis_pairs, dps, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    cdp_mask = sps["type"] == "cdp"
+    n_cdp = int(cdp_mask.sum())
+    assert n_cdp >= 2, (
+        f"fig8 side view should produce ≥2 CDPs, got {n_cdp}"
+    )
+
+    # Each CDP yields exactly 2 SPTs.
+    for k in np.flatnonzero(cdp_mask):
+        n = int((spts["sp_idx"] == int(k)).sum())
+        assert n == 2, f"cdp SP {int(k)} has {n} SPTs (expected 2)"
+
+
+def test_cdp_splits_vis_chge_sign():
+    # (3) G10: every CDP SPT has vis_chge ∈ {-1, +1} (never 0).
+    surf = fig8(perturb=False)
+    mesh, proj, cps, css, ccs, dps, sis_pairs = _build_full_layer_c_o(
+        surf, resolution=20, view_J=_FIG8_SIDE_VIEW_J,
+    )
+    splits = SplitArrays()
+    split_at_cdps(mesh, css, cps, sis_pairs, dps, splits, surf, proj)
+
+    sps = splits.sps_array()
+    spts = splits.spts_array()
+    cdp_sp_indices = set(int(k) for k in np.flatnonzero(sps["type"] == "cdp"))
+    assert cdp_sp_indices, "fig8 side view should produce CDPs"
+
+    cdp_vis = [
+        int(t["vis_chge"]) for t in spts if int(t["sp_idx"]) in cdp_sp_indices
+    ]
+    assert set(cdp_vis) <= {-1, 1}, (
+        f"CDP SPT vis_chge must be ±1 (G10), got {sorted(set(cdp_vis))}"
+    )
+
+
+def test_cdp_splits_resolution_stability():
+    # (4) G3 close-aware regression: CDP count should be stable across
+    #     resolutions (no doubling from seam wrap-around). Fig-8 is cy-cy
+    #     so seam handling matters.
+    surf = fig8(perturb=False)
+    counts = []
+    for res in (15, 20, 25):
+        mesh, proj, cps, css, ccs, dps, sis_pairs = _build_full_layer_c_o(
+            surf, resolution=res, view_J=_FIG8_SIDE_VIEW_J,
+        )
+        splits = SplitArrays()
+        split_at_cdps(mesh, css, cps, sis_pairs, dps, splits, surf, proj)
+        sps = splits.sps_array()
+        n_cdp = int((sps["type"] == "cdp").sum())
+        counts.append(n_cdp)
+
+    # Stability: no abrupt doubling between resolutions (factor 0.3..3 is
+    # generous; on fig8 side view we expect counts to remain ~constant).
+    assert counts[0] > 0
+    for a, b in zip(counts, counts[1:]):
+        ratio = b / a
+        assert 0.3 <= ratio <= 3.0, (
+            f"CDP count unstable across resolutions: {counts}"
+        )
