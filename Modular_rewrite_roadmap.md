@@ -1366,8 +1366,9 @@ def resample_all(subcurves: list[SubCurve], surface, projection,
 ```
 **Algorithm:**
 1. Compute `M` = approximate diameter of surface in projected space (`max(‖xyz_i − xyz_j‖)` for vertices in mesh, projected via `projection.XY`).
-2. For each SP: enumerate SubCurves originating/ending at it; compute each SubCurve's view-plane length `L_k`. Let `L = min(L_k)`. Compute `d = min(L/10, M / resolution)` (G20).
-3. For each SubCurve: split at midpoint; on each half, sample at arclengths `0, d, 2d, ...` until `L/2 − d`. Closed curves: uniform `d` spacing.
+2. For each SP: enumerate SubCurves originating/ending at it; compute each SubCurve's view-plane length `L_k`. Let `L = min(L_k)`. Compute `d = min(L/10, M / resolution)` (G20). `resolution` is the resampling density (`surface_play.settings.RESOLUTION`, distinct from the mesh `GRID_RESOLUTION`).
+3. For each SubCurve: split at midpoint; on each half, sample at arclengths `0, d, 2d, ...` until `L/2 − d`. Closed curves (start == end ≥ 0): uniform `d` spacing using that SP's `(L, d)`.
+3a. **SP-less SubCurve** (`sub.start == sub.end == -1`, e.g., flat disk's lone closed BC): no subdivision — copy the chain polyline verbatim into `xy`/`depth`; `rc.start = rc.end = -1`.
 4. The sampled points usually lie between two points of the original curve. Then the `(uv)` coordinates of these points are interpolated, after `close`, and the projected image of the result is taken as the `xy` of the interpolated point.
 5. **SIC two-sheet tracking (G21):** for SIC SubCurves, one needs to use `(uv)` coordinates of the interpolants in **the same preimage**, which can be done using the `flip` field.
 6. **Annular BC reprojection** (spec line 446): if the SubCurve's parent BC is on disk/annulus boundary then there is an additional step which is to snap the interpolated  `(u, v)` to `‖(u, v)‖ = r_min` or `r_max` before computing the projected image. Each interpolated point's `dir` field is taken to be the `dir` field of the boundary edge containing both interpolants.
@@ -1416,7 +1417,7 @@ def compute_projection_breaks(rcs: list[ResampledCurve], surface, projection
 1. Non-overlapping projected curves: empty BKs.
 2. Single sphere-patch silhouette in front of an inner curve: BKs on the inner curve, magnitude 2.
 3. Fig-8 cyl ortho: BK count matches expected; `delta_v` signs distribute as expected.
-4. **Same-RC skipped:** RC self-intersection in projection doesn't emit a BK.
+4. **Same-RC included:** an RC whose projection self-crosses (e.g. a contour curve looping in front of its own occluded part) DOES emit a BK — the curve occludes itself.
 5. **HC skipped:** an HC crossing a BC produces no BK.
 **Gotchas:** G22.
 **Stop & verify:** `pytest surface_play/test_visibility.py::test_compute_projection_breaks` ⇒ 5 green.
