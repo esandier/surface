@@ -13,7 +13,8 @@ Layer-O steps O6-O11 are the consumers; they decide *what* to split and *why*.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -23,6 +24,32 @@ if TYPE_CHECKING:
     from surface_play.mesh import Mesh
     from surface_play.projection import Projection
     from surface_play.surface import SurfaceParams
+
+
+@dataclass
+class SubCurve:
+    """One piece of a curve between two SPs (Split Points).
+
+    Defined here so O12 (HC construction) and O13 (BC/CC/SIC splitting) share
+    the same dataclass without a later move. HCs emit `SubCurve(kind="HC",
+    internal=[], is_closed=False)` straight from O12 — the two-SP definition
+    (spec line 408). O13 will produce kind ∈ {"BC", "CC", "SIC"} by cutting
+    parent chains at SPTs, populating `internal` with the segment_idx/bary
+    points between the two endpoints.
+
+    G5: `start`/`end` are SP indices into `SplitArrays.sps`. Identity sharing
+    is integer equality of indices — adjacent SubCurves at the same SP have
+    `==` ints, which lookup the same Python tuple in `splits.sps[idx]`.
+    """
+
+    kind: Literal["BC", "CC", "SIC", "HC"]
+    is_closed: bool
+    start: int                                       # SP index
+    end: int                                         # SP index
+    internal: list[tuple[int, float]] = field(default_factory=list)
+    vc_in: int = 0                                   # ∈ {-1, 0}
+    vc_out: int = 0                                  # ∈ {-1, 0}
+    parent_idx: int = -1                             # index into bcs/ccs/sics; -1 for HC
 
 
 sp_dtype = np.dtype([
