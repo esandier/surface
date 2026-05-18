@@ -92,11 +92,12 @@ def _compute_d_batch(
         J_arr[:, 0, 0] = ISu;  J_arr[:, 0, 1] = ISv
         J_arr[:, 1, 0] = JSu;  J_arr[:, 1, 1] = JSv
     else:
-        # Persp: J[r, c] = (basis_r Â· Sc) âˆ’ (basis_r Â· d / z) Â· (axis Â· Sc)
-        # with d = S âˆ’ eye, z = axis Â· d.  The uniform 1/z prefactor is dropped
-        # (irrelevant for the SVD right-singular vector â€” same direction).
-        d3 = S_arr - projection.eye                   # (N, 3)
-        z  = d3 @ axis                                # (N,)
+        # Persp: J[r, c] = (basis_r · Sc) + (basis_r · d / z) · (axis · Sc)
+        # with d = S − eye, z = axis · (eye − S) > 0 (under "axis toward viewer").
+        # The uniform 1/z prefactor is dropped (SVD right-singular vector is
+        # sign/scale-blind).
+        d3 = S_arr - projection.eye                   # (N, 3); into-scene
+        z  = -(d3 @ axis)                             # (N,); = axis·(eye−S) > 0 in-scene
         if (z == 0.0).any():
             raise ValueError(
                 "ker_param undefined: a CP lies on the image plane through eye"
@@ -106,8 +107,8 @@ def _compute_d_batch(
         nSu = Su_arr @ axis                           # (N,)
         nSv = Sv_arr @ axis
         J_arr = np.empty((N, 2, 2), dtype=float)
-        J_arr[:, 0, 0] = ISu - a_over_z * nSu;  J_arr[:, 0, 1] = ISv - a_over_z * nSv
-        J_arr[:, 1, 0] = JSu - b_over_z * nSu;  J_arr[:, 1, 1] = JSv - b_over_z * nSv
+        J_arr[:, 0, 0] = ISu + a_over_z * nSu;  J_arr[:, 0, 1] = ISv + a_over_z * nSv
+        J_arr[:, 1, 0] = JSu + b_over_z * nSu;  J_arr[:, 1, 1] = JSv + b_over_z * nSv
 
     _U, _S, Vh = np.linalg.svd(J_arr)                  # batched 2Ã—2 SVD
     ker = Vh[:, -1, :]                                 # (N, 2)
@@ -124,20 +125,21 @@ def _compute_d_batch(
         diff2 = np.stack([d2S @ I, d2S @ J], axis=-1)    # (N, 2)
         im    = np.stack([tan @ I, tan @ J], axis=-1)
     else:
-        # Persp proj_vec(uv, v3) = (1/z) Â· ((IÂ·v3) âˆ’ (a/z)(axisÂ·v3),
-        #                                   (JÂ·v3) âˆ’ (b/z)(axisÂ·v3))
+        # Persp proj_vec(uv, v3) = (1/z) · ((I·v3) + (a/z)(axis·v3),
+        #                                   (J·v3) + (b/z)(axis·v3))
+        # with z = axis·(eye − S) > 0 (in-scene); d = S − eye, a = I·d, b = J·d.
         a_over_z = (d3 @ I) / z   # noqa: F811  (recomputed for clarity)
         b_over_z = (d3 @ J) / z
         z_inv = 1.0 / z
         nd2S = d2S @ axis
         ntan = tan @ axis
         diff2 = np.stack([
-            ((d2S @ I) - a_over_z * nd2S) * z_inv,
-            ((d2S @ J) - b_over_z * nd2S) * z_inv,
+            ((d2S @ I) + a_over_z * nd2S) * z_inv,
+            ((d2S @ J) + b_over_z * nd2S) * z_inv,
         ], axis=-1)
         im = np.stack([
-            ((tan @ I) - a_over_z * ntan) * z_inv,
-            ((tan @ J) - b_over_z * ntan) * z_inv,
+            ((tan @ I) + a_over_z * ntan) * z_inv,
+            ((tan @ J) + b_over_z * ntan) * z_inv,
         ], axis=-1)
 
     # Strip the tangent component (Gram-Schmidt), then normalize.
@@ -223,10 +225,12 @@ def find_contour_points(
                 f_s  = SN_arr  @ axis   # (N,)
                 fp_s = dSN_ds  @ axis   # (N,)
             else:
-                # f(s)  = SN Â· (S - eye);  f'(s) = dSN/ds Â· (S - eye)
-                # (SN Â· dS/ds = 0 because SN âŠ¥ Su, Sv)
+                # f(s)  = SN · viewer_dir;  f'(s) = dSN/ds · viewer_dir
+                # viewer_dir = eye - S (toward viewer); SN · dS/ds = 0 because
+                # SN ⊥ Su, Sv. Sign-blind: Newton finds the same zero either way,
+                # but kept consistent with per_vertex_viewer_dot.
                 xyz_arr = vals[0].T  # (N, 3)
-                vd = xyz_arr - projection.eye  # (N, 3)
+                vd = projection.eye - xyz_arr  # (N, 3)
                 f_s  = np.einsum("ij,ij->i", SN_arr, vd)
                 fp_s = np.einsum("ij,ij->i", dSN_ds, vd)
 
@@ -376,8 +380,8 @@ def _newton_orthogonal_cp(
     f(t)  = SN(uv_mid + t·n_hat) · viewer_dir
     f'(t) = (dSN/du · n_hat[0] + dSN/dv · n_hat[1]) · viewer_dir
         with dSN/du = Suu×Sv + Su×Suv, dSN/dv = Suv×Sv + Su×Svv.
-    For perspective viewer_dir = S(uv) − eye; SN · dS/dt = 0 because SN ⊥ Su,
-    Sv, so the extra term vanishes.
+    For perspective viewer_dir = eye − S(uv) (toward viewer); SN · dS/dt = 0
+    because SN ⊥ Su, Sv, so the extra term vanishes.
 
     No (0,1) clamping — the caller's bisection brackets the cusp.
     """
@@ -403,7 +407,7 @@ def _newton_orthogonal_cp(
             fp_t = float(dSN_dt @ axis)
         else:
             S_t = np.asarray(vals[0], dtype=float).reshape(3)
-            vd  = S_t - projection.eye
+            vd  = projection.eye - S_t  # toward viewer; sign-blind for Newton
             f_t  = float(SN_ @ vd)
             fp_t = float(dSN_dt @ vd)
 

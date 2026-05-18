@@ -68,7 +68,12 @@ class Projection:
 
     # ── XY / Z ────────────────────────────────────────────────────────────────
     def XY(self, xyz: np.ndarray) -> np.ndarray:
-        """3D → 2D view plane. Accepts (3,) or (N, 3); returns (2,) or (N, 2)."""
+        """3D → 2D view plane. Accepts (3,) or (N, 3); returns (2,) or (N, 2).
+
+        Perspective divisor uses `axis · (eye - xyz)` (positive depth from
+        eye toward the scene under the "axis points toward viewer" convention),
+        so a world-space point on +I appears at screen +x.
+        """
         xyz = np.asarray(xyz, dtype=float)
         anchor = self.O if self.mode == "ortho" else self.eye
         d = xyz - anchor
@@ -76,14 +81,15 @@ class Projection:
             if d.ndim == 1:
                 return np.array([self.I @ d, self.J @ d])
             return np.stack([d @ self.I, d @ self.J], axis=-1)
-        # perspective: standard perspective divide along the image-plane normal;
+        # perspective: divide by depth-from-eye-along-look (= axis · (eye - xyz),
+        # positive for in-scene points since axis points toward viewer).
         # eye projects to (0, 0) by definition (zero-vector special case).
         if d.ndim == 1:
-            z = float(self._axis @ d)
+            z = -float(self._axis @ d)  # = axis · (eye - xyz), positive for in-scene
             if z == 0.0:
                 return np.zeros(2)
             return np.array([self.I @ d, self.J @ d]) / z
-        z = d @ self._axis
+        z = -(d @ self._axis)
         out = np.zeros((d.shape[0], 2))
         nz = z != 0.0
         if np.any(nz):
@@ -144,10 +150,12 @@ class Projection:
         """Return (J_2x2, Su, Sv) at p. Used by ker_param and (persp) proj_vec.
 
         Ortho:  J = [[I·Su, I·Sv], [J·Su, J·Sv]].
-        Persp:  J = same minus rank-1 correction from perspective divide:
-                J[r, c] = (basis_r · Sc) - (basis_r · d / z) * (n · Sc)
-                with d = S(p) - eye, z = n · d. The uniform 1/z prefactor is
-                dropped (irrelevant for SVD right-singular vectors).
+        Persp:  Differential of (I·d, J·d)/z with d = S(p) - eye and
+                z = axis · (eye - S(p)) (positive depth from eye, under
+                "axis points toward viewer" convention). Rank-1 correction:
+                J[r, c] = (basis_r · Sc) + (basis_r · d / z) * (n · Sc)
+                The uniform 1/z prefactor is dropped (irrelevant for SVD
+                right-singular vectors used by ker_param).
         """
         p = np.asarray(p, dtype=float).reshape(2)
         u, v = float(p[0]), float(p[1])
@@ -162,19 +170,19 @@ class Projection:
 
         S_p = np.asarray(self.surface.S(u, v), dtype=float).reshape(3)
         d = S_p - self.eye
-        z = float(self._axis @ d)
+        z = -float(self._axis @ d)  # = axis · (eye - S), positive for in-scene
         if z == 0.0:
             raise ValueError(
                 f"ker_param/proj_vec undefined: S(p)={S_p} lies on the image plane "
-                f"through eye (z = n·(S-eye) = 0)"
+                f"through eye (z = axis·(eye - S) = 0)"
             )
         a = float(I @ d)
         b = float(J @ d)
         nSu = float(self._axis @ Su)
         nSv = float(self._axis @ Sv)
         J_mat = np.array([
-            [I @ Su - (a / z) * nSu, I @ Sv - (a / z) * nSv],
-            [J @ Su - (b / z) * nSu, J @ Sv - (b / z) * nSv],
+            [I @ Su + (a / z) * nSu, I @ Sv + (a / z) * nSv],
+            [J @ Su + (b / z) * nSu, J @ Sv + (b / z) * nSv],
         ])
         return J_mat, Su, Sv
 
@@ -199,9 +207,10 @@ class Projection:
         """Map a 3D vector at S(uv) to its 2D image in the view plane (linear in dir3d).
 
         Ortho: (I·v, J·v) — uv is unused (kept for API parity).
-        Persp: (1/z) · ((I·v) - (a/z)(n·v),  (J·v) - (b/z)(n·v))
-               with a=I·d, b=J·d, d=S(uv)-eye, z=n·d. Here the 1/z scale matters
-               (proj_vec is a linear map; ker_param only needs the direction).
+        Persp: (1/z) · ((I·v) + (a/z)(n·v),  (J·v) + (b/z)(n·v))
+               with a=I·d, b=J·d, d=S(uv)-eye, z=axis·(eye-S(uv))>0. Here the
+               1/z scale matters (proj_vec is a linear map; ker_param only
+               needs the direction).
         """
         v3 = np.asarray(dir3d, dtype=float).reshape(3)
         I, J = self.I, self.J
@@ -211,7 +220,7 @@ class Projection:
         u, v = float(uv[0]), float(uv[1])
         S_p = np.asarray(self.surface.S(u, v), dtype=float).reshape(3)
         d = S_p - self.eye
-        z = float(self._axis @ d)
+        z = -float(self._axis @ d)  # = axis · (eye - S), positive for in-scene
         if z == 0.0:
             raise ValueError(
                 f"proj_vec undefined: S(uv)={S_p} lies on the image plane through eye"
@@ -220,6 +229,6 @@ class Projection:
         b = float(J @ d)
         nv = float(self._axis @ v3)
         return np.array([
-            ((I @ v3) - (a / z) * nv) / z,
-            ((J @ v3) - (b / z) * nv) / z,
+            ((I @ v3) + (a / z) * nv) / z,
+            ((J @ v3) + (b / z) * nv) / z,
         ])
