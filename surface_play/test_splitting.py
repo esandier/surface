@@ -17,7 +17,9 @@ from surface_play.projection import Projection
 from surface_play.splitting import (
     SplitArrays,
     SplitSlotOverflowError,
+    SubCurve,
     _bvis_chge,
+    assemble_subcurves,
     sp_dtype,
     split_at_cdps,
     split_bcs_at_bcps,
@@ -811,3 +813,141 @@ def test_cdp_splits_resolution_stability():
         assert 0.3 <= ratio <= 3.0, (
             f"CDP count unstable across resolutions: {counts}"
         )
+
+
+# ── O13: assemble_subcurves ──────────────────────────────────────────────────
+
+def test_assemble_subcurves():
+    # (1) No-split BC (closed loop with no SPTs): 1 closed SubCurve.
+    #     cylinder_cy has a closed BC and no corners/CCs/SISs → empty splits.
+    surf = cylinder_cy(perturb=False)
+    mesh = build_mesh(surf.domain, surf, resolution=10, jitter=True, seed=42)
+    bcs = build_bcs(mesh)
+    assert len(bcs) >= 1 and bcs[0].is_closed, "cylinder_cy should have closed BC"
+    splits = SplitArrays()
+    empty_css = np.zeros(0, dtype=np.dtype([
+        ("p_cp", "i4"), ("q_cp", "i4"), ("face", "i4"),
+        ("split1", "i4"), ("split2", "i4"),
+    ]))
+    empty_sis = np.zeros(0, dtype=np.dtype([
+        ("p_dp", "i4"), ("q_dp", "i4"), ("flip", "i1"),
+        ("split1", "i4"), ("split2", "i4"),
+    ]))
+    subs = assemble_subcurves(
+        bcs, [], [], [], mesh, empty_css, empty_sis, splits,
+    )
+    # One closed SubCurve per closed BC with no splits.
+    bc_subs = [s for s in subs if s.kind == "BC"]
+    assert len(bc_subs) == len(bcs)
+    for s in bc_subs:
+        assert s.is_closed is True
+        assert s.start == -1 and s.end == -1
+        assert s.vc_in == 0 and s.vc_out == 0
+        assert len(s.internal) > 0  # the whole loop is the internal point chain
+
+    # (2) BC with corner splits (rect no-id paraboloid): 4 SubCurves on the
+    #     single closed BC.
+    surf2 = paraboloid(perturb=False)
+    mesh2 = build_mesh(surf2.domain, surf2, resolution=10, jitter=True, seed=42)
+    bcs2 = build_bcs(mesh2)
+    assert len(bcs2) == 1 and bcs2[0].is_closed
+    proj2 = _ortho_proj(surf2)
+    splits2 = SplitArrays()
+    split_bcs_at_corners(mesh2, bcs2, splits2, proj2)
+    subs2 = assemble_subcurves(
+        bcs2, [], [], [], mesh2, empty_css, empty_sis, splits2,
+    )
+    bc_subs2 = [s for s in subs2 if s.kind == "BC"]
+    assert len(bc_subs2) == 4, (
+        f"rect no-id BC should split into 4 corner-to-corner arcs, got {len(bc_subs2)}"
+    )
+    for s in bc_subs2:
+        # Open arcs joining two distinct corner SPs.
+        assert s.is_closed is False
+        assert s.start >= 0 and s.end >= 0
+        assert s.start != s.end
+
+    # (3) CC with cusps (VPs) on closed CCs — torus side view, 4 cusps, 2 CCs.
+    surf3 = torus(perturb=False)
+    mesh3 = build_mesh(surf3.domain, surf3, resolution=20, jitter=True, seed=42)
+    proj3 = _torus_side_proj(surf3)
+    cps3 = find_contour_points(mesh3, proj3)
+    css3 = build_contour_segments(cps3, mesh3)
+    ccs3 = build_contour_curves(css3, cps3)
+    vps3 = find_vps(ccs3, css3, cps3, surf3, proj3)
+    assert len(vps3) == 4
+    closed_ccs = sum(1 for cc in ccs3 if cc.is_closed)
+    open_ccs = sum(1 for cc in ccs3 if not cc.is_closed)
+    splits3 = SplitArrays()
+    split_ccs_at_vps(vps3, css3, ccs3, splits3, surf3, proj3)
+    subs3 = assemble_subcurves(
+        [], ccs3, [], [], mesh3, css3, empty_sis, splits3,
+    )
+    cc_subs3 = [s for s in subs3 if s.kind == "CC"]
+    # For each CC: closed → n_splits SubCurves; open → n_splits + 1.
+    # Each VP splits its host CC once. Count VPs per CC by traversing ccs3.
+    vp_count_per_cc = [0] * len(ccs3)
+    for vp in vps3:
+        cs_idx = int(vp["cs"])
+        for cc_idx, cc in enumerate(ccs3):
+            if any(abs(int(si)) - 1 == cs_idx for si in cc.cs_indices):
+                vp_count_per_cc[cc_idx] += 1
+                break
+    expected_sub_count = sum(
+        (vp_count_per_cc[i] if ccs3[i].is_closed else vp_count_per_cc[i] + 1)
+        for i in range(len(ccs3))
+        if vp_count_per_cc[i] > 0 or not ccs3[i].is_closed
+    )
+    # CCs with no splits: closed CC w/ no splits → 1 closed SubCurve; open CC
+    # w/ no splits → 1 SubCurve (start=-1, end=-1). Add them too.
+    no_split_count = sum(1 for v in vp_count_per_cc if v == 0)
+    expected_total = expected_sub_count + no_split_count
+    assert len(cc_subs3) == expected_total, (
+        f"expected {expected_total} CC SubCurves, got {len(cc_subs3)}; "
+        f"per-CC vps={vp_count_per_cc}, closed={[cc.is_closed for cc in ccs3]}"
+    )
+    del closed_ccs, open_ccs  # not directly asserted
+
+    # (4) G5 identity: each SubCurve's start/end SP int equals neighbor's end/start.
+    #     For test 2 (closed BC split at 4 corners): the 4 SubCurves form a cycle;
+    #     each corner SP appears exactly as the end of one SubCurve AND as the
+    #     start of the next.
+    starts = [s.start for s in bc_subs2]
+    ends = [s.end for s in bc_subs2]
+    assert sorted(starts) == sorted(ends), (
+        f"start multiset != end multiset; starts={starts}, ends={ends}"
+    )
+    # Each start/end SP int dereferences to a stored SP tuple in splits2.sps —
+    # adjacent SubCurves dereference the SAME Python object (identity check).
+    for s in bc_subs2:
+        assert splits2.sps[s.start] is splits2.sps[s.start]
+        assert splits2.sps[s.end] is splits2.sps[s.end]
+    # Pair up: for each "end" SP, find a SubCurve whose "start" equals it; they
+    # reference the same SP object via the same index.
+    for s in bc_subs2:
+        partners = [t for t in bc_subs2 if t.start == s.end]
+        assert len(partners) >= 1, (
+            f"no neighbor SubCurve starts at SP {s.end} (G5 broken)"
+        )
+        partner = partners[0]
+        assert splits2.sps[s.end] is splits2.sps[partner.start], (
+            "G5: adjacent SubCurves should dereference the SAME SP object"
+        )
+
+    # (5) vc_in, vc_out ∈ {-1, 0} for every emitted SubCurve.
+    for s in subs2:
+        assert s.vc_in in (-1, 0), f"BC SubCurve vc_in={s.vc_in} not in {{-1,0}}"
+        assert s.vc_out in (-1, 0), f"BC SubCurve vc_out={s.vc_out} not in {{-1,0}}"
+    for s in subs3:
+        assert s.vc_in in (-1, 0), f"CC SubCurve vc_in={s.vc_in} not in {{-1,0}}"
+        assert s.vc_out in (-1, 0), f"CC SubCurve vc_out={s.vc_out} not in {{-1,0}}"
+
+    # HC passthrough sanity: an HC handed in arrives in the output unchanged.
+    fake_hc = SubCurve(
+        kind="HC", is_closed=False, start=0, end=0, internal=[],
+        vc_in=0, vc_out=-1, parent_idx=-1,
+    )
+    subs_hc = assemble_subcurves(
+        [], [], [], [fake_hc], mesh, empty_css, empty_sis, SplitArrays(),
+    )
+    assert fake_hc in subs_hc

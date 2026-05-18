@@ -40,6 +40,10 @@ class SubCurve:
     G5: `start`/`end` are SP indices into `SplitArrays.sps`. Identity sharing
     is integer equality of indices — adjacent SubCurves at the same SP have
     `==` ints, which lookup the same Python tuple in `splits.sps[idx]`.
+
+    `internal[i] = (abs_seg_idx, segment_local_bary)`. `bary` is in the segment's
+    own parameterization (0 or 1 for join-vertex points); O14 reads the uv as
+    `seg.p + bary * seg.pq` without needing the chain direction.
     """
 
     kind: Literal["BC", "CC", "SIC", "HC"]
@@ -939,3 +943,235 @@ def split_at_cdps(
         spt_sis = splits.add_spt(sp_idx=sp_idx, bary=t_b, vis_chge=vis_sis)
         splits.attach_to_segment(sis_pairs, sis_idx, spt_sis,
                                  segment_label="SIS")
+
+
+# ── O13 ───────────────────────────────────────────────────────────────────────
+
+def _split_one_chain(
+    kind: str,
+    parent_idx: int,
+    chain: np.ndarray,
+    seg_array: np.ndarray,
+    splits: SplitArrays,
+    is_closed: bool,
+    chain_to_abs,
+) -> list[SubCurve]:
+    """Cut a single BC/CC/SIC chain at its SPTs into SubCurves.
+
+    `chain` is the parent's signed token array (BC.edge_indices /
+    CC.cs_indices / SIC.sis_indices). `chain_to_abs(k)` maps `abs(chain[k])-1`
+    to the absolute index into `seg_array` (identity for CC/SIC; for BC it
+    is `mesh.boundary_edge_idx[abs(chain[k])-1]`).
+
+    Returns SubCurves; mutates nothing.
+    """
+    n_chain = len(chain)
+    if n_chain == 0:
+        return []
+
+    # Unique segments along the chain (closed chains repeat the first token at the end).
+    if is_closed and n_chain >= 2:
+        N_seg = n_chain - 1
+    else:
+        N_seg = n_chain
+    if N_seg == 0:
+        return []
+
+    abs_segs = np.empty(N_seg, dtype=np.int64)
+    signs = np.empty(N_seg, dtype=np.int8)
+    for k in range(N_seg):
+        signed = int(chain[k])
+        signs[k] = 1 if signed > 0 else -1
+        abs_segs[k] = int(chain_to_abs(abs(signed) - 1))
+
+    # Walk chain, collecting SPTs in traversal order.
+    # all_spts[i] = (chain_pos, slot, sp_idx, bary_chain, vis_chge).
+    all_spts: list[tuple[int, int, int, float, int]] = []
+    for cp in range(N_seg):
+        abs_idx = int(abs_segs[cp])
+        sign = int(signs[cp])
+        seg = seg_array[abs_idx]
+        local: list[tuple[float, int, int, int]] = []
+        for slot_name in ("split1", "split2"):
+            slot = int(seg[slot_name])
+            if slot < 0:
+                continue
+            spt = splits.spts[slot]
+            sp_idx = int(spt[0])
+            bary_native = float(spt[1])
+            vis_chge = int(spt[2])
+            bary_chain = bary_native if sign > 0 else 1.0 - bary_native
+            local.append((bary_chain, slot, sp_idx, vis_chge))
+        local.sort(key=lambda x: x[0])
+        for bary_chain, slot, sp_idx, vis_chge in local:
+            all_spts.append((cp, slot, sp_idx, bary_chain, vis_chge))
+
+    # Merge consecutive same-SP SPTs (corner case: 2 SPTs at one corner SP, one
+    # on each incident BE, with bary_chain 1.0 then 0.0 across the chain join).
+    # Marker fields:
+    #   sp_idx
+    #   out_cp, out_bc, out_vc   — arc ARRIVING at this SP reads these
+    #   in_cp,  in_bc,  in_vc    — arc LEAVING from this SP reads these
+    Marker = tuple  # (sp_idx, out_cp, out_bc, out_vc, in_cp, in_bc, in_vc)
+    markers: list[tuple] = []
+    for (cp, slot, sp_idx, bary_chain, vis_chge) in all_spts:
+        if markers and markers[-1][0] == sp_idx:
+            prev = markers[-1]
+            # Update IN side to the newer SPT.
+            markers[-1] = (prev[0], prev[1], prev[2], prev[3], cp, bary_chain, vis_chge)
+        else:
+            markers.append((sp_idx, cp, bary_chain, vis_chge, cp, bary_chain, vis_chge))
+
+    # For closed chains, the last marker can wrap into the first if they share
+    # the same SP across the chain seam.
+    if is_closed and len(markers) >= 2 and markers[-1][0] == markers[0][0]:
+        last = markers.pop()
+        first = markers[0]
+        # The last marker's OUT-side becomes the first marker's OUT-side.
+        markers[0] = (first[0], last[1], last[2], last[3], first[4], first[5], first[6])
+
+    def _internal_forward(cp_a: int, cp_b: int, wrap: bool) -> list[tuple[int, float]]:
+        """Segment-end intermediate points for an arc starting in segment cp_a
+        and ending in segment cp_b. Each entry is (abs_seg_idx, segment_local_bary)
+        — the end of segment j in chain-traversal direction, expressed in the
+        segment's NATIVE parameterization (1.0 if the segment is forward in the
+        chain, 0.0 if reversed). O14 reads uv as `seg.p + bary * seg.pq` directly.
+        """
+        pts: list[tuple[int, float]] = []
+        def _end_bary(j: int) -> float:
+            return 1.0 if int(signs[j]) > 0 else 0.0
+        if not wrap:
+            if cp_a == cp_b:
+                return pts
+            for j in range(cp_a, cp_b):
+                pts.append((int(abs_segs[j]), _end_bary(j)))
+            return pts
+        # Wrap: walk forward (mod N_seg) from cp_a, stop when we'd re-enter cp_b.
+        j = cp_a
+        while True:
+            pts.append((int(abs_segs[j]), _end_bary(j)))
+            j = (j + 1) % N_seg
+            if j == cp_b:
+                break
+        return pts
+
+    out: list[SubCurve] = []
+
+    if not markers:
+        # No SPTs anywhere on the chain.
+        internal = [
+            (int(abs_segs[j]), 1.0 if int(signs[j]) > 0 else 0.0)
+            for j in range(N_seg)
+        ]
+        out.append(SubCurve(
+            kind=kind, is_closed=bool(is_closed),
+            start=-1, end=-1, internal=internal,
+            vc_in=0, vc_out=0, parent_idx=parent_idx,
+        ))
+        return out
+
+    if is_closed:
+        n = len(markers)
+        for k in range(n):
+            cur = markers[k]
+            nxt = markers[(k + 1) % n]
+            sp_a = int(cur[0])
+            in_cp_a, in_bc_a, in_vc_a = int(cur[4]), float(cur[5]), int(cur[6])
+            sp_b = int(nxt[0])
+            out_cp_b, out_bc_b, out_vc_b = int(nxt[1]), float(nxt[2]), int(nxt[3])
+
+            # Wrap detection: does this arc cross the chain seam?
+            if in_cp_a < out_cp_b:
+                wrap = False
+            elif in_cp_a > out_cp_b:
+                wrap = True
+            else:  # in_cp_a == out_cp_b: same chain segment
+                if n == 1:
+                    wrap = True   # single SP closed loop — full loop
+                else:
+                    wrap = in_bc_a > out_bc_b
+
+            internal = _internal_forward(in_cp_a, out_cp_b, wrap)
+
+            sign_in = int(signs[in_cp_a])
+            sign_out = int(signs[out_cp_b])
+            vc_in = min(0, sign_in * in_vc_a)
+            vc_out = min(0, -sign_out * out_vc_b)
+
+            sub_closed = (n == 1)
+            out.append(SubCurve(
+                kind=kind, is_closed=sub_closed,
+                start=sp_a, end=sp_b, internal=internal,
+                vc_in=vc_in, vc_out=vc_out, parent_idx=parent_idx,
+            ))
+        return out
+
+    # Open chain: n-1 SubCurves between consecutive markers (markers act as endpoints).
+    n = len(markers)
+    if n < 2:
+        return []
+    for k in range(n - 1):
+        cur = markers[k]
+        nxt = markers[k + 1]
+        sp_a = int(cur[0])
+        in_cp_a, in_bc_a, in_vc_a = int(cur[4]), float(cur[5]), int(cur[6])
+        sp_b = int(nxt[0])
+        out_cp_b, out_bc_b, out_vc_b = int(nxt[1]), float(nxt[2]), int(nxt[3])
+
+        internal = _internal_forward(in_cp_a, out_cp_b, wrap=False)
+        sign_in = int(signs[in_cp_a])
+        sign_out = int(signs[out_cp_b])
+        vc_in = min(0, sign_in * in_vc_a)
+        vc_out = min(0, -sign_out * out_vc_b)
+
+        out.append(SubCurve(
+            kind=kind, is_closed=False,
+            start=sp_a, end=sp_b, internal=internal,
+            vc_in=vc_in, vc_out=vc_out, parent_idx=parent_idx,
+        ))
+    return out
+
+
+def assemble_subcurves(
+    bcs: "list[BoundaryCurve]",
+    ccs: "list[ContourCurve]",
+    sics: list,
+    hcs: list[SubCurve],
+    mesh: "Mesh",
+    css: np.ndarray,
+    sis_pairs: np.ndarray,
+    splits: SplitArrays,
+) -> list[SubCurve]:
+    """Cut every BC/CC/SIC at its SPTs into SubCurves; append the HCs verbatim.
+
+    Spec: §"Construction of Split Curves (SCs)" (lines 442-450).
+
+    HCs from O12 are already SubCurve(kind="HC", internal=[]) — they are NOT
+    re-split here (spec: "Apart from HCs, ..."), simply concatenated.
+    """
+    out: list[SubCurve] = []
+
+    bnd_idx = mesh.boundary_edge_idx
+    for bc_idx, bc in enumerate(bcs):
+        out.extend(_split_one_chain(
+            "BC", bc_idx, bc.edge_indices, mesh.edges, splits,
+            bool(bc.is_closed),
+            chain_to_abs=lambda k: int(bnd_idx[k]),
+        ))
+
+    for cc_idx, cc in enumerate(ccs):
+        out.extend(_split_one_chain(
+            "CC", cc_idx, cc.cs_indices, css, splits,
+            bool(cc.is_closed),
+            chain_to_abs=lambda k: k,
+        ))
+
+    for sic_idx, sic in enumerate(sics):
+        out.extend(_split_one_chain(
+            "SIC", sic_idx, sic.sis_indices, sis_pairs, splits,
+            bool(sic.is_closed),
+            chain_to_abs=lambda k: k,
+        ))
+
+    out.extend(hcs)
+    return out
