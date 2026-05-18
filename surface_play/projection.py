@@ -10,10 +10,13 @@ P3 sub-step status: full implementation in both ortho and persp.
 
 API note: there is no public `axis` attribute. Use `viewer_direction(xyz=None)`:
 in ortho the no-arg form returns the constant (3,) view direction; in persp
-xyz must be supplied (raises otherwise) and the result is `xyz - eye`
+xyz must be supplied (raises otherwise) and the result is `eye - xyz`
 (unnormalized — every consumer is sign-only on dot products with SN, which is
-itself unnormalized). The internal `_axis` (= I × J normalized) is the
-image-plane normal used by XY's perspective divide and by Z's depth formula.
+itself unnormalized). The internal `_axis` (= I × J normalized) points
+**toward the viewer** (per the frontend wiring in templates/play.html where
+I and J are the camera's screen-right and screen-up, so I × J = camera +Z =
+toward viewer). Larger `axis · S` ⇒ point is closer to viewer. `Z()` returns
+this signed depth (larger = closer).
 """
 
 import numpy as np
@@ -99,13 +102,16 @@ class Projection:
 
     # ── Viewer direction ──────────────────────────────────────────────────────
     def viewer_direction(self, xyz: np.ndarray | None = None) -> np.ndarray:
-        """Viewer direction.
+        """Viewer direction — unit vector pointing **from the scene toward the viewer**.
 
-        Ortho: xyz may be omitted; returns the constant (3,) unit axis.
+        Ortho: xyz may be omitted; returns the constant (3,) unit axis (= I × J,
+               which points toward the viewer per the frontend wiring).
                If xyz is given (N, 3), broadcast-returns (N, 3) for convenience.
-        Persp: xyz is required; returns `xyz - eye` (unnormalized — sign-only
+        Persp: xyz is required; returns `eye - xyz` (unnormalized — sign-only
                consumers don't need unit length, matching SN's convention).
                Shape mirrors xyz.
+
+        Sign convention: `SN · viewer_direction > 0` ⇔ surface is front-facing.
         """
         if self.mode == "ortho":
             if xyz is None:
@@ -117,17 +123,20 @@ class Projection:
                 "viewer_direction(xyz) requires xyz in perspective mode"
             )
         xyz = np.asarray(xyz, dtype=float)
-        return xyz - self.eye
+        return self.eye - xyz
 
     def per_vertex_viewer_dot(self, mesh) -> np.ndarray:
-        """SN · viewer_direction at every vertex, vectorized via einsum."""
+        """SN · viewer_direction at every vertex, vectorized via einsum.
+
+        Sign convention: > 0 ⇔ front-facing (SN aligned with toward-viewer direction).
+        """
         SN = np.asarray(mesh.SN, dtype=float)
         if SN.ndim != 2 or SN.shape[1] != 3:
             raise ValueError(f"mesh.SN must be (N, 3), got {SN.shape}")
         if self.mode == "ortho":
             return np.einsum("ij,j->i", SN, self._axis)
         xyz = np.asarray(mesh.xyz, dtype=float)
-        d = xyz - self.eye  # unnormalized; sign-only downstream
+        d = self.eye - xyz  # toward-viewer; unnormalized — sign-only downstream
         return np.einsum("ij,ij->i", SN, d)
 
     # ── Internals: 2x2 Jacobian of (XY ∘ S) at p ──────────────────────────────
