@@ -190,13 +190,15 @@ def _build_edges_faces(
         on_u = on_u_seam[p_idx] and on_u_seam[q_idx]
         on_v = on_v_seam[p_idx] and on_v_seam[q_idx]
         is_mo_seam = (u_is_mo and on_u) or (v_is_mo and on_v)
+        # flip = -1 only on actual Möbius seams. The previous SN·SN heuristic
+        # for non-seam edges was wrong: on highly-curved surfaces (e.g. fig8
+        # near a fold), adjacent vertex normals can span >90° even though no
+        # topological flip exists, which broke `sign_changes` on those edges
+        # and caused contour-curve discontinuities at low mesh resolutions.
         if is_mo_seam and len(recs) == 2:
             edges[e_idx]["flip"] = -1
         else:
-            edges[e_idx]["flip"] = (
-                1 if float(np.dot(SN_per_vertex[p_idx], SN_per_vertex[q_idx])) > 0.0
-                else -1
-            )
+            edges[e_idx]["flip"] = 1
 
         edges[e_idx]["split1"] = -1
         edges[e_idx]["split2"] = -1
