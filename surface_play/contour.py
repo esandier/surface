@@ -479,6 +479,13 @@ def find_vps(
     Visibility change (G10): ``+1 if dS(p, q-p) · axis > 0 else -1``, with
     dS evaluated at the *left* CP p (Reorganization §"Cusp points" line 373).
     axis = projection._axis (image-plane normal; the view direction in ortho).
+
+    The dot product is computed in the CS's NATIVE direction (p_cp → q_cp),
+    not the CC's chain direction, because downstream `_emit_subcurves` applies
+    its own chain-sign correction (`sign_in * spt.vis_chge`) when emitting
+    SubCurves — matching the convention used by BCP / BDP / CDP SPTs. Storing
+    `vis_change` in chain direction here would double-correct on CSs that
+    appear with a negative sign in the CC chain.
     """
     axis = projection._axis
     rows: list[tuple] = []
@@ -510,11 +517,17 @@ def find_vps(
             u_, v_ = float(uv_vp[0]), float(uv_vp[1])
             xyz_vp = np.asarray(surface.S(u_, v_), dtype=float).reshape(3)
 
-            dir_uv = q_uv - p_uv
-            up_, vp_ = float(p_uv[0]), float(p_uv[1])
+            # vis_change in NATIVE CS direction (p_cp → q_cp).
+            cs = css[cs_idx]
+            p_nat = int(cs["p_cp"])
+            q_nat = int(cs["q_cp"])
+            p_uv_nat = cps[p_nat]["uv"].copy()
+            q_uv_nat = surface.domain.close(p_uv_nat, cps[q_nat]["uv"])
+            dir_uv_nat = q_uv_nat - p_uv_nat
+            up_, vp_ = float(p_uv_nat[0]), float(p_uv_nat[1])
             Su_p = np.asarray(surface.Su(up_, vp_), dtype=float).reshape(3)
             Sv_p = np.asarray(surface.Sv(up_, vp_), dtype=float).reshape(3)
-            dS_3d = Su_p * dir_uv[0] + Sv_p * dir_uv[1]
+            dS_3d = Su_p * dir_uv_nat[0] + Sv_p * dir_uv_nat[1]
             vis = np.int8(1) if float(dS_3d @ axis) > 0.0 else np.int8(-1)
 
             rows.append((cs_idx, 0.5, uv_vp, xyz_vp, vis))
