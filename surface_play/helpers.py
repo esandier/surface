@@ -115,15 +115,53 @@ def _bc_samples(
 def _cc_samples(
     cc_idx: int, cc: "ContourCurve",
     css: np.ndarray, cps: np.ndarray,
+    splits: "SplitArrays", *, trim: int = 0,
 ) -> list[_Sample]:
     """One sample per endpoint of every CS in the CC chain.
 
     `cs_dir_uv` is the chord direction `cps[q].uv - cps[p].uv` (NOT
     close-adjusted; on identified domains the CS lives inside a single
     face whose uv anchors are in the same rectangle copy).
+
+    `trim`: skip samples within this many chain steps of any cusp (VP)
+    SPT — mirrors legacy `silhouette.py` line 957 trim heuristic so the
+    HC argmin doesn't land on a CP adjacent to a cusp where the
+    front-sheet normal is degenerate. Modular distance for closed CCs.
     """
+    n_chain = len(cc.cs_indices)
+    if n_chain == 0:
+        return []
+
+    cusp_positions: list[int] = []
+    if trim > 0:
+        for k in range(n_chain):
+            cs_idx = abs(int(cc.cs_indices[k])) - 1
+            cs = css[cs_idx]
+            for slot_name in ("split1", "split2"):
+                slot = int(cs[slot_name])
+                if slot < 0:
+                    continue
+                spt = splits.spts[slot]
+                sp_idx = int(spt[0])
+                if splits.sps[sp_idx][3] == "vp":
+                    cusp_positions.append(k)
+                    break
+
+    period = n_chain - 1 if (cc.is_closed and n_chain >= 2) else n_chain
+
+    def _near_cusp(k: int) -> bool:
+        for cp in cusp_positions:
+            d = abs(k - cp)
+            if cc.is_closed and n_chain >= 2:
+                d = min(d, period - d)
+            if d <= trim:
+                return True
+        return False
+
     out: list[_Sample] = []
-    for signed in cc.cs_indices:
+    for k, signed in enumerate(cc.cs_indices):
+        if cusp_positions and _near_cusp(k):
+            continue
         cs_idx = abs(int(signed)) - 1
         cs = css[cs_idx]
         p_cp = int(cs["p_cp"])
@@ -318,14 +356,27 @@ def _vc_for_endpoint(
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
 
     if sample.parent_kind == "CC":
-        cs_dir = sample.cs_dir_uv
-        if cs_dir is None:
-            raise RuntimeError("_vc_for_endpoint: CC sample missing cs_dir_uv")
-        N = np.array([-float(cs_dir[1]), float(cs_dir[0])], dtype=float)
-        # Orient N toward the front sheet under axis-toward-viewer:
-        # axis · (Su*N[0] + Sv*N[1]) > 0  ⇒  +N moves S closer to viewer.
-        dS_N = N[0] * Su + N[1] * Sv
-        if float(axis @ dS_N) < 0.0:
+        # Legacy `silhouette.vis_chge` (silhouette_cleaned_by_gemini.py
+        # line 1483). At a silhouette CP:
+        #   ker  = projection kernel, oriented so axis · dS(ker) > 0
+        #   N    = ∇(SN·axis) in uv (SD_jac), oriented so N · ker > 0
+        #   vc   = 0 if T · N > 0 else -1
+        # N is the "normale au pli, dirigée vers le pli supérieur" (normal to
+        # the fold, pointing to the upper fold = z-increasing). It is the
+        # gradient-of-facing field — NOT perp(cs_dir), which is only a chord
+        # approximation of the contour tangent.
+        Suu = np.asarray(surface.Suu(u, v), dtype=float).reshape(3)
+        Suv = np.asarray(surface.Suv(u, v), dtype=float).reshape(3)
+        Svv = np.asarray(surface.Svv(u, v), dtype=float).reshape(3)
+        ker = projection.ker_param(sample.uv)
+        dS_ker = ker[0] * Su + ker[1] * Sv
+        if float(axis @ dS_ker) < 0.0:
+            ker = -ker
+        N = np.array([
+            float((np.cross(Suu, Sv) + np.cross(Su, Suv)) @ axis),
+            float((np.cross(Suv, Sv) + np.cross(Su, Svv)) @ axis),
+        ], dtype=float)
+        if float(N @ ker) < 0.0:
             N = -N
         return 0 if float(T_proj_uv @ N) > 0.0 else -1
 
@@ -396,11 +447,15 @@ def build_helper_curves(
         return []
 
     # 1. Samples per curve.
+    from surface_play import settings as _settings
+    cusp_trim = int(getattr(_settings, "HA_CUSP_TRIM", 0))
     curve_samples: list[list[_Sample]] = []
     for bc_idx, bc in enumerate(bcs):
         curve_samples.append(_bc_samples(bc_idx, bc, mesh))
     for cc_idx, cc in enumerate(ccs):
-        curve_samples.append(_cc_samples(cc_idx, cc, css, cps))
+        curve_samples.append(
+            _cc_samples(cc_idx, cc, css, cps, splits, trim=cusp_trim)
+        )
     for sic_idx, sic in enumerate(sics):
         curve_samples.append(_sic_samples(sic_idx, sic, sis_pairs, dps))
 

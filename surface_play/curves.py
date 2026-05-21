@@ -521,12 +521,57 @@ def resample_all(
             ))
             continue
 
-        # HC → 2-point straight line (no subdivision per spec line 426).
+        # HC → resample the uv straight line using the same arclength
+        # logic as BC/CC, so the HC has comparable per-segment xy density.
+        # Step 1: pre-sample uniformly in uv (dense) → curved xy polyline +
+        # cumulative xy arclength. Step 2: use `_sample_arclengths` to pick
+        # target arclengths just like BC. Step 3: interpolate back to uv.
         if sub.kind == "HC":
-            depth = np.array([projection.Z(p) for p in xyz_p], dtype=float)
+            uv_q0 = uv_p[0]; uv_q1 = uv_p[1]
+            N_dense = 200
+            t_dense = np.linspace(0.0, 1.0, N_dense)
+            uv_dense = uv_q0[None, :] + t_dense[:, None] * (uv_q1 - uv_q0)[None, :]
+            xyz_dense = np.empty((N_dense, 3), dtype=float)
+            for j, uv_s in enumerate(uv_dense):
+                xyz_dense[j] = np.asarray(
+                    surface.S(float(uv_s[0]), float(uv_s[1])), dtype=float
+                ).reshape(3)
+            xy_dense = np.array([projection.XY(p) for p in xyz_dense], dtype=float)
+            cum_dense = _arclengths(xy_dense)
+            L_xy_total = float(cum_dense[-1])
+
+            L_s = L_per_sp.get(sub.start, L_xy_total)
+            L_e = L_per_sp.get(sub.end, L_xy_total)
+            d_s = d_per_sp.get(sub.start, M / float(resolution))
+            d_e = d_per_sp.get(sub.end, M / float(resolution))
+            s_targets = _sample_arclengths(
+                L_s, d_s, L_e, d_e, L_xy_total, False, None,
+            )
+
+            sample_uv = np.empty((len(s_targets), 2), dtype=float)
+            sample_xyz = np.empty((len(s_targets), 3), dtype=float)
+            sample_xy = np.empty((len(s_targets), 2), dtype=float)
+            for j, s in enumerate(s_targets):
+                if s <= 0.0:
+                    t = 0.0
+                elif s >= L_xy_total:
+                    t = 1.0
+                else:
+                    idx = int(np.searchsorted(cum_dense, s) - 1)
+                    idx = max(0, min(idx, N_dense - 2))
+                    denom = cum_dense[idx + 1] - cum_dense[idx]
+                    frac = (s - cum_dense[idx]) / denom if denom > 0 else 0.0
+                    t = t_dense[idx] + frac * (t_dense[idx + 1] - t_dense[idx])
+                uv_s = uv_q0 + t * (uv_q1 - uv_q0)
+                sample_uv[j] = uv_s
+                sample_xyz[j] = np.asarray(
+                    surface.S(float(uv_s[0]), float(uv_s[1])), dtype=float
+                ).reshape(3)
+                sample_xy[j] = projection.XY(sample_xyz[j])
+            depth = np.array([projection.Z(p) for p in sample_xyz], dtype=float)
             out.append(ResampledCurve(
                 kind="HC", start=sub.start, end=sub.end,
-                depth=depth, xy=xy_p.copy(), dir=None,
+                depth=depth, xy=sample_xy, dir=None,
                 vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
             ))
             continue

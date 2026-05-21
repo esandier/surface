@@ -519,6 +519,16 @@ For every E1 and F2 that intersect at P:
 - If a DP (E1, E2) was stored, then remove (E1, F2), (E1, F2'), (E2, F1), (E2, F1') from pairs to be tested.
 - If a DP (E1, F2) or a DP(E1, F2') was stored, then remove both (E1, F2), (E1, F2') from pairs to be tested.
 
+# TODO
+
+- **Resampling of very small curves produces too many points.** When a
+  SubCurve has projected length much smaller than the surface diameter
+  `M`, the per-SP density `d = M/RESOLUTION` is much larger than the SC
+  itself, but the current arclength sampler still emits an endpoint pair
+  plus internal density-based samples, which oversamples short SCs.
+  Revisit `curves.py:_sample_arclengths` so that short SCs degrade
+  gracefully to a 2-point line.
+
 # Appendix : Debug panel
 The debug panel of the front-end allows to redefined the settings.py variables mentionned above. When a change is made, the construction pipeline and the outline pipeline are triggered. The changes survive when another surface is chosen.
 
