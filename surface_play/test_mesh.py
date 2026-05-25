@@ -366,13 +366,16 @@ def test_build_edges_faces():
         "cy-no with constant SN: every edge should have flip=+1"
     )
 
-    # 3. flip on mo-no: edges with both endpoints on the u-seam have flip=-1.
+    # 3. flip on mo-no: with SN that flips sign across the mo-seam (mimicking
+    # the Möbius non-orientability), edges crossing identification copies have
+    # flip=-1.  Set SN at vertices with u > 0.5 to +z, u <= 0.5 to -z — so
+    # canonical merged seam vertices on opposite u-copies disagree on SN sign.
     d, uv, tris, on_u, on_v, uv_pre, tris_pre = _build_post_id("mo", "no", resolution=res)
     SN = np.tile(np.array([0.0, 0.0, 1.0]), (len(uv), 1))
+    SN[:, 2] = np.where(uv[:, 0] > 0.5, 1.0, -1.0)
     edges_mo, _ = _build_edges_faces(uv, tris, uv_pre, tris_pre, SN, on_u, on_v, d)
-    interior = edges_mo["g"] >= 0
-    assert (edges_mo["flip"][interior] == -1).any(), (
-        "mo-no: some merged u-seam edges should have flip=-1"
+    assert (edges_mo["flip"] == -1).any(), (
+        "mo-no: SN flipping across the seam should produce some flip=-1 edges"
     )
     assert (edges_mo["flip"] == 1).sum() > (edges_mo["flip"] == -1).sum()
 

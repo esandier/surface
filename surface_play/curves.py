@@ -221,7 +221,8 @@ class ResampledCurve:
     end: int
     depth: np.ndarray             # (N,)   z along view axis (anchor-relative)
     xy: np.ndarray                # (N, 2) projected
-    dir: Optional[np.ndarray]     # (N, 2) BC/CC only; None for SIC/HC
+    dir: Optional[np.ndarray]     # (N, 2) inward NORMAL in image; BC/CC only
+    tan: Optional[np.ndarray] = None  # (N, 2) analytic TANGENT in image; BC/CC only
     vc_in: int = 0
     vc_out: int = 0
 
@@ -390,6 +391,56 @@ def _dir_for_cc_sample(seg_idx_poly: int, alpha: float,
     d_p = np.asarray(cps[int(cs["p_cp"])]["d"], dtype=float)
     d_q = np.asarray(cps[int(cs["q_cp"])]["d"], dtype=float)
     return (1.0 - float(alpha)) * d_p + float(alpha) * d_q
+
+
+def _tan_for_bc_sample(seg_idx: int, mesh, surface, projection, domain,
+                       uv_sample: np.ndarray) -> np.ndarray:
+    """Analytic 2D image-space TANGENT of BC at uv, sign-matched to edge chord.
+
+    Replaces the chord `xy[si+1] - xy[si]` used previously: that chord direction
+    is sample-jitter-noisy at fine resolutions, which can flip the sign of the
+    projection-break discriminator. The analytic tangent is resolution-stable.
+    """
+    edge = mesh.edges[int(seg_idx)]
+    edge_dp = np.asarray(edge["pq"], dtype=float)
+    Tb_uv = domain.boundary_tangent(uv_sample, edge_dp)
+    u, v = float(uv_sample[0]), float(uv_sample[1])
+    Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
+    Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+    Tb_3d = Tb_uv[0] * Su + Tb_uv[1] * Sv
+    return projection.proj_vec(uv_sample, Tb_3d)
+
+
+def _tan_for_cc_sample(uv_sample: np.ndarray, css: np.ndarray, cps: np.ndarray,
+                       chain_seg: int, surface, projection) -> np.ndarray:
+    """Analytic 2D image-space TANGENT of CC silhouette at uv, sign-matched to
+    the chain direction (from p_cp to q_cp of the cs).
+
+    Silhouette curve in uv: `axis · SN = 0`. Its tangent is perpendicular to
+    `Np = ∇_uv(axis · SN) = ((Suu×Sv + Su×Suv)·axis, (Suv×Sv + Su×Svv)·axis)`.
+    Lifted via dS and projected to image.
+    """
+    u, v = float(uv_sample[0]), float(uv_sample[1])
+    Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
+    Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+    Suu = np.asarray(surface.Suu(u, v), dtype=float).reshape(3)
+    Suv = np.asarray(surface.Suv(u, v), dtype=float).reshape(3)
+    Svv = np.asarray(surface.Svv(u, v), dtype=float).reshape(3)
+    axis = projection._axis
+    Np = np.array([
+        float(np.cross(Suu, Sv) @ axis + np.cross(Su, Suv) @ axis),
+        float(np.cross(Suv, Sv) @ axis + np.cross(Su, Svv) @ axis),
+    ])
+    Tp_uv = np.array([-Np[1], Np[0]])
+    # Sign-match against the cs chain direction in uv (p_cp → q_cp).
+    cs = css[int(chain_seg)]
+    p_uv = np.asarray(cps[int(cs["p_cp"])]["uv"], dtype=float)
+    q_uv = np.asarray(cps[int(cs["q_cp"])]["uv"], dtype=float)
+    chain_dir = q_uv - p_uv
+    if float(Tp_uv @ chain_dir) < 0.0:
+        Tp_uv = -Tp_uv
+    Tp_3d = Tp_uv[0] * Su + Tp_uv[1] * Sv
+    return projection.proj_vec(uv_sample, Tp_3d)
 
 
 def _newton_cc_refine(uv: np.ndarray, surface, projection, *, n_iter: int = 5
@@ -593,6 +644,7 @@ def resample_all(
         sample_xyz = np.zeros((N, 3), dtype=float)
         sample_xy = np.zeros((N, 2), dtype=float)
         sample_dir = np.zeros((N, 2), dtype=float) if sub.kind in ("BC", "CC") else None
+        sample_tan = np.zeros((N, 2), dtype=float) if sub.kind in ("BC", "CC") else None
         # Track which internal seg we hit (for BC dir, annular snap, CC dir/newton).
         internal_seg_of_poly_seg = []
         # Polyline index → (sub.internal entry idx) for non-endpoint segments.
@@ -637,9 +689,15 @@ def resample_all(
                     sample_dir[j] = _dir_for_bc_sample(
                         chain_seg, mesh, surface, projection, uv_s,
                     )
+                    sample_tan[j] = _tan_for_bc_sample(
+                        chain_seg, mesh, surface, projection, domain, uv_s,
+                    )
                 elif sub.kind == "CC" and chain_seg >= 0:
                     sample_dir[j] = _dir_for_cc_sample(
                         seg_p, alpha, chain_seg, css, cps,
+                    )
+                    sample_tan[j] = _tan_for_cc_sample(
+                        uv_s, css, cps, chain_seg, surface, projection,
                     )
 
         # Endpoint pinning (G5 / G21) — first/last sample anchored to SP positions.
@@ -652,10 +710,28 @@ def resample_all(
             sample_xyz[-1] = np.asarray(sp_end[1], dtype=float)
             sample_xy[-1] = np.asarray(sp_end[2], dtype=float)
 
+        # Sign-align analytic tangents with local chain-forward direction in
+        # image (chord between neighboring samples). This is robust because
+        # only the SIGN matters: the chord direction is dominated by the
+        # macroscopic chain direction. Without this, the analytic tangent
+        # may point against chain direction when the rc traverses a CS in
+        # reverse of its native (p_cp → q_cp) order — that flipped half the
+        # CC break signs on torus trial 7.
+        if sample_tan is not None and N >= 2:
+            for j in range(N):
+                if j == 0:
+                    chord = sample_xy[1] - sample_xy[0]
+                elif j == N - 1:
+                    chord = sample_xy[N - 1] - sample_xy[N - 2]
+                else:
+                    chord = sample_xy[j + 1] - sample_xy[j - 1]
+                if float(sample_tan[j] @ chord) < 0.0:
+                    sample_tan[j] = -sample_tan[j]
+
         depth = np.array([projection.Z(p) for p in sample_xyz], dtype=float)
         out.append(ResampledCurve(
             kind=sub.kind, start=sub.start, end=sub.end,
-            depth=depth, xy=sample_xy, dir=sample_dir,
+            depth=depth, xy=sample_xy, dir=sample_dir, tan=sample_tan,
             vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
         ))
 

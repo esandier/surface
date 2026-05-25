@@ -111,6 +111,12 @@ def _build_edges_faces(
 
     u_is_mo = domain.type == "rect" and domain.u_identify == "mo"
     v_is_mo = domain.type == "rect" and domain.v_identify == "mo"
+    if domain.type == "rect":
+        _u_min_d, _u_max_d, _v_min_d, _v_max_d = domain.bounds
+        _u_range_half = 0.5 * (_u_max_d - _u_min_d)
+        _v_range_half = 0.5 * (_v_max_d - _v_min_d)
+    else:
+        _u_range_half = _v_range_half = float("inf")
 
     # records[key] : list of (f_idx, third_compacted, a_compacted, b_compacted, pre_pair)
     # where pre_pair = (pre_p, pre_q) ordered to match key = (min, max) on canonical labels.
@@ -166,6 +172,23 @@ def _build_edges_faces(
         pre_p, pre_q = pre_pair
         p  = uv[p_idx]
         pq = uv_pre[pre_q] - uv_pre[pre_p]   # pre-id subtraction (G15-compliant)
+
+        # mo-seam axis-flip correction for `p + s·pq` interpolation.
+        # When canonical p and pre-id pre_p live in different identification
+        # copies (canonical chose the OTHER side of the seam as representative),
+        # the pre-id chord pq is expressed in pre_p's copy. To keep
+        # `p + s·pq` evaluating to the geometrically correct 3D point in
+        # canonical p's copy, we must flip the OTHER axis under mo:
+        #   - mo on u (identification (0, v) ~ (u_max, -v)): u-seam crossing
+        #     reverses v across copies → flip pq[1].
+        #   - mo on v: analogous with axes swapped → flip pq[0].
+        # cy identifications don't reverse any axis, so no flip.
+        diff_p = p - uv_pre[pre_p]
+        if u_is_mo and abs(float(diff_p[0])) > _u_range_half:
+            pq[1] = -pq[1]
+        elif v_is_mo and abs(float(diff_p[1])) > _v_range_half:
+            pq[0] = -pq[0]
+
         edges[e_idx]["p_idx"] = p_idx
         edges[e_idx]["q_idx"] = q_idx
         edges[e_idx]["p"] = p
@@ -187,15 +210,13 @@ def _build_edges_faces(
             edges[e_idx]["g"] = recs[1][0]
             edges[e_idx]["dir"] = (0.0, 0.0)
 
-        on_u = on_u_seam[p_idx] and on_u_seam[q_idx]
-        on_v = on_v_seam[p_idx] and on_v_seam[q_idx]
-        is_mo_seam = (u_is_mo and on_u) or (v_is_mo and on_v)
-        # flip = -1 only on actual Möbius seams. The previous SN·SN heuristic
-        # for non-seam edges was wrong: on highly-curved surfaces (e.g. fig8
-        # near a fold), adjacent vertex normals can span >90° even though no
-        # topological flip exists, which broke `sign_changes` on those edges
-        # and caused contour-curve discontinuities at low mesh resolutions.
-        if is_mo_seam and len(recs) == 2:
+        # flip = -1 iff the two endpoints' surface normals disagree
+        # (SN[p] · SN[q] < 0). Captures both genuine mo-seam crossings and
+        # any other configuration where the per-vertex SN values were
+        # evaluated in chart copies that disagree on orientation.
+        sn_p = SN_per_vertex[p_idx]
+        sn_q = SN_per_vertex[q_idx]
+        if float(sn_p @ sn_q) < 0.0:
             edges[e_idx]["flip"] = -1
         else:
             edges[e_idx]["flip"] = 1

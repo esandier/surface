@@ -124,7 +124,9 @@ This rule is required because under reverse identifications on both axes (mo-mo)
 
 The domain object provides a `close(p,q)` function which, in the case where there is identification returns (uv) coordinates for `q` which are close to those of `p`. 
 
-It also provides a function `bary`, of signature `bary(e,s)`, where `e` is an edge,  which returns the `uv` point `e.p + s e.pq`, or `bary(f,s,t)`, where `f` is a face, which returns `f.p + s f.pq + t f.pr`. 
+It also provides a function `bary`, of signature `bary(e,s)`, where `e` is an edge,  which returns the `uv` point `e.p + s e.pq`, or `bary(f,s,t)`, where `f` is a face, which returns `f.p + s f.pq + t f.pr`.
+
+It also provides `boundary_tangent(uv, edge_dp)` which returns the **analytic** unit tangent of the smooth boundary curve at `uv`, sign-matched to `edge_dp`'s direction. For a rect domain each side is axis-aligned, so the chord is already analytic — `boundary_tangent` returns the normalized `edge_dp`. For disk/annulus the boundary is a circle, and the analytic tangent at `(u, v)` is `(-v, u)/sqrt(u²+v²)`. This is used in `bvis_chge` and elsewhere where a smooth boundary tangent is needed; the discretized chord can deviate from the analytic tangent by O(1/res) which is enough to flip sign-discriminators in near-edge-on views.
 
 
 # Parametrization of the surface
@@ -277,24 +279,52 @@ When a contour point (CP) belongs to a boundary edge, a splitting occurs.
 
         p0 = p + s * dp  # le point où la visibilité peut changer
 
+        # Tb = ANALYTIC boundary tangent at p0, sign-matched to dp.
+        # NOTE: deviates from earlier `dp / norm(dp)` (the chord). The chord
+        # can deviate from the smooth tangent by O(1/res); for near-edge-on
+        # views, this is enough to flip the sign of the f3 discriminator.
+        Tb = domain.boundary_tangent(p0, dp)
+
         ker = self.kerdS(*p0)[0]
-        # on le dirige vers le pli supérieur, càd les z croissants
+        # oriented toward the upper sheet (axis · dS(ker) > 0)
         if self.Z(self.dS(*p0, *ker)) < 0:
             ker = -ker
 
-        Tb = dp / norm(dp)  # tangent au bord
-
-        Np = np.array(self.SD_jac(*p0, *self.axis))  # normale au pli
+        # Np = ∇_uv(axis · SN), the SILHOUETTE-FUNCTION gradient.
+        # NOTE: deviates from earlier `SD_jac(*p0, *self.axis) = ∇(axis·S)`
+        # (the depth gradient). The depth gradient is WRONG for the silhouette
+        # crossing test: it gave the same sign at both BCPs of the same CC
+        # (cycle did not close on paraboloid trial 2). The silhouette is
+        # `axis·SN = 0`, so its gradient is the right quantity.
+        Np = np.array([
+            (np.cross(Suu, Sv) + np.cross(Su, Suv)) @ axis,
+            (np.cross(Suv, Sv) + np.cross(Su, Svv)) @ axis,
+        ])
         if np.inner(Np, ker) < 0:
-            Np = -Np  # dirigée vers le pli supérieur
+            Np = -Np  # oriented toward upper sheet
 
-        if (
-            np.inner(ker, Nb) > 0
-        ):  # il y a changement de visibilité, la surface est vers le pli supérieur
-            v = 1 if np.inner(Tb, Np) > 0 else -1
-            return v
-        return 0
+        # Tp = silhouette tangent in uv (perpendicular to Np), oriented inward.
+        Tp = np.array([-Np[1], Np[0]])
+        if np.inner(Tp, Nb) < 0:
+            Tp = -Tp
+
+        # Image projections of dS(Tb), dS(Tp) onto the screen plane.
+        Tb_proj = proj_vec(dS(Tb))
+        Tp_proj = proj_vec(dS(Tp))
+
+        f1 = np.inner(Tb, Np)         # silhouette-function change along Tb
+        f2 = np.inner(Np, ker)        # = +|Np||ker| after orientation
+        f3 = np.inner(Tb_proj, Tp_proj)
+
+        # NOTE: this 3-way `f1·f2·f3` gate REPLACES the earlier
+        # `np.inner(ker, Nb) > 0` gate, which was numerically brittle in
+        # near-edge-on views (ker · Nb fired on FP noise).
+        if f1 * f2 * f3 > 0:
+            return 0    # no observable visibility change at this BCP
+        return 1 if f1 * f2 > 0 else -1
 ```
+
+**Known degeneracy** for the formula above: when the BCP coincides with a depth-aligned boundary point (i.e., `dS(Tb)` is nearly parallel to `axis`, so `|Tb_proj| ≈ 0`), the `f3` sign is FP-noise. Failure in this configuration is accepted as non-generic.
 **Implementation note** The contour points belonging to boundary edge are easily found: they are the endpoints of CCs which are not closed. 
 
 ## Splitting of BCs at Double Points (DPs). 
@@ -465,6 +495,15 @@ If the resampled curve is a BC, and we are in the case of an annular domain, the
 
 If the resampled curve is a CC, then also the resampled points can be reprojected on the CC. This is optional, determined by the PROJECT_RESAMPLED variable in settings.py. If true, the reprojection is done by applying a Newton method on the line normal to the CC at the resampled point in `(uv)` coordinates to find a point nearby where `inner(SN(u,v),axis) = 0`.
 
+## Per-sample data stored on a ResampledCurve.
+Each `ResampledCurve` stores, per sample: `xy` (2D image-space position), `depth` (`axis · S`), `dir` (inward image normal, BC/CC only — lifted from uv via `dS` then projected), and `tan` (the **analytic image-space tangent**, BC/CC only).
+
+`tan` is computed as follows:
+- BC sample: `Tb_uv = domain.boundary_tangent(uv, edge_dp)`, then `tan = proj_vec(dS(Tb_uv))`.
+- CC sample: `Np_uv = ∇_uv(axis · SN)`, `Tp_uv = (-Np_uv[1], Np_uv[0])`, then `tan = proj_vec(dS(Tp_uv))`.
+
+After endpoint pinning, `tan` is sign-aligned with the local chord in image (`xy[j+1] - xy[j-1]` at interior samples, or the boundary chord at endpoints) so that `tan[j]` points along chain-forward direction. Without this alignment, an rc that traverses a CS in reverse of its native `p_cp → q_cp` direction gets `tan` pointing backwards relative to chain direction, which flips downstream sign-discriminators (e.g. projection-break signs).
+
 
 
 # Projection intersections.
@@ -479,8 +518,18 @@ A visibility change on curve C occurs if it intersects a BC/CC, and if the BC/CC
 The visibility change is $\pm 2$ in the case of a CC, it is $\pm 1$ in the case of a BC.
 
 The sign is determined as follows:
-+ CC case : the sign is $-$ if ``inner(T,dir)>0``, where T is the tangent to the curve in the view plane, and dir is the normal to the CC in the view plane, pointing in the direction of the surface.
-+ BC case : the sign is $-$ if ``inner(T,dir)>0``, where T is the tangent to the curve in the view plane, and dir is the normal to the BC in the view plane, pointing in the direction of the surface.
++ CC case : the sign is $-$ if ``inner(T,dir)>0``, where T is the tangent to the OCCLUDED curve in the view plane at the crossing, and dir is the normal to the CC in the view plane, pointing in the direction of the surface.
++ BC case : the sign is $-$ if ``inner(T,dir)>0``, where T is the tangent to the OCCLUDED curve in the view plane at the crossing, and dir is the normal to the BC in the view plane, pointing in the direction of the surface.
+
+**Implementation notes**
+
+- `T` is the **analytic image-space tangent** stored in `rc.tan` at each sample (populated by `resample_all`), interpolated to the crossing parameter. The earlier chord-based `T = xy[si+1] - xy[si]` is sample-jitter-noisy at fine resolutions and can flip `T·dir`'s sign when the curve is nearly parallel to the occluder's normal in image space.
+- `dir` is computed as the **perpendicular-to-image-tangent component** of `rc.dir` (the lifted-uv-inward direction projected to image, stored on the occluder RC). Concretely:
+  ```
+  proj_coeff = (rc.dir @ rc.tan) / (rc.tan @ rc.tan)
+  dir = rc.dir - proj_coeff * rc.tan
+  ```
+  When the surface tilts strongly in the depth direction at the boundary (e.g. paraboloid edges in a near-edge-on view), the raw `rc.dir` is NOT perpendicular to the curve's image tangent — the dS-lift picks up a depth contribution that contaminates the in-image direction. Projecting away the along-tangent component restores the geometrically-correct in-image inward normal while preserving the sign convention from `rc.dir`.
 
 Visibility changes on curves resulting from these intersections (called BKs) are stored but curves are not split at these intersection points. 
 
@@ -488,7 +537,9 @@ Visibility changes on curves resulting from these intersections (called BKs) are
 Once all the visibility changes are computed, the visibility of segments is propagated through the curves, starting from an anchor.
 
 ## Anchor and BFS propagation.
-Consider the collection of all the points in all BC/CC/SIC curves, in the view plane. The leftmost points is the anchor, its visibility is zero. 
+Consider the collection of all the points in all BC/CC/SIC curves, in the view plane. The leftmost point is the anchor; the **shared visibility** at its SP (or its visibility if it is not an SP) is zero.
+
+**SP-aware anchor convention**: when the leftmost sample lands AT an endpoint of its RC (sample 0 or sample N-1) and that endpoint is an SP, the anchor's *sample value* is `rc.vc_in` (if at sample 0) or `rc.vc_out` (if at sample N-1), NOT zero. This sets the SP's shared visibility to 0 (the geometric meaning: an SP IS on the silhouette boundary, so its shared visibility is 0 by definition). If the anchor sample is INTERIOR to its RC (not at an SP), then its value is 0 directly. The same convention applies in the LP pass. Without this rule, several `disk_paraboloid_ca` cases were LP-INFEASIBLE because the leftmost sample landed at an SP with non-zero `vc_in`/`vc_out`.
 
 Then the visibility is propagated:
 + Inside a curve, it changes at breaks.

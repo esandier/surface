@@ -6,6 +6,8 @@ helpers (helicoid, cylinder_cy) used by P2 tests.
 
 import math
 
+import numpy as np
+
 from surface_play.domain import Domain
 from surface_play.surface import SurfaceParams
 
@@ -126,6 +128,20 @@ mobius_ortho_view = ([1, 0, 0], [0, 1, 0], None)
 
 # Fig-8: perspective from Z=5; used for SIC visibility integration tests.
 fig8_persp_view = ([1, 0, 0], [0, 1, 0], [0, 0, 5])
+
+# ── Viewpoint perturbation ────────────────────────────────────────────────────
+# Per spec, viewpoints in tests should be deterministically perturbed away
+# from axis-aligned directions to avoid non-generic projection geometries
+# (e.g. coincident BC projections on symmetric surfaces). Small magnitude
+# (~1e-3) keeps the geometry visually identical while breaking exact
+# coincidences that downstream segment-sweep code can't disambiguate.
+
+def perturb_axis(vec, seed: int = 0, scale: float = 1e-3):
+    """Return `vec` plus a deterministic small perturbation (3-component)."""
+    rng = np.random.default_rng(int(seed))
+    v = np.asarray(vec, dtype=float).reshape(3)
+    return (v + rng.uniform(-scale, scale, 3)).tolist()
+
 
 # ── Smoke: each fixture builds without error ─────────────────────────────────
 

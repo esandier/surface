@@ -187,26 +187,48 @@ def _bvis_chge(
 ) -> int:
     """Visibility change on a boundary edge at parametric position s ∈ (0, 1).
 
-    Translation of the spec pseudocode (Reorganization §"Splitting of BCs at
-    Contour Points (CPs)", lines 275-296) onto the current refactor:
+    Adopted 2026-05-24 (Etienne): the "alternative formula" first proposed
+    on 2026-05-19. Two changes vs spec:
 
-      - ker_param(p0)     ↔ spec's `kerdS(*p0)[0]` (2D kernel direction in uv).
-      - k0·Su + k1·Sv     ↔ `dS(*p0, *ker)` (3D image of the kernel direction).
-      - axis · v3         ↔ `Z(v3)` for a tangent vector (depth along view axis;
-                            see legacy silhouette.py:434 — the projection.Z
-                            method here subtracts an anchor which is wrong for
-                            tangents, so we inline the inner product).
-      - (axis·Su, axis·Sv) ↔ `SD_jac(*p0, *axis)` — 2D Jacobian in uv of (axis·S).
+      1. `Np = ∇_uv(axis·SN)`, not the spec's `∇_uv(axis·S)` (depth gradient).
+         The silhouette curve is `axis·SN = 0`, so its gradient is the
+         geometrically correct quantity for sign-of-silhouette-crossing.
+         The depth-gradient version gave the same sign at both BCPs of the
+         same CC on paraboloid trial 2 (cycle did not close).
 
-    Nb sign convention: spec uses `Nb = e["dir"]` directly, and the current
-    mesh stores `dir` as the **inward** boundary normal (see _build_edges_faces
-    in mesh.py — `d` is flipped to point toward the boundary triangle's apex).
-    The legacy mesh (old stuff/silhouette.py:569) also stored an `inward`
-    vector under the same name, so the spec formula's `ker · Nb > 0` test is
-    the inward-normal version. No flip needed.
+      2. The "no visibility change" gate uses the projected boundary and
+         silhouette tangents in the image (`f3 = Tb_proj · Tp_proj`)
+         instead of the brittle `ker · Nb` test.
 
-    Perspective is not yet supported (the `axis · v3` shortcut for depth is
-    ortho-specific; perspective needs a per-point view direction `S - eye`).
+    The alternative formula computes:
+
+        ker   = kernel of dS-projection in uv, oriented so axis·dS(ker) > 0.
+        Tb    = dp / |dp|  (boundary tangent in uv).
+        Np    = ∇_uv(axis · SN)
+               = ( (Suu × Sv + Su × Suv) · axis,
+                   (Suv × Sv + Su × Svv) · axis ),
+                oriented so Np · ker > 0.
+        Tp    = (-Np[1], Np[0])    (uv-perpendicular to Np = silhouette tangent in uv)
+                oriented inward (so Tp · Nb > 0).
+        Tb_proj, Tp_proj  = projections of dS(Tb), dS(Tp) onto the screen plane.
+
+        f1 = Tb · Np         (sign of silhouette-function change along Tb)
+        f2 = Np · ker        (always +1 after orientation; kept for symmetry)
+        f3 = Tb_proj · Tp_proj   (whether projected boundary tangent and
+                                  silhouette tangent agree in image)
+
+        if f1·f2·f3 > 0:  return 0    (no observable change; "exit" BCP)
+        return +1 if f1·f2 > 0 else -1
+
+    Known degeneracy: disk_paraboloid_ca trial 3 (nearly edge-on view) is
+    INFEASIBLE at certain mesh resolutions because `|Tb_proj|` becomes
+    tiny and f3 is FP-noise. A `axis · dS(Nb) ≤ 0` gate was tried as a
+    replacement but introduced new persistent failures on the paraboloid
+    (likely mathematically wrong); reverted 2026-05-24.
+
+    `Nb = edge["dir"]` is the INWARD boundary normal in uv (mesh.py flips
+    `d` to point toward the boundary triangle's apex). Perspective mode
+    is not yet supported.
     """
     if projection.mode != "ortho":
         raise NotImplementedError("bvis_chge: perspective mode not yet supported")
@@ -215,32 +237,56 @@ def _bvis_chge(
     dp = np.asarray(edge["pq"], dtype=float).reshape(2)
     Nb = np.asarray(edge["dir"], dtype=float).reshape(2)
 
+    norm_dp = float(np.linalg.norm(dp))
+    if norm_dp == 0.0:
+        return 0
+
     p0 = p + float(s) * dp
     u, v = float(p0[0]), float(p0[1])
+
+    # Tb: analytic boundary tangent at the BCP, sign-matched to the edge's
+    # chord direction. The discretized chord can deviate from the smooth
+    # tangent by O(1/res), and in near-edge-on views that deviation can flip
+    # f3's sign (whose magnitude is set by the screen-projection of the
+    # boundary's image-space tangent, which is itself small in such views).
+    Tb = surface.domain.boundary_tangent(p0, dp)
 
     ker = projection.ker_param(p0)
 
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+    Suu = np.asarray(surface.Suu(u, v), dtype=float).reshape(3)
+    Suv = np.asarray(surface.Suv(u, v), dtype=float).reshape(3)
+    Svv = np.asarray(surface.Svv(u, v), dtype=float).reshape(3)
     axis = projection._axis
 
     dS_ker = ker[0] * Su + ker[1] * Sv
     if float(axis @ dS_ker) < 0.0:
         ker = -ker
 
-    if float(np.dot(ker, Nb)) <= 0.0:
-        return 0
-
-    norm_dp = float(np.linalg.norm(dp))
-    if norm_dp == 0.0:
-        return 0
-    Tb = dp / norm_dp
-
-    Np = np.array([float(axis @ Su), float(axis @ Sv)])
+    Np = np.array([
+        float(np.cross(Suu, Sv) @ axis + np.cross(Su, Suv) @ axis),
+        float(np.cross(Suv, Sv) @ axis + np.cross(Su, Svv) @ axis),
+    ])
     if float(np.dot(Np, ker)) < 0.0:
         Np = -Np
 
-    return 1 if float(np.dot(Tb, Np)) > 0.0 else -1
+    Tp = np.array([-Np[1], Np[0]])
+    if float(np.dot(Tp, Nb)) < 0.0:
+        Tp = -Tp
+
+    dS_Tb = Tb[0] * Su + Tb[1] * Sv
+    dS_Tp = Tp[0] * Su + Tp[1] * Sv
+    Tb_proj = dS_Tb - float(axis @ dS_Tb) * axis
+    Tp_proj = dS_Tp - float(axis @ dS_Tp) * axis
+
+    f1 = float(np.dot(Tb, Np))
+    f2 = float(np.dot(Np, ker))
+    f3 = float(np.dot(Tb_proj, Tp_proj))
+
+    if f1 * f2 * f3 > 0.0:
+        return 0
+    return 1 if f1 * f2 > 0.0 else -1
 
 
 def split_bcs_at_bcps(

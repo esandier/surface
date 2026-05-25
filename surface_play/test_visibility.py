@@ -4,9 +4,11 @@ import numpy as np
 
 from surface_play.curves import ResampledCurve
 from surface_play.visibility import (
+    LPInfeasibleError,
     bfs_visibility,
     break_dtype,
     compute_projection_breaks,
+    lp_refine_visibility,
 )
 
 
@@ -30,18 +32,19 @@ def test_compute_projection_breaks():
     assert len(bks) == 0, f"non-overlapping → expected 0 BKs, got {len(bks)}"
 
     # ─── sub-assert 2: CC in front of an inner BC → BKs with |delta_v|=2 ─
-    # A horizontal CC at y=0, depth=0 (front).
-    # An inner BC: vertical line at x=0.5, crossing the CC; depth=1 (back).
+    # Convention: axis = I × J points toward viewer, so larger projection.Z
+    # means closer to viewer. CC depth = +1 (front, occluder).
+    # Inner BC depth = 0 (back, occluded).
     cc = _make_rc(
         "CC",
         xy=[[0.0, 0.0], [1.0, 0.0]],
-        depth=[0.0, 0.0],
+        depth=[1.0, 1.0],
         dir_=[[0.0, 1.0], [0.0, 1.0]],  # surface is "above" the CC
     )
     bc_inner = _make_rc(
         "BC",
         xy=[[0.5, -0.5], [0.5, 0.5]],
-        depth=[1.0, 1.0],
+        depth=[0.0, 0.0],
         dir_=[[1.0, 0.0], [1.0, 0.0]],
     )
     bks = compute_projection_breaks([cc, bc_inner], surface=None, projection=None)
@@ -79,12 +82,14 @@ def test_compute_projection_breaks():
         split_at_cdps, split_bcs_at_bcps, split_bcs_at_bdps,
         split_bcs_at_corners, split_ccs_at_vps, split_sics_at_tps,
     )
-    from surface_play.test_fixtures import fig8
+    from surface_play.test_fixtures import fig8, perturb_axis
 
     surf = fig8(perturb=False)
     mesh = build_mesh(surf.domain, surf, resolution=20, jitter=True, seed=42)
     bcs = build_bcs(mesh)
-    proj = Projection(surf, I=[1.0, 0.0, 0.0], J=[0.0, 0.0, 1.0])
+    proj = Projection(surf,
+                      I=perturb_axis([1.0, 0.0, 0.0], seed=1),
+                      J=perturb_axis([0.0, 0.0, 1.0], seed=2))
     cps = find_contour_points(mesh, proj)
     css = build_contour_segments(cps, mesh)
     ccs = build_contour_curves(css, cps)
@@ -131,16 +136,18 @@ def test_compute_projection_breaks():
     )
 
     # ─── sub-assert 5: HC crossing BC → no BK (HC doesn't occlude) ───────
+    # HC at depth=1 (front, would be the occluder by depth alone).
+    # BC at depth=0 (back). HC.kind not in {BC, CC} → no BK emitted.
     bc_h = _make_rc(
         "BC",
         xy=[[0.0, -1.0], [0.0, 1.0]],
-        depth=[1.0, 1.0],
+        depth=[0.0, 0.0],
         dir_=[[1.0, 0.0], [1.0, 0.0]],
     )
     hc = _make_rc(
         "HC",
         xy=[[-1.0, 0.0], [1.0, 0.0]],
-        depth=[0.0, 0.0],
+        depth=[1.0, 1.0],
         dir_=None,
     )
     bks = compute_projection_breaks([bc_h, hc], surface=None, projection=None)
@@ -171,12 +178,14 @@ def test_bfs_visibility():
         split_at_cdps, split_bcs_at_bcps, split_bcs_at_bdps,
         split_bcs_at_corners, split_ccs_at_vps, split_sics_at_tps,
     )
-    from surface_play.test_fixtures import paraboloid
+    from surface_play.test_fixtures import paraboloid, perturb_axis
 
     def _pipeline(surf, I=(1, 0, 0), J=(0, 1, 0), res=15):
         mesh = build_mesh(surf.domain, surf, resolution=res, jitter=True, seed=42)
         bcs = build_bcs(mesh)
-        proj = Projection(surf, I=list(I), J=list(J))
+        proj = Projection(surf,
+                          I=perturb_axis(I, seed=1),
+                          J=perturb_axis(J, seed=2))
         cps = find_contour_points(mesh, proj)
         css = build_contour_segments(cps, mesh)
         ccs = build_contour_curves(css, cps)
@@ -271,3 +280,140 @@ def test_bfs_visibility():
     assert set(v_run_1.keys()) == set(v_run_2.keys())
     for k in v_run_1:
         np.testing.assert_array_equal(v_run_1[k], v_run_2[k])
+
+
+# ── O17: lp_refine_visibility ───────────────────────────────────────────────
+
+def test_lp_refine_visibility():
+    # ─── sub-assert 1: no-correction case (consistent input → LP unchanged) ─
+    # Single 3-sample open RC, one break with delta_v=-1 between samples 0-1.
+    # Anchor at leftmost (sample 0); BFS gives [0, -1, -1].
+    rc = _make_rc(
+        "BC",
+        xy=[[0, 0], [1, 0], [2, 0]],
+        depth=[0.0, 0.0, 0.0],
+        dir_=[[0, 1]] * 3,
+        start=-1, end=-1,
+    )
+    bks = np.array([(0, 0, 0.5, (0.5, 0.0), -1)], dtype=break_dtype)
+    v_bfs = bfs_visibility([rc], bks, splits=None, anchor_mode="leftmost")
+    v_lp = lp_refine_visibility([rc], bks, splits=None, vis_bfs=v_bfs,
+                                anchors="leftmost")
+    np.testing.assert_array_equal(v_lp[id(rc)], v_bfs[id(rc)])
+
+    # ─── sub-assert 2: single bad break → LP corrects to all-zero ─────────
+    # 3-sample open RC, break with delta_v=+3 (impossible since vis ≤ 0).
+    # LP must slack vc to 0, giving s=3, vis = [0, 0, 0].
+    rc2 = _make_rc(
+        "BC",
+        xy=[[0, 0], [1, 0], [2, 0]],
+        depth=[0.0, 0.0, 0.0],
+        dir_=[[0, 1]] * 3,
+        start=-1, end=-1,
+    )
+    bks2 = np.array([(0, 0, 0.5, (0.5, 0.0), 3)], dtype=break_dtype)
+    v_lp2 = lp_refine_visibility([rc2], bks2, splits=None, vis_bfs=None,
+                                 anchors="leftmost")
+    np.testing.assert_array_equal(v_lp2[id(rc2)], np.zeros(3, dtype=np.int32))
+
+    # ─── sub-assert 3: anchors="extremes" → 4 anchor samples all vis=0 ──
+    # Three small RCs whose leftmost/rightmost/topmost/bottommost are
+    # distinct samples.
+    rc_a = _make_rc("BC", xy=[[-5, 0], [-4, 0]], depth=[0, 0],
+                    dir_=[[0, 1]] * 2, start=-1, end=-1)
+    rc_b = _make_rc("BC", xy=[[5, 0], [4, 0]], depth=[0, 0],
+                    dir_=[[0, 1]] * 2, start=-1, end=-1)
+    rc_c = _make_rc("BC", xy=[[0, -5], [0, 5]], depth=[0, 0],
+                    dir_=[[1, 0]] * 2, start=-1, end=-1)
+    v_lp3 = lp_refine_visibility(
+        [rc_a, rc_b, rc_c], np.empty(0, dtype=break_dtype),
+        splits=None, vis_bfs=None, anchors="extremes",
+    )
+    # Leftmost = rc_a[0] (x=-5); rightmost = rc_b[0] (x=5);
+    # bottommost = rc_c[0] (y=-5); topmost = rc_c[1] (y=5).
+    assert int(v_lp3[id(rc_a)][0]) == 0
+    assert int(v_lp3[id(rc_b)][0]) == 0
+    assert int(v_lp3[id(rc_c)][0]) == 0
+    assert int(v_lp3[id(rc_c)][1]) == 0
+
+    # ─── sub-assert 4: infeasibility raises LPInfeasibleError ─────────────
+    # Two RCs sharing an SP at each end → forms a cycle. Choose vc constants
+    # so the cycle sum ≠ 0, making SP coupling impossible to satisfy.
+    # RC_x: start=0, end=1, vc_in=0, vc_out=0
+    # RC_y: start=0, end=1, vc_in=-1, vc_out=0  (different vc_in)
+    # SP 0: ref RC_x (start), coupling row for RC_y start:
+    #   vis_y[0] - vis_x[0] = (-1) - 0 = -1
+    # SP 1: ref RC_x (end), coupling row for RC_y end:
+    #   vis_y[N-1] - vis_x[N-1] = 0 - 0 = 0
+    # Combined with propagation (no breaks → vis const within each RC):
+    #   vis_y[0] = vis_y[N-1], vis_x[0] = vis_x[N-1]
+    # So vis_y - vis_x = -1 AND vis_y - vis_x = 0 → infeasible.
+    rc_x = _make_rc("BC", xy=[[0, 0], [1, 0]], depth=[0, 0],
+                    dir_=[[0, 1]] * 2, start=0, end=1, vc_in=0, vc_out=0)
+    rc_y = _make_rc("BC", xy=[[0, 1], [1, 1]], depth=[0, 0],
+                    dir_=[[0, 1]] * 2, start=0, end=1, vc_in=-1, vc_out=0)
+    try:
+        lp_refine_visibility(
+            [rc_x, rc_y], np.empty(0, dtype=break_dtype),
+            splits=None, vis_bfs=None, anchors="leftmost",
+        )
+        raised = False
+    except LPInfeasibleError:
+        raised = True
+    assert raised, "expected LPInfeasibleError for contradictory SP coupling"
+
+    # ─── sub-assert 5: paraboloid ortho → LP matches BFS ────────────────
+    # Reuse `_pipeline` from test_bfs_visibility scope is not accessible;
+    # rebuild minimally inline.
+    from surface_play.contour import (
+        build_contour_curves, build_contour_segments,
+        find_contour_points, find_vps,
+    )
+    from surface_play.curves import build_bcs, resample_all
+    from surface_play.helpers import build_helper_curves
+    from surface_play.intersections import (
+        build_sics, build_sis_pairs, find_double_points,
+        find_triple_points, tp_dtype,
+    )
+    from surface_play.mesh import build_mesh
+    from surface_play.projection import Projection
+    from surface_play.splitting import (
+        SplitArrays, assemble_subcurves,
+        split_at_cdps, split_bcs_at_bcps, split_bcs_at_bdps,
+        split_bcs_at_corners, split_ccs_at_vps, split_sics_at_tps,
+    )
+    from surface_play.test_fixtures import paraboloid, perturb_axis
+
+    surf = paraboloid(perturb=False)
+    mesh = build_mesh(surf.domain, surf, resolution=15, jitter=True, seed=42)
+    bcs = build_bcs(mesh)
+    proj = Projection(surf,
+                      I=perturb_axis([1.0, 0.0, 0.0], seed=1),
+                      J=perturb_axis([0.0, 0.0, 1.0], seed=2))
+    cps = find_contour_points(mesh, proj)
+    css = build_contour_segments(cps, mesh)
+    ccs = build_contour_curves(css, cps)
+    vps = find_vps(ccs, css, cps, surf, proj)
+    dps = find_double_points(mesh, surf)
+    sis_pairs = build_sis_pairs(dps)
+    sics = build_sics(sis_pairs) if len(sis_pairs) else []
+    tps = (find_triple_points(sis_pairs, dps, mesh, surf)
+           if len(sis_pairs) >= 3 else np.empty(0, dtype=tp_dtype))
+    splits = SplitArrays()
+    split_bcs_at_corners(mesh, bcs, splits, proj)
+    split_bcs_at_bcps(mesh, bcs, ccs, css, cps, splits, surf, proj)
+    split_bcs_at_bdps(mesh, bcs, sics, sis_pairs, dps, splits, surf, proj)
+    split_sics_at_tps(tps, sis_pairs, dps, splits, surf, proj)
+    split_ccs_at_vps(vps, css, ccs, splits, surf, proj)
+    split_at_cdps(mesh, css, cps, sis_pairs, dps, splits, surf, proj)
+    hcs = build_helper_curves(bcs, ccs, sics, css, sis_pairs, cps, dps,
+                              mesh, splits, proj, surf, mesh.domain)
+    subs = assemble_subcurves(bcs, ccs, sics, hcs, mesh, css, sis_pairs, splits)
+    rcs5 = resample_all(subs, surf, proj, splits, mesh, css, sis_pairs, cps, dps,
+                        resolution=30)
+    bks5 = compute_projection_breaks(rcs5, surf, proj)
+    v_bfs5 = bfs_visibility(rcs5, bks5, splits, anchor_mode="leftmost")
+    v_lp5 = lp_refine_visibility(rcs5, bks5, splits, vis_bfs=v_bfs5,
+                                 anchors="leftmost")
+    for rc in rcs5:
+        np.testing.assert_array_equal(v_lp5[id(rc)], v_bfs5[id(rc)])
