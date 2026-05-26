@@ -57,10 +57,16 @@ class SubCurve:
 
 
 sp_dtype = np.dtype([
-    ("uv",   "2f8"),
-    ("xyz",  "3f8"),
-    ("xy",   "2f8"),
-    ("type", "U3"),
+    ("uv",     "2f8"),
+    ("xyz",    "3f8"),
+    ("xy",     "2f8"),
+    ("type",   "U3"),
+    # Alternate preimage uv for SPs that sit on a SIC chain (bdp, cdp, and ha
+    # anchored on a SIC). Two sheets meet at a SIC's 3D self-intersection;
+    # `uv` records the canonical sheet, `uv_alt` records the other sheet's
+    # uv. NaN for SPs that don't sit on a SIC (cn, bcp, vp, ha-on-CC).
+    # TPs have 3 preimages — not handled by uv_alt; treated as NaN for now.
+    ("uv_alt", "2f8"),
 ])
 
 spt_dtype = np.dtype([
@@ -82,8 +88,12 @@ class SplitArrays:
         self.sps: list = []
         self.spts: list = []
 
-    def add_sp(self, uv, xyz, xy, sp_type) -> int:
-        self.sps.append((tuple(uv), tuple(xyz), tuple(xy), sp_type))
+    def add_sp(self, uv, xyz, xy, sp_type, uv_alt=None) -> int:
+        if uv_alt is None:
+            uv_alt = (float("nan"), float("nan"))
+        self.sps.append(
+            (tuple(uv), tuple(xyz), tuple(xy), sp_type, tuple(uv_alt))
+        )
         return len(self.sps) - 1
 
     def add_spt(self, sp_idx, bary, vis_chge) -> int:
@@ -184,6 +194,7 @@ def _bvis_chge(
     projection: "Projection",
     edge: np.void,
     s: float,
+    front_uv: np.ndarray | None = None,
 ) -> int:
     """Visibility change on a boundary edge at parametric position s ∈ (0, 1).
 
@@ -255,21 +266,28 @@ def _bvis_chge(
 
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
-    Suu = np.asarray(surface.Suu(u, v), dtype=float).reshape(3)
-    Suv = np.asarray(surface.Suv(u, v), dtype=float).reshape(3)
-    Svv = np.asarray(surface.Svv(u, v), dtype=float).reshape(3)
     axis = projection._axis
 
     dS_ker = ker[0] * Su + ker[1] * Sv
     if float(axis @ dS_ker) < 0.0:
         ker = -ker
 
-    Np = np.array([
-        float(np.cross(Suu, Sv) @ axis + np.cross(Su, Suv) @ axis),
-        float(np.cross(Suv, Sv) @ axis + np.cross(Su, Svv) @ axis),
-    ])
-    if float(np.dot(Np, ker)) < 0.0:
-        Np = -Np
+    # Np = gradient of axis·SN in uv, oriented so Np·ker > 0. If the caller
+    # has the precomputed `front_uv` from the CP that lives at this BCP,
+    # use it directly (Spec change 2026-05-27 — one source of truth for the
+    # front-sheet vector). Otherwise re-derive locally.
+    if front_uv is not None:
+        Np = np.asarray(front_uv, dtype=float).reshape(2)
+    else:
+        Suu = np.asarray(surface.Suu(u, v), dtype=float).reshape(3)
+        Suv = np.asarray(surface.Suv(u, v), dtype=float).reshape(3)
+        Svv = np.asarray(surface.Svv(u, v), dtype=float).reshape(3)
+        Np = np.array([
+            float(np.cross(Suu, Sv) @ axis + np.cross(Su, Suv) @ axis),
+            float(np.cross(Suv, Sv) @ axis + np.cross(Su, Svv) @ axis),
+        ])
+        if float(np.dot(Np, ker)) < 0.0:
+            Np = -Np
 
     Tp = np.array([-Np[1], Np[0]])
     if float(np.dot(Tp, Nb)) < 0.0:
@@ -345,7 +363,8 @@ def split_bcs_at_bcps(
 
         e_idx = int(cp["e"])
         bary_be = float(cp["s"])
-        vis = _bvis_chge(surface, projection, mesh.edges[e_idx], bary_be)
+        vis = _bvis_chge(surface, projection, mesh.edges[e_idx], bary_be,
+                         front_uv=cp["front_uv"])
         spt_be = splits.add_spt(sp_idx=sp_idx, bary=bary_be, vis_chge=vis)
         splits.attach_to_segment(mesh.edges, e_idx, spt_be, segment_label="BE")
 
@@ -502,8 +521,10 @@ def split_bcs_at_bdps(
         dp = dps[i]
         xyz = np.asarray(dp["xyz"], dtype=float)
         uv = np.asarray(dp["uv1"], dtype=float)  # sheet-1 uv as the SP's anchor
+        uv_alt = np.asarray(dp["uv2"], dtype=float)  # sheet-2 uv for SIC walks
         xy = projection.XY(xyz)
-        sp_idx = splits.add_sp(uv=uv, xyz=xyz, xy=xy, sp_type="bdp")
+        sp_idx = splits.add_sp(uv=uv, xyz=xyz, xy=xy, sp_type="bdp",
+                               uv_alt=uv_alt)
 
         # SIS containing this DP (spec line 305: exactly one on the boundary).
         if len(sis_pairs) > 0:
@@ -842,6 +863,7 @@ def _sis_vis_chge_at_cdp(
     uv_hit: np.ndarray,
     cs_dir_uv: np.ndarray,
     sis_dir_uv: np.ndarray,
+    front_uv: np.ndarray | None = None,
 ) -> int:
     """SIS-side vis_chge at a CDP. Spec line 408.
 
@@ -850,29 +872,35 @@ def _sis_vis_chge_at_cdp(
       - N is the CS normal in uv, oriented toward the front sheet. "Front sheet"
         per spec is interpretation (1) — intrinsic to THIS sheet: N points
         into the half of the CS where THIS sheet curves toward the viewer.
-        Under "axis points toward viewer", that is the half where moving in
-        +N direction increases axis·S in 3D.
 
-    Implementation: take N0 = (-cs_dir_v, cs_dir_u) (perpendicular to CS
-    chord in uv), then orient N0 so that
-       `axis · (Su*N0[0] + Sv*N0[1]) > 0`
-    (a small step in +N0 moves the surface point toward the viewer).
+    If the caller provides `front_uv` (the per-CP front-sheet vector
+    interpolated at the CDP from the CS's two endpoints), use it directly as
+    N. This is the spec change of 2026-05-27 (one source of truth for the
+    front-sheet vector). Otherwise fall back to the local construction:
+    N = (-cs_dir_v, cs_dir_u), oriented so that `axis · dS(N) > 0`.
+
+    For a CS lying on the silhouette `axis·SN = 0`, `front_uv = grad_uv
+    (axis·SN)` is perpendicular to the contour tangent in uv, exactly aligned
+    with the local "perpendicular to cs_dir_uv toward front sheet" — only the
+    sign matters for the final dot, so the substitution is sign-equivalent.
     """
     if projection.mode != "ortho":
         raise NotImplementedError(
             "_sis_vis_chge_at_cdp: perspective not yet supported"
         )
 
-    u, v = float(uv_hit[0]), float(uv_hit[1])
-    Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
-    Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
-    axis = projection._axis
-
-    N = np.array([-float(cs_dir_uv[1]), float(cs_dir_uv[0])], dtype=float)
-    # Orient N toward the front sheet (axis·dS_N > 0 under axis-toward-viewer).
-    dS_N = N[0] * Su + N[1] * Sv
-    if float(axis @ dS_N) < 0.0:
-        N = -N
+    if front_uv is not None:
+        N = np.asarray(front_uv, dtype=float).reshape(2)
+    else:
+        u, v = float(uv_hit[0]), float(uv_hit[1])
+        Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
+        Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+        axis = projection._axis
+        N = np.array([-float(cs_dir_uv[1]), float(cs_dir_uv[0])], dtype=float)
+        # Orient N toward the front sheet (axis·dS_N > 0 under axis-toward-viewer).
+        dS_N = N[0] * Su + N[1] * Sv
+        if float(axis @ dS_N) < 0.0:
+            N = -N
 
     T = np.asarray(sis_dir_uv, dtype=float).reshape(2)
     return 1 if float(T @ N) > 0.0 else -1
@@ -950,17 +978,21 @@ def split_at_cdps(
             surface.S(float(uv_hit[0]), float(uv_hit[1])), dtype=float,
         ).reshape(3)
         xy_hit = projection.XY(xyz_hit)
-        sp_idx = splits.add_sp(uv=uv_hit, xyz=xyz_hit, xy=xy_hit, sp_type="cdp")
 
         # OTHER preimage uv: lerp on the other preimage's segment at t_b.
         # Both preimages walk from p_dp to q_dp (consistent flip-handled
         # parametrization built in `_build_sis_preimage_segments`).
+        # Stored as the SP's uv_alt so SIC polyline walks can land on the
+        # matching sheet at the chain endpoint.
         o_uv0 = np.asarray(other_uv0[sis_seg_idx], dtype=float).reshape(2)
         o_uv1 = np.asarray(other_uv1[sis_seg_idx], dtype=float).reshape(2)
         # Close-aware lerp: shift o_uv1 toward o_uv0 if domain identifies axes.
         if domain is not None and getattr(domain, "type", None) == "rect":
             o_uv1 = domain.close(o_uv0, o_uv1)
         other_uv = o_uv0 + t_b * (o_uv1 - o_uv0)
+
+        sp_idx = splits.add_sp(uv=uv_hit, xyz=xyz_hit, xy=xy_hit, sp_type="cdp",
+                               uv_alt=other_uv)
 
         # Direction vectors (close-adjusted) for the vis_chge formulas.
         cs_p = np.asarray(cs_uv0[cs_idx], dtype=float).reshape(2)
@@ -983,8 +1015,15 @@ def split_at_cdps(
         splits.attach_to_segment(css, cs_idx, spt_cs, segment_label="CS")
 
         # SIS-side SPT.
+        # Interpolate front_uv at the CDP from the CS endpoints — used as the
+        # CS-normal-toward-front-sheet (spec change 2026-05-27).
+        cs_row = css[cs_idx]
+        front_p = np.asarray(cps[int(cs_row["p_cp"])]["front_uv"], dtype=float)
+        front_q = np.asarray(cps[int(cs_row["q_cp"])]["front_uv"], dtype=float)
+        front_uv_cdp = (1.0 - t_a) * front_p + t_a * front_q
         vis_sis = _sis_vis_chge_at_cdp(
             surface, projection, uv_hit, cs_dir_uv, sis_dir_uv,
+            front_uv=front_uv_cdp,
         )
         spt_sis = splits.add_spt(sp_idx=sp_idx, bary=t_b, vis_chge=vis_sis)
         splits.attach_to_segment(sis_pairs, sis_idx, spt_sis,

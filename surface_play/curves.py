@@ -286,8 +286,18 @@ def _build_polyline(
             uvs.append(uvs[0].copy())
     else:
         # Normal SC: start SP → internal → end SP.
-        uvs.append(np.asarray(splits.sps[sub.start][0], dtype=float))
+        # For SIC subs we pick the preimage of each endpoint that lies on the
+        # same sheet as the chain walk (using SP.uv_alt = other preimage uv).
+        # Start SP: defer the decision until the first internal sample is
+        # known, then choose the start preimage closer to it.
+        sp_start_uv = np.asarray(splits.sps[sub.start][0], dtype=float)
+        sp_start_uv_alt = (
+            np.asarray(splits.sps[sub.start][4], dtype=float)
+            if sub.kind == "SIC" else None
+        )
+        uvs.append(sp_start_uv)
         domain_local = getattr(mesh, "domain", None)
+        first_internal_for_start_pick = None
         for seg_idx, bary in sub.internal:
             if sub.kind == "SIC":
                 # Pick whichever preimage's vertex is closer (close-aware) to
@@ -306,11 +316,44 @@ def _build_polyline(
                     cand1_close, cand2_close = cand1, cand2
                 d1 = float(np.linalg.norm(cand1_close - prev))
                 d2 = float(np.linalg.norm(cand2_close - prev))
-                uvs.append(cand1 if d1 <= d2 else cand2)
+                picked = cand1 if d1 <= d2 else cand2
+                uvs.append(picked)
+                if first_internal_for_start_pick is None:
+                    first_internal_for_start_pick = picked
             else:
                 uvs.append(_seg_uv_at_bary(sub.kind, int(seg_idx), float(bary),
                                            mesh, css, sis_pairs, cps, dps))
-        uvs.append(np.asarray(splits.sps[sub.end][0], dtype=float))
+        # Retroactively fix the SIC start SP if uv_alt is closer to the first
+        # internal sample (start uv was just a placeholder above).
+        if (sub.kind == "SIC"
+                and sp_start_uv_alt is not None
+                and not np.any(np.isnan(sp_start_uv_alt))
+                and first_internal_for_start_pick is not None):
+            target = first_internal_for_start_pick
+            if domain_local is not None and getattr(domain_local, "type", None) == "rect":
+                a_close = domain_local.close(target, sp_start_uv)
+                b_close = domain_local.close(target, sp_start_uv_alt)
+            else:
+                a_close, b_close = sp_start_uv, sp_start_uv_alt
+            if (np.linalg.norm(a_close - target)
+                    > np.linalg.norm(b_close - target)):
+                uvs[0] = sp_start_uv_alt
+        # End SP: same picking against the last internal sample (or start SP
+        # if there is no internal sample).
+        sp_end_uv = np.asarray(splits.sps[sub.end][0], dtype=float)
+        if sub.kind == "SIC":
+            sp_end_uv_alt = np.asarray(splits.sps[sub.end][4], dtype=float)
+            if not np.any(np.isnan(sp_end_uv_alt)):
+                prev = uvs[-1]
+                if domain_local is not None and getattr(domain_local, "type", None) == "rect":
+                    a_close = domain_local.close(prev, sp_end_uv)
+                    b_close = domain_local.close(prev, sp_end_uv_alt)
+                else:
+                    a_close, b_close = sp_end_uv, sp_end_uv_alt
+                if (np.linalg.norm(a_close - prev)
+                        > np.linalg.norm(b_close - prev)):
+                    sp_end_uv = sp_end_uv_alt
+        uvs.append(sp_end_uv)
 
     # Close-aware adjust consecutive vertices, then lift to xyz/xy.
     domain = getattr(mesh, "domain", None)
@@ -373,14 +416,28 @@ def _snap_annular_bc(uv: np.ndarray, mesh) -> np.ndarray:
 
 def _dir_for_bc_sample(seg_idx: int, mesh, surface, projection,
                        uv_sample: np.ndarray) -> np.ndarray:
-    """Projected inward 2D normal of a BC sample (from edge['dir'] at uv_sample)."""
+    """Projected inward 2D normal of a BC sample (from edge['dir'] at uv_sample).
+
+    `edge["dir"]` is expressed in the canonical p's identification copy (fixed
+    at mesh-build). `uv_sample` may sit in a different copy if the chain's
+    polyline was close()-extended across a seam. Lifting via Su, Sv at the
+    extended uv yields the wrong 3D vector (e.g. for Möbius, Su(v+2π) = -Su(v)).
+    Bring uv_sample into canonical p's copy before evaluating Su, Sv so the
+    lift agrees with edge["dir"]'s frame.
+    """
     edge = mesh.edges[int(seg_idx)]
     dir_uv = np.asarray(edge["dir"], dtype=float)
-    u, v = float(uv_sample[0]), float(uv_sample[1])
+    domain = getattr(mesh, "domain", None)
+    if domain is not None and getattr(domain, "type", None) == "rect":
+        p_canonical = mesh.uv[int(edge["p_idx"])]
+        uv_for_lift = domain.close(p_canonical, uv_sample)
+    else:
+        uv_for_lift = uv_sample
+    u, v = float(uv_for_lift[0]), float(uv_for_lift[1])
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
     inward_3d = dir_uv[0] * Su + dir_uv[1] * Sv
-    return projection.proj_vec(uv_sample, inward_3d)
+    return projection.proj_vec(uv_for_lift, inward_3d)
 
 
 def _dir_for_cc_sample(seg_idx_poly: int, alpha: float,
@@ -400,15 +457,24 @@ def _tan_for_bc_sample(seg_idx: int, mesh, surface, projection, domain,
     Replaces the chord `xy[si+1] - xy[si]` used previously: that chord direction
     is sample-jitter-noisy at fine resolutions, which can flip the sign of the
     projection-break discriminator. The analytic tangent is resolution-stable.
+
+    `edge["pq"]` is in canonical p's identification copy; bring `uv_sample`
+    into the same copy before evaluating Su, Sv so the lift is frame-consistent
+    (matters at the mo seam).
     """
     edge = mesh.edges[int(seg_idx)]
     edge_dp = np.asarray(edge["pq"], dtype=float)
-    Tb_uv = domain.boundary_tangent(uv_sample, edge_dp)
-    u, v = float(uv_sample[0]), float(uv_sample[1])
+    if domain is not None and getattr(domain, "type", None) == "rect":
+        p_canonical = mesh.uv[int(edge["p_idx"])]
+        uv_for_lift = domain.close(p_canonical, uv_sample)
+    else:
+        uv_for_lift = uv_sample
+    Tb_uv = domain.boundary_tangent(uv_for_lift, edge_dp)
+    u, v = float(uv_for_lift[0]), float(uv_for_lift[1])
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
     Tb_3d = Tb_uv[0] * Su + Tb_uv[1] * Sv
-    return projection.proj_vec(uv_sample, Tb_3d)
+    return projection.proj_vec(uv_for_lift, Tb_3d)
 
 
 def _tan_for_cc_sample(uv_sample: np.ndarray, css: np.ndarray, cps: np.ndarray,
@@ -473,37 +539,68 @@ def _newton_cc_refine(uv: np.ndarray, surface, projection, *, n_iter: int = 5
     return uv_cur
 
 
-def _sample_arclengths(L_start: float, d_start: float,
-                       L_end: float, d_end: float, L_total: float,
-                       is_closed: bool, d_closed: float | None) -> np.ndarray:
-    """Pick xy-arclength positions at which to sample.
+def _sample_arclengths(L_total: float, ell: float,
+                       delta_start: float, delta_end: float,
+                       is_closed: bool) -> np.ndarray:
+    """Pick xy-arclength positions for resampling (spec change 2026-05-27).
 
-    Spec line 458: each half-curve gets samples `0, d, 2d, …, L/2 − d`, where
-    L and d are the per-SP values at the half's endpoint SP (not the SC total).
-    Closed: uniform `d_closed` spacing across the loop.
+    Per-half growing-spacing rule:
+      - Each sub is split into a start-half and end-half at L_total/2.
+      - In the START half, walking inward from the start SP, the k-th
+        segment (k=1,2,...) has length `d_k = min(k * delta_start, ell)`.
+      - Symmetrically in the END half from the end SP, with `delta_end`.
+      - `delta_X = L_min_incident_at_X / 10` (per-SP).
+      - `ell = M / resolution` (global).
+
+    Effect: segments grow linearly from delta near the SP until saturating
+    at ell. Catches near-SP events densely and transitions smoothly to the
+    coarse interior. No "blind zone" between dense and coarse regions.
+
+    Closed curves: uniform `ell` spacing.
     """
     if L_total <= 0:
         return np.zeros(0, dtype=float)
+
     if is_closed:
-        d = d_closed if d_closed and d_closed > 0 else L_total / 30.0
-        n = max(int(round(L_total / d)), 4)
+        coarse = ell if ell > 0 else L_total / 30.0
+        n = max(int(round(L_total / coarse)), 4)
         return np.linspace(0.0, L_total, n, endpoint=False)
-    # Each half spans [0, L_total/2] and [L_total/2, L_total], sampled with the
-    # corresponding SP's step. The spec's "up to L_x/2 − d_x" rule defined a
-    # MIN sample count (≥4 per half); we extend to cover the whole half to
-    # avoid an unsampled middle region when L_x ≪ L_total (G20 corollary).
+
+    coarse = ell if ell > 0 else max(delta_start, delta_end, L_total / 30.0)
+    d_s = delta_start if delta_start > 0 else coarse
+    d_e = delta_end   if delta_end   > 0 else coarse
     half = L_total / 2.0
-    if d_start <= 0 or L_start <= 0:
-        d_start = half / 5.0
-    if d_end <= 0 or L_end <= 0:
-        d_end = half / 5.0
-    # Cap per-half at 1000 samples to bound memory when L_x is degenerately
-    # small (d_x → tiny). Real-world meshes never need that many.
-    n_s = max(min(int(np.ceil(half / d_start)), 1000), 5)
-    first = np.linspace(0.0, half, n_s, endpoint=False)
-    n_e = max(min(int(np.ceil(half / d_end)), 1000), 5)
-    second = np.linspace(half, L_total, n_e + 1)
-    return np.concatenate([first, second])
+
+    # Forward from start: 0, d_1, d_1+d_2, ... until reaching `half`.
+    start: list[float] = [0.0]
+    s = 0.0
+    k = 1
+    while s < half:
+        dk = min(k * d_s, coarse)
+        if dk <= 0:
+            break
+        s += dk
+        if s > half:
+            break
+        start.append(s)
+        k += 1
+
+    # Backward from end: L_total, L_total - d_1, L_total - (d_1+d_2), ...
+    end_rev: list[float] = [L_total]
+    s = 0.0
+    k = 1
+    while s < half:
+        dk = min(k * d_e, coarse)
+        if dk <= 0:
+            break
+        s += dk
+        if s > half:
+            break
+        end_rev.append(L_total - s)
+        k += 1
+    end = list(reversed(end_rev))
+
+    return np.array(sorted(set(start + end)))
 
 
 def resample_all(
@@ -547,14 +644,23 @@ def resample_all(
         polys.append((uv_p, xyz_p, xy_p))
         L_per_sub.append(float(_arclengths(xy_p)[-1]) if len(xy_p) > 1 else 0.0)
 
-    # Step C — per-SP L = min over incident SubCurves.
+    # Step C — resampling scales (spec change 2026-05-27, per-SP variant):
+    #   ell        = M / resolution                  (global coarse spacing)
+    #   delta[sp]  = (min incident SubCurve length at sp) / 10
+    # `_sample_arclengths` takes (L_total, ell, delta_start, delta_end,
+    # is_closed) and produces 5 dense segments at each endpoint, ell-spaced
+    # interior. Local-per-SP delta avoids a globally tiny sub from
+    # contaminating distant subs' near-SP resolution.
+    ell = M / float(resolution)
     L_per_sp: dict[int, float] = {}
     for i, sub in enumerate(subcurves):
         L = L_per_sub[i]
+        if L <= 0:
+            continue
         for sp in (sub.start, sub.end):
             if sp >= 0:
                 L_per_sp[sp] = min(L_per_sp.get(sp, float("inf")), L)
-    d_per_sp = {sp: min(L / 10.0, M / float(resolution)) for sp, L in L_per_sp.items()}
+    delta_per_sp = {sp: L / 10.0 for sp, L in L_per_sp.items()}
 
     # Step E — sample each SC.
     out: list[ResampledCurve] = []
@@ -591,13 +697,9 @@ def resample_all(
             cum_dense = _arclengths(xy_dense)
             L_xy_total = float(cum_dense[-1])
 
-            L_s = L_per_sp.get(sub.start, L_xy_total)
-            L_e = L_per_sp.get(sub.end, L_xy_total)
-            d_s = d_per_sp.get(sub.start, M / float(resolution))
-            d_e = d_per_sp.get(sub.end, M / float(resolution))
-            s_targets = _sample_arclengths(
-                L_s, d_s, L_e, d_e, L_xy_total, False, None,
-            )
+            delta_s = delta_per_sp.get(sub.start, ell)
+            delta_e = delta_per_sp.get(sub.end, ell)
+            s_targets = _sample_arclengths(L_xy_total, ell, delta_s, delta_e, False)
 
             sample_uv = np.empty((len(s_targets), 2), dtype=float)
             sample_xyz = np.empty((len(s_targets), 3), dtype=float)
@@ -627,16 +729,10 @@ def resample_all(
             ))
             continue
 
-        # Pick sample arclengths.
-        L_s = L_per_sp.get(sub.start, L_total)
-        L_e = L_per_sp.get(sub.end, L_total)
-        d_s = d_per_sp.get(sub.start, M / float(resolution))
-        d_e = d_per_sp.get(sub.end, M / float(resolution))
-        if sub.is_closed:
-            d_c = d_per_sp.get(sub.start, M / float(resolution))
-            s_targets = _sample_arclengths(0, 0, 0, 0, L_total, True, d_c)
-        else:
-            s_targets = _sample_arclengths(L_s, d_s, L_e, d_e, L_total, False, None)
+        # Pick sample arclengths (two-phase tapered spacing).
+        delta_s = delta_per_sp.get(sub.start, ell)
+        delta_e = delta_per_sp.get(sub.end, ell)
+        s_targets = _sample_arclengths(L_total, ell, delta_s, delta_e, sub.is_closed)
 
         cum = _arclengths(xy_p)
         N = len(s_targets)
@@ -705,7 +801,12 @@ def resample_all(
             sp_start = splits.sps[sub.start]
             sample_xyz[0] = np.asarray(sp_start[1], dtype=float)
             sample_xy[0] = np.asarray(sp_start[2], dtype=float)
-        if N >= 1 and sub.end >= 0 and not sub.is_closed:
+        if N >= 1 and sub.end >= 0:
+            # Always pin the end to its SP, even for closed subs (start == end):
+            # otherwise the last sample drifts from the SP by up to one
+            # spacing-step, leaving a visible gap that looks like a spurious
+            # segment in tilted views. `sub.end >= 0` already excludes SP-less
+            # closed subs (which use start = end = -1).
             sp_end = splits.sps[sub.end]
             sample_xyz[-1] = np.asarray(sp_end[1], dtype=float)
             sample_xy[-1] = np.asarray(sp_end[2], dtype=float)

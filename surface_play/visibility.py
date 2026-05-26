@@ -119,15 +119,21 @@ def compute_projection_breaks(
         else:
             T = occl_rc.xy[occl_si + 1] - occl_rc.xy[occl_si]
 
-        # dir_ocer: in-image normal to the occluder's image tangent.
-        # Sign chosen so that dir_ocer · old_dir > 0, where old_dir is the
-        # lifted-uv-inward direction projected to image (rc.dir from O14).
-        # The old_dir has the right 3D sign (uses surface orientation) but
-        # is not perpendicular to the image tangent when the surface tilts
-        # in the depth direction at the boundary. Decomposing old_dir into
-        # along-tangent + perpendicular components and keeping just the
-        # perpendicular gives an in-image-perpendicular direction with the
-        # correct sign convention.
+        # dir_ocer: in-image normal to the occluder's image tangent, oriented
+        # by the occluder's lifted-uv-inward direction `old_dir`.
+        #
+        # Construction:
+        #   1) ocer_tan = occluder's image-space tangent at the crossing.
+        #   2) perp = (-ocer_tan[1], ocer_tan[0])  — 90° rotation in image.
+        #   3) flip sign if perp · old_dir < 0  — orient toward surface interior.
+        #
+        # This makes dir_ocer independent of the orientation of either chain:
+        # reversing the occluder's chain flips ocer_tan and thus perp; the
+        # sign-flip via old_dir then flips back, leaving dir_ocer invariant.
+        # Equivalent in sign to the prior "perp component of old_dir" formula
+        # (since dir_ocer ends up parallel to perp(ocer_tan) either way), but
+        # robust when old_dir is nearly parallel to ocer_tan (where the prior
+        # formula's magnitude collapses to noise).
         old_dir = (
             (1.0 - t_ocer) * np.asarray(ocer_rc.dir[ocer_si], dtype=float)
             + t_ocer * np.asarray(ocer_rc.dir[ocer_si + 1], dtype=float)
@@ -139,9 +145,9 @@ def compute_projection_breaks(
             )
             t_norm2 = float(ocer_tan @ ocer_tan)
             if t_norm2 > 0.0:
-                # Project old_dir onto plane perpendicular to ocer_tan.
-                proj_coeff = float(old_dir @ ocer_tan) / t_norm2
-                dir_ocer = old_dir - proj_coeff * ocer_tan
+                dir_ocer = np.array([-ocer_tan[1], ocer_tan[0]], dtype=float)
+                if float(dir_ocer @ old_dir) < 0.0:
+                    dir_ocer = -dir_ocer
             else:
                 dir_ocer = old_dir
         else:

@@ -126,6 +126,10 @@ torus_ortho_view = ([1, 0, 0], [0, 1, 0], None)
 # Möbius: ortho, axis = (0,0,1); used for seam/flip regression tests.
 mobius_ortho_view = ([1, 0, 0], [0, 1, 0], None)
 
+# Fig-8: ortho top-down, axis = I×J = (0,0,1) — outer CC + SIC ring + inner CC,
+# the canonical "donut with a self-intersection ring" picture.
+fig8_top_view = ([1, 0, 0], [0, 1, 0], None)
+
 # Fig-8: perspective from Z=5; used for SIC visibility integration tests.
 fig8_persp_view = ([1, 0, 0], [0, 1, 0], [0, 0, 5])
 

@@ -21,14 +21,19 @@ from surface_play.surface import SurfaceParams
 # â”€â”€ dtype definitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 cp_dtype = np.dtype([
-    ("e",     "i4"),    # index into mesh.edges
-    ("s",     "f8"),    # parametric position on the edge, in (0, 1)
-    ("uv",    "2f8"),   # domain coord = e.p + sÂ·e.pq
-    ("xyz",   "3f8"),   # 3D position
-    ("d",     "2f8"),   # unit 2D curvature direction of the projected contour at the
-                        # CP (see _compute_d_at): non-zero at non-cusp CPs and reverses
-                        # across cusps.  Drives O4 sign-change detection.
-    ("ptype", "u1"),    # 0 = interior CP; 4 = on boundary edge
+    ("e",        "i4"),    # index into mesh.edges
+    ("s",        "f8"),    # parametric position on the edge, in (0, 1)
+    ("uv",       "2f8"),   # domain coord = e.p + sÂ·e.pq
+    ("xyz",      "3f8"),   # 3D position
+    ("d",        "2f8"),   # unit 2D curvature direction of the projected contour at the
+                           # CP (see _compute_d_at): non-zero at non-cusp CPs and reverses
+                           # across cusps.  Drives O4 sign-change detection.
+    ("front_uv", "2f8"),   # 2D uv-space vector pointing toward the FRONT sheet of the
+                           # surface. Computed as oriented Np = grad_uv(axis.SN) per the
+                           # 4-step recipe (compute ker, orient so axis.dS(ker)>0, compute
+                           # Np, orient so Np.ker>0). Used by O4 (cusp detection between
+                           # CS endpoints), O7 BCP vis_chge, and O11 CDP CS-side vis_chge.
+    ("ptype",    "u1"),    # 0 = interior CP; 4 = on boundary edge
 ])
 
 cs_dtype = np.dtype([
@@ -46,7 +51,7 @@ def _compute_d_batch(
     uv_arr: np.ndarray,
     vals: tuple[np.ndarray, ...],
     projection: Projection,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Vectorized 2D curvature direction of the projected contour at N uv points.
 
     `vals` is the 7-tuple returned by `SurfaceParams._eval_all(u, v)` evaluated
@@ -153,21 +158,42 @@ def _compute_d_batch(
     safe_n = n > 0.0
     d_arr = np.zeros_like(diff2)
     d_arr[safe_n] = diff2[safe_n] / n[safe_n, None]
-    return d_arr
+
+    # ── front_uv: oriented Np = grad_uv(axis . SN) ──────────────────────────
+    # Step A. Orient `ker` so axis . dS(ker) > 0.
+    dS_ker = k0 * Su_arr + k1 * Sv_arr                  # (N, 3)
+    axis_dot_dS_ker = dS_ker @ axis                     # (N,)
+    sign_ker = np.where(axis_dot_dS_ker >= 0.0, 1.0, -1.0)
+    ker_oriented = ker * sign_ker[:, None]              # (N, 2)
+
+    # Step B. Compute Np = grad_uv(axis . SN) in uv space (per _bvis_chge).
+    Np_u = (np.cross(Suu_arr, Sv_arr) + np.cross(Su_arr, Suv_arr)) @ axis  # (N,)
+    Np_v = (np.cross(Suv_arr, Sv_arr) + np.cross(Su_arr, Svv_arr)) @ axis  # (N,)
+    Np = np.stack([Np_u, Np_v], axis=-1)                # (N, 2)
+
+    # Step C. Orient Np so Np . ker_oriented > 0.
+    Np_dot_ker = (Np * ker_oriented).sum(axis=-1)
+    sign_Np = np.where(Np_dot_ker >= 0.0, 1.0, -1.0)
+    front_uv = Np * sign_Np[:, None]                    # (N, 2)
+
+    return d_arr, front_uv
 
 
 def _compute_d_at(uv: np.ndarray, surface: SurfaceParams,
                   projection: Projection) -> np.ndarray:
-    """Scalar fallback of `_compute_d_batch` for one uv point.
+    """Scalar fallback of `_compute_d_batch` for one uv point (d only).
 
     Used by O4 refinement's per-Newton-iteration evaluations.  Delegates to
     the batched helper with N = 1 so the algorithm lives in one place.
+    Returns just the `d` field; if you need `front_uv` too, call
+    `_compute_d_batch` directly.
     """
     uv = np.asarray(uv, dtype=float).reshape(2)
     u_ = np.array([uv[0]])
     v_ = np.array([uv[1]])
     vals = surface._eval_all(u_, v_)
-    return _compute_d_batch(uv.reshape(1, 2), vals, projection)[0]
+    d_arr, _front = _compute_d_batch(uv.reshape(1, 2), vals, projection)
+    return d_arr[0]
 
 
 # â”€â”€ O1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -249,19 +275,22 @@ def find_contour_points(
     vals_final = mesh.surface._eval_all(u_f, v_f)       # 7-tuple, each (3, N)
     xyz_arr = vals_final[0].T                            # (N, 3)
 
-    # 5. d field: 2D curvature direction of the projected contour (vectorized).
-    d_arr = _compute_d_batch(uv_arr, vals_final, projection)
+    # 5. d field + front_uv: 2D curvature direction of the projected contour
+    #    and the uv-space front-sheet vector (both vectorized in one pass that
+    #    shares the SVD-derived `ker` between them).
+    d_arr, front_uv_arr = _compute_d_batch(uv_arr, vals_final, projection)
 
     # 6. ptype: 4 on boundary edge (g == -1), else 0
     ptype_arr = np.where(cand["g"] == -1, np.uint8(4), np.uint8(0))
 
     result = np.zeros(len(cand_idx), dtype=cp_dtype)
-    result["e"]     = cand_idx
-    result["s"]     = s
-    result["uv"]    = uv_arr
-    result["xyz"]   = xyz_arr
-    result["d"]     = d_arr
-    result["ptype"] = ptype_arr
+    result["e"]        = cand_idx
+    result["s"]        = s
+    result["uv"]       = uv_arr
+    result["xyz"]      = xyz_arr
+    result["d"]        = d_arr
+    result["front_uv"] = front_uv_arr
+    result["ptype"]    = ptype_arr
     return result
 
 
@@ -471,6 +500,14 @@ def find_vps(
 
     Walks each CC chain in order, flags a sign change of the d field between
     consecutive CPs (``d_i · d_j < 0``); each such CS hosts one VP.
+
+    Note (2026-05-27): the `front_uv` field on CPs is also available and
+    detects cusps via the analogous criterion (`front_i · front_j < 0`),
+    but `d` (image-curvature) is more numerically robust in degenerate
+    configurations such as the torus side view where the silhouette factors
+    into perpendicular contour-line families in uv (the `front_uv` arrows at
+    the two arms are then orthogonal, dot ≈ 0, noisy sign). `front_uv` is
+    consumed by O7 BCP and O11 CDP instead.
 
     refine=False : VP location = midpoint of the CS in uv.
     refine=True  : Newton-bisection refinement orthogonal to the chord

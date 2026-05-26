@@ -97,8 +97,8 @@ These come from prior-attempt notes. Each is referenced by its ID in the steps t
 | **G17** | `split1, split2` slot count | Per spec line 245, every BE, CS, SIS carries two split slots `split1, split2` (each either -1 or an index into the global SPTs array). Layer C populates segment dtypes with `split1 = split2 = -1`; Layer O fills them. **Risk:** in pathological surfaces a segment could attract >2 splits (e.g., a SIS with a BDP at one end, a TP in the middle, and a CDP near the other end). The new code must `assert split2 == -1` before assigning a third — surface as a clear failure rather than silently dropping the third split. If it ever fires in practice we'll widen the dtype. |
 | **G18** | BCP `bvis_chge` formula | Visibility change of a BC at a contour-on-boundary point (BCP): copy verbatim the `bvis_chge` formula from spec lines 258-280. It uses `kerdS` (oriented toward upper fold), `Tb` (boundary tangent in 3D), `Np` (projected fold normal). The orientation logic of `Np` and the sign cases are easy to get wrong — write the formula once in `splitting.py` and unit-test against synthetic configurations before using it in real surfaces. |
 | **G19** | HC distance in domain, original coords | Helper-curve component distances are computed in the **domain** (not view-plane), and on identified rectangles **the original (pre-merge) domain rectangle coordinates** are used (spec line 403). For two seam-side candidate endpoints, this means avoiding the period-jump that `close()` would introduce — we want `d(qi, qj)` as raw rectangle-coord distance, not minimum-period distance. |
-| **G20** | Resampling spacing per spec | Spec lines 79-80 + 442: `d = min(L/10, M / GRID_RESOLUTION)` where `L` is the smallest **view-plane** length of curves originating/ending at the SP, and `M` is an approximate diameter of the surface in projected space. Sample at arclengths `0, d, 2d, ...` until `L/2 − d` on each half-curve. This guarantees ≥4 points per half-curve. **Don't** measure curve length in domain space; the projection-space metric is what BK detection cares about. |
-| **G21** | SIC two-sheet uv tracking on resample | A SIC has one chain (in xyz) but two domain preimages (uv1 and uv2 per DP). When resampling a SIC SubCurve we need both preimages tracked. Walk consecutive DPs using each SIS's `flip` to decide which preimage continues into which side; between consecutive samples on each preimage, use `domain.close()` for the uv linear interpolation (verified on fig-8 cyl seam in prior attempt). |
+| **G20** | Resampling spacing per spec (revised 2026-05-27) | Per-SP, per-half growing-spacing rule. `ell = M / resolution` (M = approx surface diameter in projected space). For each SP: `delta(sp) = L_min(sp) / 10` where `L_min(sp)` is the smallest **view-plane** length over incident SubCurves. Each open SubCurve is split at its midpoint; walking inward from each endpoint SP, the k-th segment (k=0,1,2,…) has length `d_k = min((k+1) · delta(sp), ell)`. Segments grow linearly from `delta(sp)` near the SP until saturating at `ell` — dense near SPs (where events crowd), coarse in the smooth interior. Closed `sub.start == sub.end >= 0`: uniform `ell`. **Don't** measure curve length in domain space; the projection-space metric is what BK detection cares about. |
+| **G21** | SIC two-sheet uv tracking on resample | A SIC has one chain (in xyz) but two domain preimages (uv1 and uv2 per DP). When resampling a SIC SubCurve we need both preimages tracked. Walk consecutive DPs using each SIS's `flip` to decide which preimage continues into which side; between consecutive samples on each preimage, use `domain.close()` for the uv linear interpolation. **Endpoint SPs** (bdp/cdp at the start/end of a SIC sub) store a single canonical `uv` plus a second `uv_alt` (the matching uv on the other sheet) — `_build_polyline` picks whichever endpoint preimage is closer to the adjacent internal sample, so the polyline stays on one sheet end-to-end. Without `uv_alt`, an endpoint SP whose stored canonical uv happens to be on the OTHER sheet from the internal walk produces a `Δu = ±π`-style polyline jump that maps to a far-away surface region under linear uv-interpolation (observed on fig-8 res=200 rnd #3/#4). TPs have 3 preimages and aren't covered by `uv_alt`. |
 | **G22** | BKs are sidecar, not splits | Spec line 467: visibility changes from projection-space intersections (BKs) are stored on curves but the curves are **not** split at BKs. BKs are sample-anchored sidecar data: `{sample_idx, t, delta_v, xy}`. Don't accidentally insert BKs as new SPTs in `split1, split2` — they belong to a separate `breaks` array. |
 | **G23** | BFS anchor determinism | The leftmost-x sample (anchor for BFS) may tie. On ties, pick the lexicographically smallest `(rc_id, sample_idx)`. Otherwise different runs of the same input produce different visibility distributions. |
 | **G24** | LP variables and slack | LP1/LP4 (spec §15.2): variables = per-sample `vis[k]` (≤ 0) + per-break `vc_i` (free) + per-break slack `s_i ≥ 0`. Equality rows = segment propagation `vis[k+1] − vis[k] − Σ vc_i = 0` (with wrap for closed) + SP coupling (visibilities at shared SPs match modulo δv) + anchor `vis = 0`. Inequality rows = `vc ∓ s ≤ ±vc⁰` for L1 slack on objective `Σ s_i`. Use scipy `linprog(method="highs")` on a sparse CSR matrix. Round `vis` to int at exit; if status=2 (infeasible), raise `LPInfeasibleError` (G7). |
@@ -956,13 +956,25 @@ The **fixture viewpoint convention** for tests: each test fixture surface in `te
 **API:**
 ```python
 cp_dtype = np.dtype([
-    ("e", "i4"),               # edge index
-    ("s", "f8"),               # parametric (0, 1) on the edge
-    ("uv", "2f8"),             # domain coord = e.p + s · e.pq
-    ("xyz", "3f8"),            # 3D position
-    ("d", "2f8"),              # PROJECTED ker_param: proj_vec(uv, kerdS(uv)) — 2D vector in view plane,
+    ("e",        "i4"),        # edge index
+    ("s",        "f8"),        # parametric (0, 1) on the edge
+    ("uv",       "2f8"),       # domain coord = e.p + s · e.pq
+    ("xyz",      "3f8"),       # 3D position
+    ("d",        "2f8"),       # PROJECTED ker_param: proj_vec(uv, kerdS(uv)) — 2D vector in view plane,
                                # oriented "into the surface" (toward the lit side). Used by VP detection (O4).
-    ("ptype", "u1"),           # 0 = interior CP, 4 = on boundary edge (becomes a BCP later)
+    ("front_uv", "2f8"),       # 2D uv-space vector pointing toward the FRONT sheet (axis·SN > 0 side).
+                               # Computed as oriented `Np = grad_uv(axis·SN)`:
+                               #   (1) compute `ker` (kernel direction of the silhouette in uv);
+                               #   (2) orient ker so `axis · dS(ker) > 0`;
+                               #   (3) compute Np;
+                               #   (4) orient Np so `Np · ker > 0`.
+                               # Consumed by O7 BCP `_bvis_chge` and O11 CDP SIS-side `_sis_vis_chge_at_cdp`
+                               # (replaces local re-derivation). NOT used for O4 cusp detection — the
+                               # `d` field is more robust in degenerate configurations like the torus
+                               # side view, where the silhouette factors into perpendicular contour-line
+                               # families in uv and `front_uv` at adjacent arms is orthogonal (dot ≈ 0,
+                               # noisy sign).
+    ("ptype",    "u1"),        # 0 = interior CP, 4 = on boundary edge (becomes a BCP later)
 ])
 
 def find_contour_points(mesh: Mesh, projection: Projection,
@@ -973,7 +985,7 @@ def find_contour_points(mesh: Mesh, projection: Projection,
 1. Compute per-vertex `dot_v = SN[v] · viewer_direction(xyz[v])` (vectorized; for ortho this is constant axis, for persp depends on xyz).
 2. For each edge, mask `sign_changes(dot_v[p_idx], dot_v[q_idx], flip)` (P6) — true where `dot_p · dot_q · flip < 0`.
 3. For surviving edges, batched Newton on `s ↦ projection.viewer_direction(S(e.p + s·e.pq)) · SN(e.p + s·e.pq)`. Newton derivative uses `SN`'s chain-rule via `dSN` (precomputed in P2) and projection's `axis` derivative for persp. **Fall back to `s = 0.5` if Newton escapes (0, 1)** (G9).
-4. For each CP, compute `xyz = S(uv)` and `d = projection.proj_vec(uv, projection.kerdS(uv))` — the **projected** ker_param in view-plane 2D. Orient `d` consistently across all CPs (toward the lit side of the surface; e.g., flip to make the dot product with a fixed reference direction positive, or use the convention from the legacy `kerdS` orientation that yields `Z > 0` in 3D before projection).
+4. For each CP, compute `xyz = S(uv)`, `d = projection.proj_vec(uv, projection.kerdS(uv))` — the **projected** ker_param in view-plane 2D — and `front_uv` per the 4-step recipe in `cp_dtype` above. Orient `d` consistently across all CPs (toward the lit side of the surface; e.g., flip to make the dot product with a fixed reference direction positive, or use the convention from the legacy `kerdS` orientation that yields `Z > 0` in 3D before projection).
 5. Set `ptype = 4` if the edge is boundary (`g == -1`); else `ptype = 0`.
 **Test criterion:**
 1. Helicoid rect-no-no, ortho top-down: produces a known CP count consistent with resolution; all `s ∈ (0, 1)`.
@@ -1080,10 +1092,14 @@ def find_vps(ccs: list[ContourCurve], css: np.ndarray, cps: np.ndarray,
 **API:**
 ```python
 sp_dtype = np.dtype([
-    ("uv",   "2f8"),            # domain coord
-    ("xyz",  "3f8"),            # 3D position
-    ("xy",   "2f8"),            # projected 2D position
-    ("type", "U3"),             # "cn" | "bcp" | "bdp" | "tp" | "vp" | "cdp" | "ha"
+    ("uv",     "2f8"),          # domain coord (canonical preimage)
+    ("xyz",    "3f8"),          # 3D position
+    ("xy",     "2f8"),          # projected 2D position
+    ("type",   "U3"),           # "cn" | "bcp" | "bdp" | "tp" | "vp" | "cdp" | "ha"
+    ("uv_alt", "2f8"),          # other-preimage uv for SPs on a SIC chain
+                                # (bdp, cdp; ha-on-SIC if populated). NaN
+                                # otherwise. TPs have 3 preimages and are not
+                                # representable with a single uv_alt → NaN.
 ])
 
 spt_dtype = np.dtype([
@@ -1096,8 +1112,9 @@ class SplitArrays:
     sps:  list   # appended-to; length == n_sps
     spts: list   # appended-to; length == n_spts
 
-    def add_sp(self, uv, xyz, xy, sp_type) -> int:
-        """Append SP, return index."""
+    def add_sp(self, uv, xyz, xy, sp_type, uv_alt=None) -> int:
+        """Append SP, return index. `uv_alt` defaults to NaN; pass the
+        other-preimage uv for SPs on a SIC chain (bdp/cdp/ha-on-SIC)."""
 
     def add_spt(self, sp_idx, bary, vis_chge) -> int:
         """Append SPT, return index."""
@@ -1156,7 +1173,7 @@ def split_bcs_at_bcps(mesh: Mesh, bcs, ccs, css, cps, splits, surface, projectio
 1. Create SP with `type="bcp"`, `xyz = cp.xyz`, `xy = projection.XY(cp.xyz)`.
 1. Find the CS containing the CP (only one, since the CP is a CC endpoint per spec line 282).
 3. SPT on CS: `bary = 0 or 1` per spec (depending on CC traversal direction); `vis_chge = 0`.
-4. SPT on the boundary edge `cp.e`: `bary = cp.s`; `vis_chge = bvis_chge(e, s)` per spec lines 258-280 (G18).
+4. SPT on the boundary edge `cp.e`: `bary = cp.s`; `vis_chge = bvis_chge(e, s, front_uv=cp.front_uv)` per spec lines 258-280 (G18). Pass the CP's precomputed `front_uv` (the oriented `Np` of the spec formula); `_bvis_chge` falls back to local re-derivation if `front_uv` is None.
 5. Attach SPTs to BE and CS via `splits.attach_to_segment`.
 **Test criterion:**
 1. Helicoid ortho viewpoint with boundary CPs: SP count = number of CPs with `ptype=4`.
@@ -1177,7 +1194,7 @@ def split_bcs_at_bdps(mesh, bcs, sics, sis_pairs, dps, splits, surface, projecti
     ...
 ```
 **Algorithm:** For each DP with `on_boundary == True`:
-1. Create SP with `type="bdp"`.
+1. Create SP with `type="bdp"`, `uv=dp["uv1"]`, `uv_alt=dp["uv2"]` (sheet-2 uv for G21 SIC walks).
 2. Find the BE (or BEs) containing the DP (it is either E1, or E2, or both). Find the SIS containing the DP. There is only one since it is on the boundary.
 3. SPT on SIS: `bary = 0 or 1` (per which end of the SIS the DP is); `vis_chge = 0`.
 4. SPT on BE: For each of the boundary edges `E` (usually there will only be 1, exceptionally 2) `bary = position of DP on E`; `vis_chge` per spec cases 1 and 2 (lines 293-296). Case 1 = DP also on a second BE (other sheet's E1' is also boundary); case 2 = DP's other sheet is interior.
@@ -1249,9 +1266,9 @@ def split_at_cdps(mesh, css, sis_pairs, dps, splits, domain, surface, projection
 **Algorithm:**
 1. Run `sweep_segments(...)` (P5) **cross mode** between CS preimage segments (uv0/uv1 from CS endpoints' `cps[*].uv`) and SIS preimage segments (one per SIS's two preimages). `domain` set for close-aware (G3).
 2. For each hit (`uv`, `t_a`, `t_b`):
-   - Create SP with `type="cdp"`, `xyz=S(uv)`, `xy=projection.XY(xyz)`.
+   - Create SP with `type="cdp"`, `xyz=S(uv)`, `xy=projection.XY(xyz)`, `uv_alt = other-preimage uv` (linear-interp at `t_b` on the SIS's other-sheet segment built from `dps[p_dp].uv2/uv1` per the SIS's `flip`; G21 needs this so SIC polyline walks land on the matching sheet at the chain endpoint).
    - SPT on CS: `bary = t_a`, `vis_chge` per spec line 388 (uses 3D tangent + other-sheet normal).
-   - SPT on SIS: `bary = t_b`, `vis_chge` per spec line 392 (uses domain tangent + CS-normal-toward-front-sheet).
+   - SPT on SIS: `bary = t_b`, `vis_chge` per spec line 392 (uses domain tangent + CS-normal-toward-front-sheet). The "CS-normal-toward-front-sheet" is the `front_uv` of the CS, interpolated at the CDP from the CS's two CP endpoints: `front_uv_cdp = (1 - t_a) · cps[p_cp].front_uv + t_a · cps[q_cp].front_uv`. `_sis_vis_chge_at_cdp` consumes this directly; if `front_uv` is None it falls back to local construction from `cs_dir_uv`.
    - Attach SPTs to CS and SIS.
 **Test criterion:**
 1. No-intersection cases (helicoid, torus): 0 CDP SPs.
@@ -1366,18 +1383,21 @@ def resample_all(subcurves: list[SubCurve], surface, projection,
 ```
 **Algorithm:**
 1. Compute `M` = approximate diameter of surface in projected space (`max(‖xyz_i − xyz_j‖)` for vertices in mesh, projected via `projection.XY`).
-2. For each SP: enumerate SubCurves originating/ending at it; compute each SubCurve's view-plane length `L_k`. Let `L = min(L_k)`. Compute `d = min(L/10, M / resolution)` (G20). `resolution` is the resampling density (`surface_play.settings.RESOLUTION`, distinct from the mesh `GRID_RESOLUTION`).
-3. For each SubCurve: split at midpoint; on each half, sample at arclengths `0, d, 2d, ...` until `L/2 − d`. Closed curves (start == end ≥ 0): uniform `d` spacing using that SP's `(L, d)`.
-3a. **SP-less SubCurve** (`sub.start == sub.end == -1`, e.g., flat disk's lone closed BC): no subdivision — copy the chain polyline verbatim into `xy`/`depth`; `rc.start = rc.end = -1`.
-4. The sampled points usually lie between two points of the original curve. Then the `(uv)` coordinates of these points are interpolated, after `close`, and the projected image of the result is taken as the `xy` of the interpolated point.
-5. **SIC two-sheet tracking (G21):** for SIC SubCurves, one needs to use `(uv)` coordinates of the interpolants in **the same preimage**, which can be done using the `flip` field.
-6. **Annular BC reprojection** (spec line 446): if the SubCurve's parent BC is on disk/annulus boundary then there is an additional step which is to snap the interpolated  `(u, v)` to `‖(u, v)‖ = r_min` or `r_max` before computing the projected image. Each interpolated point's `dir` field is taken to be the `dir` field of the boundary edge containing both interpolants.
-7. **CC Newton refinement** (spec line 448, behind `project_resampled=True`, maps to settings `PROJECT_RESAMPLED`): If the SubCurve's parent is a CC, there is also an additional step which is to run Newton along the line normal to the CC at the interpolated `(u, v)` to find a nearby `dot(SN, axis) = 0`. The `dir` field is either computed as the `dir`field of CPs, or interpolated from the interpolant's `dir` field.
-8. The `dir` field for SIC of HC resampled curves is not used, it can be set to `None`.
-9. **Endpoint pinning (G5, G21):** `rc.start = sub.start` and `rc.end = sub.end` (same SP index — SP Python identity is preserved by reference equality through `splits.sps[rc.start]`). The first sample's `xy` exactly equals `projection.XY(splits.sps[rc.start].xyz)`; the last sample's `xy` exactly equals the corresponding for `rc.end`. Same for `depth`. (For closed SubCurves with `sub.start == -1`, the RC is also closed: `rc.start = rc.end = -1`.)
+2. Compute `ell = M / resolution`. `resolution` is the resampling density (`surface_play.settings.RESOLUTION`, distinct from the mesh `GRID_RESOLUTION`).
+3. **Per-SP delta** (spec change 2026-05-27): for each SP, enumerate SubCurves originating/ending at it; compute each SubCurve's view-plane length `L_k`. Let `L_min(sp) = min(L_k)` over incident SubCurves at `sp`. Then `delta(sp) = L_min(sp) / 10`.
+4. **Per-half growing-spacing sampling**: each open SubCurve is split into a start-half and end-half at arclength `L_total / 2`. Walking inward from each endpoint SP, the k-th segment (k = 0, 1, 2, …) has length `d_k = min((k+1) · delta(sp), ell)`. Effect: segments grow linearly from `delta(sp)` until saturating at `ell`, so events crowding near SPs are sampled finely and the smooth interior is sampled at coarse `ell`. Closed curves (`sub.start == sub.end ≥ 0`): uniform `ell` spacing.
+4a. **SP-less SubCurve** (`sub.start == sub.end == -1`, e.g., flat disk's lone closed BC): no subdivision — copy the chain polyline verbatim into `xy`/`depth`; `rc.start = rc.end = -1`.
+5. The sampled points usually lie between two points of the original curve. Then the `(uv)` coordinates of these points are interpolated, after `close`, and the projected image of the result is taken as the `xy` of the interpolated point.
+6. **SIC two-sheet tracking (G21):** for SIC SubCurves, one needs to use `(uv)` coordinates of the interpolants in **the same preimage**. Two pieces:
+   - **Internal samples:** use each SIS's `flip` field to keep `_seg_uv_at_bary(..., sis_preimage=k)` on one sheet (closer-preimage heuristic locks the choice at the first sample, `flip` carries it through).
+   - **Endpoint SPs (start/end):** read both `splits.sps[sub.start/end].uv` and `.uv_alt`; pick whichever is closer to the adjacent internal sample. Without this, an endpoint SP's stored canonical uv may sit on the other sheet from the walk, producing a `Δu = ±π`-style jump in the polyline's last segment (its linear uv interpolation then routes through a far-away surface region, producing a spurious sample spike).
+7. **Annular BC reprojection** (spec line 446): if the SubCurve's parent BC is on disk/annulus boundary then there is an additional step which is to snap the interpolated  `(u, v)` to `‖(u, v)‖ = r_min` or `r_max` before computing the projected image. Each interpolated point's `dir` field is taken to be the `dir` field of the boundary edge containing both interpolants.
+8. **CC Newton refinement** (spec line 448, behind `project_resampled=True`, maps to settings `PROJECT_RESAMPLED`): If the SubCurve's parent is a CC, there is also an additional step which is to run Newton along the line normal to the CC at the interpolated `(u, v)` to find a nearby `dot(SN, axis) = 0`. The `dir` field is either computed as the `dir`field of CPs, or interpolated from the interpolant's `dir` field.
+9. The `dir` field for SIC of HC resampled curves is not used, it can be set to `None`.
+10. **Endpoint pinning (G5, G21):** `rc.start = sub.start` and `rc.end = sub.end` (same SP index — SP Python identity is preserved by reference equality through `splits.sps[rc.start]`). The first sample's `xy` exactly equals `projection.XY(splits.sps[rc.start].xyz)`; the last sample's `xy` exactly equals the corresponding for `rc.end`. Same for `depth`. (For closed SubCurves with `sub.start == -1`, the RC is also closed: `rc.start = rc.end = -1`.) Also applies when `sub.start == sub.end >= 0` (closed sub pinned to a single SP — both endpoints pin to the same SP, closing the loop visually).
 **Test criterion:**
 1. SubCurve with one SP at each end: at least 4 sample points per half-curve, total ≥ 8 samples.
-2. Closed SubCurve (`sub.start == -1`): uniform spacing; sample count ≈ `round(L / d)`; `rc.start == rc.end == -1`.
+2. Closed SubCurve (`sub.start == -1`): copy polyline verbatim — sample count = polyline length; `rc.start == rc.end == -1`. Closed `sub.start == sub.end >= 0`: uniform `ell` spacing, sample count ≈ `round(L / ell)`.
 3. Annular BC: post-resampling, the projected sample positions correspond to uvs whose `‖(u, v)‖` is within `1e-12` of `r_min` or `r_max`.
 4. **SIC two-sheet tracking (G21):** for a SIC SubCurve, the resampling loop does not jump preimages mid-walk (verified by an internal-uv tracker that stays close-aware between consecutive samples).
 5. **Endpoint SP indices (G5):** `rc.start == sub.start` and `rc.end == sub.end`. Furthermore `splits.sps[rc.start]` is the same Python object as `splits.sps[sub.start]` (identity preserved through index dereferencing).
