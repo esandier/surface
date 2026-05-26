@@ -5,4 +5,5 @@ __pycache__
 db.sqlite3
 .DS_Store
 probes_out/
-
+/*.png
+/diag_sweep_output.txt
