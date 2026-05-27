@@ -103,9 +103,9 @@ def _build_edges_faces(
     point breaks every downstream consumer that cares about which period the
     point lives in (notably O1 contour points on multi-branch silhouettes).
 
-    Flip detection: an edge has `flip = -1` iff both endpoints lie on a seam
-    of an axis whose identification is `mo` (Möbius reversal); otherwise the
-    edge takes the sign of `dot(SN[p], SN[q])`, which is +1 for smooth surfaces.
+    Flip detection: an edge has `flip = -1` iff its canonical-uv chord
+    crosses a Möbius seam (chord component on a `mo` axis exceeds half the
+    period). All other edges have `flip = +1`.
     """
     M = len(tris)
 
@@ -210,16 +210,23 @@ def _build_edges_faces(
             edges[e_idx]["g"] = recs[1][0]
             edges[e_idx]["dir"] = (0.0, 0.0)
 
-        # flip = -1 iff the two endpoints' surface normals disagree
-        # (SN[p] · SN[q] < 0). Captures both genuine mo-seam crossings and
-        # any other configuration where the per-vertex SN values were
-        # evaluated in chart copies that disagree on orientation.
-        sn_p = SN_per_vertex[p_idx]
-        sn_q = SN_per_vertex[q_idx]
-        if float(sn_p @ sn_q) < 0.0:
-            edges[e_idx]["flip"] = -1
+        # flip = -1 iff the canonical-uv chord straddles a Möbius seam
+        # (i.e. its periodic-axis component is longer than half the range).
+        # The `on_u_seam[p] and on_u_seam[q]` test was too narrow: across
+        # the mo-u seam, the triangle on one side has its third vertex in
+        # the interior, and the edge between that interior vertex (canonical
+        # close to u=0) and an opposite-side seam vertex (canonical at
+        # u=u_max) is a genuine mo-flip edge but only one endpoint is on
+        # the seam. A wider `SN·SN<0` heuristic (pre-9f02eab) spuriously
+        # fired on highly-curved smooth surfaces (Vagues at res=200, fig8
+        # near a fold) — the chord-jump test is the precise replacement.
+        if u_is_mo and abs(float(uv[q_idx, 0] - uv[p_idx, 0])) > _u_range_half:
+            crosses_mo = True
+        elif v_is_mo and abs(float(uv[q_idx, 1] - uv[p_idx, 1])) > _v_range_half:
+            crosses_mo = True
         else:
-            edges[e_idx]["flip"] = 1
+            crosses_mo = False
+        edges[e_idx]["flip"] = -1 if crosses_mo else 1
 
         edges[e_idx]["split1"] = -1
         edges[e_idx]["split2"] = -1
