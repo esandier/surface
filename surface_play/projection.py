@@ -36,8 +36,20 @@ class Projection:
         eye: list[float] | np.ndarray | None = None,
     ):
         self.surface = surface
-        self.I = np.asarray(I, dtype=float).reshape(3)
-        self.J = np.asarray(J, dtype=float).reshape(3)
+        I_arr = np.asarray(I, dtype=float).reshape(3)
+        J_arr = np.asarray(J, dtype=float).reshape(3)
+        # Normalize the screen basis. The frontend's ortho path sends
+        # `I = unproject(1,0,-1) - unproject(0,0,-1)` which is `radius·right`,
+        # not a unit vector. XY/Jacobian/kernel math throughout the pipeline
+        # treats I, J as an orthonormal screen basis; normalizing here makes
+        # XY return world-unit screen coordinates so the SVG transform
+        # (scale=1/radius) lines up with three.js NDC.
+        nI = float(np.linalg.norm(I_arr))
+        nJ = float(np.linalg.norm(J_arr))
+        if nI == 0.0 or nJ == 0.0:
+            raise ValueError("I and J must be non-zero")
+        self.I = I_arr / nI
+        self.J = J_arr / nJ
 
         axis = np.cross(self.I, self.J)
         n = float(np.linalg.norm(axis))

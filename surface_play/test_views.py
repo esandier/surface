@@ -145,16 +145,16 @@ class PlayEndpointTests(TestCase):
         a = _post(O1)
         b = _post(O2)
 
-        # Expected shift: XY(xyz; O2) − XY(xyz; O1) = −P·(O2 − O1),
-        # where P = (I·, J·). Same for the world origin.
+        # `origin` is the projection of the camera focal point and is
+        # always (0, 0) by construction (XY anchors at O). The polylines
+        # carry the geometric shift: XY(xyz; O2) − XY(xyz; O1) = −P·(O2 − O1),
+        # where P = (I·, J·).
         I_arr = np.array(I); J_arr = np.array(J)
         dO = np.array(O2) - np.array(O1)
         expected_shift = np.array([-I_arr @ dO, -J_arr @ dO])
 
-        np.testing.assert_allclose(
-            np.array(b["origin"]) - np.array(a["origin"]),
-            expected_shift, atol=1e-9,
-        )
+        self.assertEqual(a["origin"], [0.0, 0.0])
+        self.assertEqual(b["origin"], [0.0, 0.0])
 
         # Same polyline counts per visibility key.
         self.assertEqual(

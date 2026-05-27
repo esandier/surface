@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_KEY_MAP = {
     "PROPAGATION": "propagation",
-    "CANVAS_RESOLUTION": "canvas_resolution",
+    "RESOLUTION": "canvas_resolution",
     "NEWTON_CUSP": "newton_cusp",
     "PROJECT_RESAMPLED": "project_resampled",
 }
@@ -153,7 +153,7 @@ def play(request, pk: int) -> HttpResponse:
     return HttpResponseNotAllowed(["GET", "POST"])
 
 
-# ── Legacy save endpoints (unchanged; rewritten in W3) ───────────────────────
+# ── Save endpoints ───────────────────────────────────────────────────────────
 
 
 @csrf_exempt
@@ -184,8 +184,8 @@ def save_thumbnail(request, pk):
     J = data.get("J")
     eye = data.get("eye")
     try:
-        from surface_play.thumbnail import compute_thumbnail
-        rec.thumbnail = compute_thumbnail(rec, I=I, J=J, eye=eye)
+        from surface_play.thumbnail import render_thumbnail
+        rec.thumbnail = render_thumbnail(rec, I=I, J=J, eye=eye)
         rec.save(update_fields=["thumbnail"])
     except Exception as e:
         return HttpResponse(

@@ -359,40 +359,41 @@
     function drawSVG(data) {
         isRequesting = false;
         lastOrigin = data.origin;
-        const lines = data.lines_by_visibility;
-        const siLines = data.si_lines_by_visibility || [];
+        // New pipeline shape: {"<visKey>": [[[x,y], [x,y], ...], ...], ...}
+        // Vis keys are string-encoded ints (≤ 0). Sort ascending so the
+        // largest (== 0 == front sheet) is drawn last, on top.
+        const lines   = data.lines_by_visibility    || {};
+        const siLines = data.si_lines_by_visibility || {};
 
         updateSVGTransform();
 
-        let html = "";
-        lines.forEach((group, i) => {
-            group.forEach(line => {
-                const visible = i === lines.length - 1;
-                html += `
-                <polyline
-                    points="${line}"
-                    fill="none"
-                    stroke="${visible ? 'black' : 'grey'}"
-                    stroke-width="1.5"
-                    ${visible ? '' : 'stroke-dasharray="4"'}
-                    vector-effect="non-scaling-stroke"
-                />`;
+        function emitBucket(bucket, strokeWidth) {
+            // vis == 0 → front-sheet visible (solid black); vis < 0 → hidden
+            // (grey, dashed). For SIC buckets that contain only negative keys
+            // every polyline must still be dashed — the rule is absolute, not
+            // relative to the bucket's max key.
+            const keys = Object.keys(bucket).map(Number).sort((a, b) => a - b);
+            let h = "";
+            keys.forEach(k => {
+                const visible = k === 0;
+                bucket[String(k)].forEach(poly => {
+                    const pts = poly.map(p => `${p[0]},${p[1]}`).join(" ");
+                    h += `
+                    <polyline
+                        points="${pts}"
+                        fill="none"
+                        stroke="${visible ? 'black' : 'grey'}"
+                        stroke-width="${strokeWidth}"
+                        ${visible ? '' : 'stroke-dasharray="4"'}
+                        vector-effect="non-scaling-stroke"
+                    />`;
+                });
             });
-        });
-        siLines.forEach((group, i) => {
-            group.forEach(line => {
-                const visible = i === siLines.length - 1;
-                html += `
-                <polyline
-                    points="${line}"
-                    fill="none"
-                    stroke="${visible ? 'black' : 'grey'}"
-                    stroke-width="2.5"
-                    ${visible ? '' : 'stroke-dasharray="4"'}
-                    vector-effect="non-scaling-stroke"
-                />`;
-            });
-        });
+            return h;
+        }
+
+        let html = emitBucket(lines,   "1.5");
+        html    += emitBucket(siLines, "2.5");
 
         svg.innerHTML = html;
 

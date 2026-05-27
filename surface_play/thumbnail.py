@@ -1,73 +1,78 @@
-import numpy as np
-from .silhouette import Surface
+"""thumbnail.py — W3: SVG thumbnail rendering on `pipeline.build_outline`.
 
-THUMBNAIL_RES = 100
+Pure migration of the legacy `silhouette.Surface`-based renderer onto the
+modular pipeline. Shares the `_cached_surface_init` LRU with the Django
+views, so a save-thumbnail POST that follows a play POST for the same
+record reuses the cached `SurfaceInit`.
 
+Spec: Modular_rewrite_roadmap.md lines 1661-1692.
+"""
 
-def _ij_from_angles(elev, azim, inplane=0.0):
-    """Compute camera right (I) and up (J) unit vectors from Euler angles in degrees."""
-    phi   = elev   * np.pi / 180
-    theta = azim   * np.pi / 180
-    psi   = inplane * np.pi / 180
-    I0 = np.array([-np.sin(theta), np.cos(theta), 0.0])
-    J0 = np.array([-np.sin(phi)*np.cos(theta), -np.sin(phi)*np.sin(theta), np.cos(phi)])
-    I  = (I0 * np.cos(psi) + J0 * np.sin(psi)).tolist()
-    J  = (-I0 * np.sin(psi) + J0 * np.cos(psi)).tolist()
-    return I, J
+from __future__ import annotations
+
+from surface_play import pipeline
 
 
-def compute_thumbnail(rec, I=None, J=None, eye=None, elev=35.0, azim=45.0, inplane=0.0):
-    """Generate an SVG thumbnail.
+def render_thumbnail(record, I, J, eye=None) -> str:
+    """Render the supplied viewpoint to an SVG string.
 
-    If I and J are provided (camera right/up world vectors), they are used directly.
-    Otherwise, I/J are derived from elev/azim/inplane angles.
-    eye is the camera position for perspective; None means orthographic.
+    Output goes into ``SurfaceRecord.thumbnail`` (a TextField); the surface
+    list template embeds it inline as HTML.
     """
-    if I is None or J is None:
-        I, J = _ij_from_angles(elev, azim, inplane)
-        if eye is None:
-            # build a default perspective eye from angles for backwards-compat
-            pass  # stays orthographic unless caller supplies eye
+    init = pipeline.build_surface_init(record)
+    O = list(eye) if eye is not None else [0.0, 0.0, 0.0]
+    outline = pipeline.build_outline(init, I=I, J=J, O=O, eye=eye)
 
-    surf = Surface(
-        rec.X, rec.Y, rec.Z, rec.parameter_names,
-        bounds=(rec.u_min, rec.u_max, rec.v_min, rec.v_max),
-        quotient=(rec.u_identify, rec.v_identify),
-        domain_type=rec.domain_type, coord_type=rec.coord_type,
-        r_min=rec.r_min, r_max=rec.r_max,
-        output_type=rec.output_type,
+    blank = (
+        '<svg viewBox="-1.1 -1.1 2.2 2.2" xmlns="http://www.w3.org/2000/svg"'
+        ' style="width:100%;height:100%;"></svg>'
     )
-    surf.triangulate(THUMBNAIL_RES)
-    surf.set_axis(I, J, eye=eye)
-    surf.traitement()
 
-    lines = surf.plot_for_browser()
-    xy_grid = surf.XY(surf.S_grid)  # (2, N) — projected surface points
-    x_min, x_max = float(xy_grid[0].min()), float(xy_grid[0].max())
-    y_min, y_max = float(xy_grid[1].min()), float(xy_grid[1].max())
-    origin = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2])
-    r = max(x_max - x_min, y_max - y_min) / 2
+    all_pts: list[tuple[float, float]] = []
+    for bucket in (outline.lines_by_visibility, outline.si_lines_by_visibility):
+        for polylines in bucket.values():
+            for poly in polylines:
+                all_pts.extend(poly)
+    if not all_pts:
+        return blank
 
-    parts = []
-    vis_keys = sorted(lines)
-    for idx, vis in enumerate(vis_keys):
-        visible = idx == len(vis_keys) - 1
-        opacity = '1' if visible else '0.35'
-        dash = ' stroke-dasharray="0.05 0.05"' if not visible else ''
-        for l in lines[vis]:
-            pts = ' '.join(
-                f'{(p[0] - origin[0]) / r:.4f},{-(p[1] - origin[1]) / r:.4f}'
-                for p in l
-            )
-            if pts:
-                parts.append(
-                    f'<polyline points="{pts}" fill="none" stroke="steelblue"'
-                    f' stroke-width="0.04" stroke-opacity="{opacity}"{dash}/>'
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    cx = 0.5 * (x_min + x_max)
+    cy = 0.5 * (y_min + y_max)
+    r = 0.5 * max(x_max - x_min, y_max - y_min)
+    if r == 0.0:
+        return blank
+
+    def _emit(bucket, stroke_width: str) -> list[str]:
+        out: list[str] = []
+        # vis == 0 ⇒ front-sheet visible; vis < 0 ⇒ hidden (dashed). Test
+        # against absolute 0, not the bucket max — a SIC bucket may contain
+        # only negative keys and must still draw dashed.
+        for v in sorted(bucket.keys()):
+            visible = v == 0
+            opacity = "1" if visible else "0.35"
+            dash = ' stroke-dasharray="0.05 0.05"' if not visible else ""
+            for poly in bucket[v]:
+                pts = " ".join(
+                    f"{(p[0] - cx) / r:.4f},{-(p[1] - cy) / r:.4f}"
+                    for p in poly
                 )
+                if pts:
+                    out.append(
+                        f'<polyline points="{pts}" fill="none" stroke="steelblue"'
+                        f' stroke-width="{stroke_width}" stroke-opacity="{opacity}"{dash}/>'
+                    )
+        return out
+
+    parts = _emit(outline.lines_by_visibility, "0.04")
+    parts.extend(_emit(outline.si_lines_by_visibility, "0.06"))
 
     return (
         '<svg viewBox="-1.1 -1.1 2.2 2.2" xmlns="http://www.w3.org/2000/svg"'
         ' style="width:100%;height:100%;">'
-        + ''.join(parts)
-        + '</svg>'
+        + "".join(parts)
+        + "</svg>"
     )

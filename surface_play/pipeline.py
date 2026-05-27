@@ -186,7 +186,7 @@ def build_surface_init(
     object (is-equality), enabling cheap cache hits across POST requests.
     """
     if resolution is None:
-        resolution = _settings.GRID_RESOLUTION
+        resolution = _settings.RESOLUTION
     sig = _record_signature(record)
     return _cached_surface_init(int(record.pk), sig, int(resolution), bool(jitter), seed)
 
@@ -216,6 +216,18 @@ def _run_outline_pipeline(
     sis_pairs = construction.sis_pairs
     sics = construction.sics
     tps = construction.tps
+
+    # `mesh.edges` and `sis_pairs` live in the LRU-cached ConstructionResult;
+    # their split1/split2 fields are back-references into the per-run
+    # SplitArrays. Reset them on every entry so a second build_outline on the
+    # same init doesn't see slot indices from the previous run (and overflow
+    # G17 once both slots are spuriously populated). See test_pipeline.py
+    # `test_repeat_build_outline_on_same_init`.
+    mesh.edges["split1"][:] = -1
+    mesh.edges["split2"][:] = -1
+    if len(sis_pairs):
+        sis_pairs["split1"][:] = -1
+        sis_pairs["split2"][:] = -1
 
     cps = find_contour_points(mesh, projection, use_newton=newton_cusp)
     css = build_contour_segments(cps, mesh)
@@ -364,18 +376,20 @@ def build_outline(
             si_lines_by_visibility if rc.kind == "SIC"
             else lines_by_visibility
         )
-        if rc.kind == "SIC":
-            # SICs are drawn solid; do not split at projection breaks.
-            xy = [(float(p[0]), float(p[1])) for p in rc.xy]
-            if len(xy) >= 2:
-                key = int(v[0])
-                bucket.setdefault(key, []).append(xy)
-            continue
+        # SICs split at projection breaks just like BC/CC: when a contour
+        # curve crosses a SIC in image space, the SIC accrues a vis change
+        # there and the visible / hidden spans must render with their own
+        # vis keys. Frontend drawSVG dashes any polyline with k != 0.
         for vis_level, pts in _split_rc_by_visibility(rc, v, breaks_by_seg, ri):
             bucket.setdefault(int(vis_level), []).append(pts)
 
-    origin_xy = projection.XY(np.zeros(3))
-    origin = (float(origin_xy[0]), float(origin_xy[1]))
+    # The SVG transform in templates/play.html aligns the polyline overlay
+    # with the three.js canvas by translating so that the screen-space
+    # projection of the camera focal point lands at canvas centre. Under
+    # `Projection.XY` that point is `O` (ortho) or `eye` (persp), and both
+    # project to (0, 0) by construction — anchor subtraction in XY makes
+    # this exact. Return literal zeros so the frontend translate is a no-op.
+    origin = (0.0, 0.0)
 
     return OutlineResult(
         lines_by_visibility=lines_by_visibility,

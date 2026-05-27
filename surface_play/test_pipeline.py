@@ -321,3 +321,24 @@ def test_no_silhouette_import():
         f"silhouette leaked into sys.modules after importing pipeline\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+# ── 8. Repeat build_outline on same init must not accumulate split slots ─────
+
+
+def test_repeat_build_outline_on_same_init():
+    """`mesh.edges` and `sis_pairs` live in the LRU-cached ConstructionResult
+    and their split1/split2 fields are mutated by `_run_outline_pipeline`.
+    Without a per-run reset, a second call sees stale slot indices and
+    eventually overflows G17 (`SplitSlotOverflowError`). Regression for the
+    Sinus pk=13 / side-view 500 hit during W3 smoke-testing.
+    """
+    rec = _make_record("paraboloid")
+    init = pipeline.build_surface_init(rec, resolution=20, seed=11)
+    I, J, O = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]
+    first = pipeline.build_outline(init, I=I, J=J, O=O, eye=None)
+    second = pipeline.build_outline(init, I=I, J=J, O=O, eye=None)
+    # Same input → same vis topology; chiefly we're asserting the second
+    # call returned at all (would have raised SplitSlotOverflowError pre-fix).
+    assert sorted(first.lines_by_visibility.keys()) == \
+           sorted(second.lines_by_visibility.keys())
