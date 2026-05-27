@@ -485,14 +485,19 @@ def _tan_for_cc_sample(uv_sample: np.ndarray, css: np.ndarray, cps: np.ndarray,
     Silhouette curve in uv: `axis · SN = 0`. Its tangent is perpendicular to
     `Np = ∇_uv(axis · SN) = ((Suu×Sv + Su×Suv)·axis, (Suv×Sv + Su×Svv)·axis)`.
     Lifted via dS and projected to image.
+
+    Persp (2026-05-27): `axis = viewer_direction(S(uv_sample))`. The
+    extra gradient terms `−Su·SN` / `−Sv·SN` vanish identically (triple
+    product with repeated vector), so the Np formula is unchanged.
     """
     u, v = float(uv_sample[0]), float(uv_sample[1])
+    S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
     Suu = np.asarray(surface.Suu(u, v), dtype=float).reshape(3)
     Suv = np.asarray(surface.Suv(u, v), dtype=float).reshape(3)
     Svv = np.asarray(surface.Svv(u, v), dtype=float).reshape(3)
-    axis = projection._axis
+    axis = projection.viewer_direction(S_p).reshape(3)
     Np = np.array([
         float(np.cross(Suu, Sv) @ axis + np.cross(Su, Suv) @ axis),
         float(np.cross(Suv, Sv) @ axis + np.cross(Su, Svv) @ axis),
@@ -516,16 +521,23 @@ def _newton_cc_refine(uv: np.ndarray, surface, projection, *, n_iter: int = 5
     Direction = uv-grad of `axis·SN`. This is rough but sufficient for the
     G7 / PROJECT_RESAMPLED test (the test only asserts convergence to a sign
     change, not a tight tolerance).
+
+    Persp (2026-05-27): `axis = viewer_direction(S(uv))` recomputed each
+    iteration as `uv` moves.
     """
-    axis = projection._axis
     uv_cur = uv.copy()
     for _ in range(n_iter):
         u, v = float(uv_cur[0]), float(uv_cur[1])
+        S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
+        axis = projection.viewer_direction(S_p).reshape(3)
         SN = np.asarray(surface.SN(u, v), dtype=float).reshape(3)
         f = float(axis @ SN)
         if abs(f) < 1e-10:
             break
-        # Numerical gradient in uv (small fd step).
+        # Numerical gradient in uv (small fd step). In persp the axis
+        # itself depends on S(u,v), so the finite-difference SN_u/SN_v
+        # are evaluated with the same axis at uv_cur (consistent with
+        # Newton's Jacobian approximation).
         h = 1e-5
         SN_u = np.asarray(surface.SN(u + h, v), dtype=float).reshape(3)
         SN_v = np.asarray(surface.SN(u, v + h), dtype=float).reshape(3)
@@ -652,6 +664,27 @@ def resample_all(
     # interior. Local-per-SP delta avoids a globally tiny sub from
     # contaminating distant subs' near-SP resolution.
     ell = M / float(resolution)
+    # Collapsed-SubCurve guard (2026-05-27). A SubCurve whose xy polyline
+    # is shorter than `1e-4 * ell` has both SPs at essentially the same
+    # image-space point — typically a non-generic axis-aligned view that
+    # projects an entire curve to a single point (e.g., the helicoid CC
+    # at u=0 under the Z-axis view collapses to (0, 0)). Without this
+    # guard, delta_per_sp inherits the tiny L → `_sample_arclengths`
+    # spends 10⁷+ iterations climbing back to `ell` for every other sub
+    # sharing the SP. Surface the degenerate input loudly rather than
+    # hanging silently.
+    _L_FLOOR = 1e-4 * ell
+    for i, sub in enumerate(subcurves):
+        L = L_per_sub[i]
+        if 0 < L < _L_FLOOR and not (sub.start == -1 and sub.end == -1):
+            raise ValueError(
+                f"resample_all: SubCurve {i} (kind={sub.kind}, "
+                f"start={sub.start}, end={sub.end}) has xy-length "
+                f"{L:.3e} < 1e-4·ell={_L_FLOOR:.3e}. Both SPs project to "
+                f"essentially the same image point — likely a non-generic "
+                f"axis-aligned view collapsing a curve to a single point. "
+                f"Use a generic random view, or skip this fixture."
+            )
     L_per_sp: dict[int, float] = {}
     for i, sub in enumerate(subcurves):
         L = L_per_sub[i]

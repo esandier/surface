@@ -341,19 +341,17 @@ def _vc_for_endpoint(
            under axis-toward-viewer). 0 if T·N > 0 else -1.
     - SIC: 0 if (axis·SN') * (T_3d·SN') > 0 else -1, with T_3d the
            differential of S applied to T_proj at sample.uv.
+
+    Persp (2026-05-27): `axis = viewer_direction(S(sample.uv))`.
     """
     if sample.parent_kind == "BC":
         return 0
 
-    if projection.mode != "ortho":
-        raise NotImplementedError(
-            "_vc_for_endpoint: perspective mode not yet supported"
-        )
-
-    axis = projection._axis
     u, v = float(sample.uv[0]), float(sample.uv[1])
+    S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
+    axis = projection.viewer_direction(S_p).reshape(3)
 
     if sample.parent_kind == "CC":
         # Legacy `silhouette.vis_chge` (silhouette_cleaned_by_gemini.py

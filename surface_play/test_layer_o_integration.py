@@ -54,9 +54,15 @@ def _random_axis(rng):
     return a, I, J
 
 
-def _run_pipeline(surf, I, J, resolution):
+def _run_pipeline(surf, I, J, resolution, *, eye=None):
     mesh = build_mesh(surf.domain, surf, resolution=resolution, jitter=True, seed=42)
-    proj = Projection(surf, I=I.tolist(), J=J.tolist())
+    if eye is None:
+        proj = Projection(surf, I=I.tolist(), J=J.tolist())
+    else:
+        proj = Projection(
+            surf, I=I.tolist(), J=J.tolist(),
+            O=eye.tolist(), eye=eye.tolist(),
+        )
     bcs = build_bcs(mesh)
     cps = find_contour_points(mesh, proj)
     css = build_contour_segments(cps, mesh)
@@ -93,12 +99,26 @@ RESOLUTION = 100
 
 
 def _generate_cases():
+    """Generate (fixture, trial, axis, I, J, eye) cases for both ortho and persp.
+
+    For persp: place `eye` at `3 × bbox_diag` along the camera axis a,
+    pointing toward the world origin (which sits inside every fixture's
+    bbox). The frontend's contract is `O == eye` in persp; this is what
+    Projection enforces and what we replicate here.
+    """
     rng = np.random.default_rng(SEED)
     out = []
     for fixture_name, factory in FIXTURES:
+        surf = factory(perturb=False)
+        eye_dist = 3.0 * float(surf.bbox_diag)
         for t in range(N_TRIALS):
             a, I, J = _random_axis(rng)
-            out.append((fixture_name, factory, t, a, I, J))
+            # Ortho trial.
+            out.append((fixture_name, factory, f"ortho_t{t}", a, I, J, None))
+            # Persp trial — eye on the +a side (axis = I×J points toward viewer,
+            # so eye sits at `+a · eye_dist` relative to origin).
+            eye = a * eye_dist
+            out.append((fixture_name, factory, f"persp_t{t}", a, I, J, eye))
     return out
 
 
@@ -106,11 +126,11 @@ _CASES = _generate_cases()
 
 
 @pytest.mark.parametrize(
-    "fixture_name,factory,trial,axis,I,J",
+    "fixture_name,factory,trial,axis,I,J,eye",
     _CASES,
-    ids=[f"{c[0]}_t{c[2]}" for c in _CASES],
+    ids=[f"{c[0]}_{c[2]}" for c in _CASES],
 )
-def test_layer_o_pipeline(fixture_name, factory, trial, axis, I, J):
+def test_layer_o_pipeline(fixture_name, factory, trial, axis, I, J, eye):
     """Layer O pipeline is feasible and BFS == LP on every random viewpoint.
 
     Per Layer O sign-off gate (roadmap line 1513-1518): the full per-viewpoint
@@ -121,11 +141,12 @@ def test_layer_o_pipeline(fixture_name, factory, trial, axis, I, J):
     """
     surf = factory(perturb=False)
     try:
-        rcs, bfs, lp = _run_pipeline(surf, I, J, RESOLUTION)
+        rcs, bfs, lp = _run_pipeline(surf, I, J, RESOLUTION, eye=eye)
     except LPInfeasibleError as e:
+        mode = "persp" if eye is not None else "ortho"
         pytest.fail(
-            f"{fixture_name} trial {trial}: LP INFEASIBLE at axis={axis.round(4).tolist()} "
-            f"({e})"
+            f"{fixture_name} trial {trial}: LP INFEASIBLE ({mode}) at "
+            f"axis={axis.round(4).tolist()} ({e})"
         )
 
     # Aggregate stats across all RCs.

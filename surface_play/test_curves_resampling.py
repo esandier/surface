@@ -78,9 +78,13 @@ def _full_pipeline(surf, I=(1.0, 0.0, 0.0), J=(0.0, 1.0, 0.0), resolution=15):
 
 def test_resample_all():
     # ─── sub-assert 1: open SubCurve gets ≥4 samples per half ───────────────
+    # Note: the helicoid's CC silhouette is the screw axis (u=0), so the
+    # Z-axis view I=(1,0,0), J=(0,1,0) collapses the whole CC to (0, 0) in
+    # image space — a degenerate non-generic input that resample_all now
+    # raises on. Use a tilted view instead (axis = I×J ≠ z-axis).
     surf = helicoid(perturb=False)
     mesh, proj, splits, cps, css, ccs, dps, sis_pairs, subs = _full_pipeline(
-        surf, I=(1.0, 0.0, 0.0), J=(0.0, 1.0, 0.0), resolution=15,
+        surf, I=(1.0, 0.0, 0.0), J=(0.0, 1.0, 1.0), resolution=15,
     )
     rcs = resample_all(
         subs, surf, proj, splits, mesh, css, sis_pairs, cps, dps,
@@ -168,9 +172,11 @@ def test_resample_all():
             )
 
     # ─── sub-assert 4: SIC two-sheet (G21) — uv close-aware step ────────────
+    # Tilted view (axis not aligned with the fig-8's symmetry planes) so SIC
+    # SubCurves don't collapse to image-space points.
     surf_8 = fig8(perturb=False)
     mesh_8, proj_8, splits_8, cps_8, css_8, ccs_8, dps_8, sis_8, subs_8 = \
-        _full_pipeline(surf_8, J=(0.0, 0.0, 1.0), resolution=20)
+        _full_pipeline(surf_8, I=(1.0, 0.0, 0.3), J=(0.0, 1.0, 0.4), resolution=20)
     assert len(sis_8) > 0, "fig8 should produce SISs"
     rcs_8 = resample_all(
         subs_8, surf_8, proj_8, splits_8, mesh_8, css_8, sis_8, cps_8, dps_8,

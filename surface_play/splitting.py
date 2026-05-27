@@ -238,12 +238,16 @@ def _bvis_chge(
     (likely mathematically wrong); reverted 2026-05-24.
 
     `Nb = edge["dir"]` is the INWARD boundary normal in uv (mesh.py flips
-    `d` to point toward the boundary triangle's apex). Perspective mode
-    is not yet supported.
-    """
-    if projection.mode != "ortho":
-        raise NotImplementedError("bvis_chge: perspective mode not yet supported")
+    `d` to point toward the boundary triangle's apex).
 
+    Persp (added 2026-05-27): `axis` is the per-point viewer direction
+    `eye − S(p0)`. The Np formula gains terms `−Su·SN` and `−Sv·SN` which
+    vanish identically (`Su · (Su × Sv) = 0`), so the symbolic Np
+    expression is unchanged. Screen-space tangents Tb_proj / Tp_proj
+    switch from the 3D-residual form `T − (axis·T)·axis` (valid only when
+    axis is the constant image-plane normal) to `projection.proj_vec(uv,
+    T_3d)` (2D) — ortho-equivalent in sign, persp-correct.
+    """
     p = np.asarray(edge["p"], dtype=float).reshape(2)
     dp = np.asarray(edge["pq"], dtype=float).reshape(2)
     Nb = np.asarray(edge["dir"], dtype=float).reshape(2)
@@ -264,9 +268,10 @@ def _bvis_chge(
 
     ker = projection.ker_param(p0)
 
+    S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
-    axis = projection._axis
+    axis = projection.viewer_direction(S_p).reshape(3)
 
     dS_ker = ker[0] * Su + ker[1] * Sv
     if float(axis @ dS_ker) < 0.0:
@@ -295,8 +300,8 @@ def _bvis_chge(
 
     dS_Tb = Tb[0] * Su + Tb[1] * Sv
     dS_Tp = Tp[0] * Su + Tp[1] * Sv
-    Tb_proj = dS_Tb - float(axis @ dS_Tb) * axis
-    Tp_proj = dS_Tp - float(axis @ dS_Tp) * axis
+    Tb_proj = projection.proj_vec(p0, dS_Tb)
+    Tp_proj = projection.proj_vec(p0, dS_Tp)
 
     f1 = float(np.dot(Tb, Np))
     f2 = float(np.dot(Np, ker))
@@ -383,14 +388,16 @@ def _bdp_vis_chge_case2(
     Spec line 312: vis_chge = +1 if `inner(SN', axis) * inner(Tb, SN') > 0`
     else -1. SN' is the OTHER sheet's 3D normal at the DP (evaluated at
     `other_uv`), Tb is the 3D tangent to this BE in the p→q direction.
-    """
-    if projection.mode != "ortho":
-        raise NotImplementedError("_bdp_vis_chge: perspective not yet supported")
 
+    Persp (2026-05-27): `axis = viewer_direction(S(uv_DP))`. Both sheets
+    share the same 3D point at a DP, so any uv mapping to it gives the
+    same xyz.
+    """
     p = np.asarray(edge["p"], dtype=float).reshape(2)
     pq = np.asarray(edge["pq"], dtype=float).reshape(2)
     uv = p + float(s) * pq
     u, v = float(uv[0]), float(uv[1])
+    S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
     Tb = pq[0] * Su + pq[1] * Sv
@@ -398,7 +405,7 @@ def _bdp_vis_chge_case2(
     ou, ov = float(other_uv[0]), float(other_uv[1])
     SN_other = np.asarray(surface.SN(ou, ov), dtype=float).reshape(3)
 
-    axis = projection._axis
+    axis = projection.viewer_direction(S_p).reshape(3)
     factor = float(axis @ SN_other) * float(Tb @ SN_other)
     return 1 if factor > 0.0 else -1
 
@@ -422,15 +429,16 @@ def _bdp_vis_chge_case1(
             b = `inner(Tb_proj, dir')`.
     If `a * b > 0`: vis_chge = 0.
     Else:           vis_chge = +1 if a > 0 else -1.
-    """
-    if projection.mode != "ortho":
-        raise NotImplementedError("_bdp_vis_chge: perspective not yet supported")
 
+    Persp (2026-05-27): `axis = viewer_direction(S(uv_DP))`. proj_vec
+    already handles both modes.
+    """
     # OUR edge geometry.
     p = np.asarray(edge_self["p"], dtype=float).reshape(2)
     pq = np.asarray(edge_self["pq"], dtype=float).reshape(2)
     uv = p + float(s_self) * pq
     u, v = float(uv[0]), float(uv[1])
+    S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
     Tb = pq[0] * Su + pq[1] * Sv
@@ -459,7 +467,7 @@ def _bdp_vis_chge_case1(
     if float(np.dot(dir_perp, inward_proj)) < 0.0:
         dir_perp = -dir_perp
 
-    axis = projection._axis
+    axis = projection.viewer_direction(S_p).reshape(3)
     a = float(axis @ SN_other) * float(Tb @ SN_other)
     b = float(np.dot(Tb_proj, dir_perp))
 
@@ -641,18 +649,17 @@ def split_sics_at_tps(
       - `bary = ‖TP - p_xyz‖ / ‖q_xyz - p_xyz‖`, clipped to [0, 1].
 
     Mutates `sis_pairs` (split1/split2 on the 3 involved SISs) and `splits`.
-    """
-    if projection.mode != "ortho":
-        raise NotImplementedError("split_sics_at_tps: perspective not yet supported")
 
+    Persp (2026-05-27): `axis = viewer_direction(tp_xyz)` — same 3D point
+    for all three preimages, so axis is per-TP not per-preimage.
+    """
     if len(tps) == 0:
         return
-
-    axis = projection._axis
 
     for tp in tps:
         tp_xyz = np.asarray(tp["xyz"], dtype=float).reshape(3)
         tp_xy = projection.XY(tp_xyz)
+        axis = projection.viewer_direction(tp_xyz).reshape(3)
         # SP uv anchor: pick the first preimage uv (any of the three would do;
         # it is only metadata since the TP is a single 3D point).
         sp_uv = np.asarray(tp["uv"][0], dtype=float).reshape(2)
@@ -838,13 +845,11 @@ def _cs_vis_chge_at_cdp(
     and T is the 3D CS tangent at the CDP, computed as `Su*cs_dir[0] +
     Sv*cs_dir[1]`. `cs_dir_uv` is the uv chord direction of the CS (close-
     adjusted by the caller).
-    """
-    if projection.mode != "ortho":
-        raise NotImplementedError(
-            "_cs_vis_chge_at_cdp: perspective not yet supported"
-        )
 
+    Persp (2026-05-27): `axis = viewer_direction(S(uv_hit))`.
+    """
     u, v = float(uv_hit[0]), float(uv_hit[1])
+    S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
     Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
     Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
     T = float(cs_dir_uv[0]) * Su + float(cs_dir_uv[1]) * Sv
@@ -852,7 +857,7 @@ def _cs_vis_chge_at_cdp(
     ou, ov = float(other_uv[0]), float(other_uv[1])
     SN_other = np.asarray(surface.SN(ou, ov), dtype=float).reshape(3)
 
-    axis = projection._axis
+    axis = projection.viewer_direction(S_p).reshape(3)
     factor = float(axis @ SN_other) * float(T @ SN_other)
     return 1 if factor > 0.0 else -1
 
@@ -883,19 +888,17 @@ def _sis_vis_chge_at_cdp(
     (axis·SN)` is perpendicular to the contour tangent in uv, exactly aligned
     with the local "perpendicular to cs_dir_uv toward front sheet" — only the
     sign matters for the final dot, so the substitution is sign-equivalent.
-    """
-    if projection.mode != "ortho":
-        raise NotImplementedError(
-            "_sis_vis_chge_at_cdp: perspective not yet supported"
-        )
 
+    Persp (2026-05-27): `axis = viewer_direction(S(uv_hit))`.
+    """
     if front_uv is not None:
         N = np.asarray(front_uv, dtype=float).reshape(2)
     else:
         u, v = float(uv_hit[0]), float(uv_hit[1])
+        S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
         Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
         Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
-        axis = projection._axis
+        axis = projection.viewer_direction(S_p).reshape(3)
         N = np.array([-float(cs_dir_uv[1]), float(cs_dir_uv[0])], dtype=float)
         # Orient N toward the front sheet (axis·dS_N > 0 under axis-toward-viewer).
         dS_N = N[0] * Su + N[1] * Sv
@@ -933,9 +936,6 @@ def split_at_cdps(
     Mutates `css` (split1/split2), `sis_pairs` (split1/split2), and `splits`.
     """
     from surface_play.intersections import sweep_segments
-
-    if projection.mode != "ortho":
-        raise NotImplementedError("split_at_cdps: perspective not yet supported")
 
     if len(css) == 0 or len(sis_pairs) == 0:
         return
