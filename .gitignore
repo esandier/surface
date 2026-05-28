@@ -7,3 +7,8 @@ db.sqlite3
 probes_out/
 /*.png
 /diag_sweep_output.txt
+# W4 visual-regression PNGs: regenerated on every pytest run, not a baseline.
+test_artifacts/
+# Ad-hoc diagnostic dumps from this and prior sessions.
+bisect_out/
+bisect_perf_regression.py

@@ -300,6 +300,18 @@
         };
     }
 
+    // Invisible per-mouseUp perturbation of (I, J) — breaks axis-aligned
+    // degeneracies (Helicoid + Z-view collapses CC SubCurves to a point and
+    // trips resample_all's W3 guard). Magnitude ~1e-3 is well below
+    // sub-pixel; O / eye are NOT perturbed (they anchor screen-space (0,0)).
+    function _perturbAxes(I, J, scale = 1e-3) {
+        const jitter = () => (Math.random() * 2 - 1) * scale;
+        return [
+            [I[0] + jitter(), I[1] + jitter(), I[2] + jitter()],
+            [J[0] + jitter(), J[1] + jitter(), J[2] + jitter()],
+        ];
+    }
+
     function mouseUp(fromControls = false) {
         if (isRequesting) return;
         if (!fromControls) updateDialsFromAngles(readAnglesFromCamera());
@@ -313,12 +325,14 @@
         if (perspectiveMode) {
             const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
             const up    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
-            data = { I: right.toArray(), J: up.toArray(), O: camera.position.toArray(), eye: camera.position.toArray() };
+            const [Ip, Jp] = _perturbAxes(right.toArray(), up.toArray());
+            data = { I: Ip, J: Jp, O: camera.position.toArray(), eye: camera.position.toArray() };
         } else {
             let I = new THREE.Vector3(1, 0, -1).unproject(camera);
             let J = new THREE.Vector3(0, 1, -1).unproject(camera);
             let O = new THREE.Vector3(0, 0, -1).unproject(camera);
-            data = { I: I.sub(O).toArray(), J: J.sub(O).toArray(), O: O.toArray() };
+            const [Ip, Jp] = _perturbAxes(I.sub(O).toArray(), J.sub(O).toArray());
+            data = { I: Ip, J: Jp, O: O.toArray() };
         }
         data.debug = getDebugParams();
 

@@ -335,10 +335,22 @@ def lp_refine_visibility(
       - SP coupling: vis_o − vis_ref = δ_o − δ_ref (δ = vc_in/vc_out of RC)
       - anchor: vis = 0
 
-    Inequalities: vc_i − s_i ≤ vc_i⁰ and −vc_i − s_i ≤ −vc_i⁰.
+    Inequalities:
+      - L1 slack on vc deviation: vc_i − s_i ≤ vc_i⁰ and −vc_i − s_i ≤ −vc_i⁰.
+      - Within-segment vis ≤ 0: for each segment with N>1 breaks sorted by
+        t along the walk direction, the running vis after the i-th break
+        (i = 1..N−1) is `vis[k] + Σ_{j≤i} vc_{b_j} ≤ 0`. Prevents transient
+        positive vis between two ≤0 samples.
+
     Objective: Σ s_i. Solver: scipy.optimize.linprog(method="highs").
     Result: vis rounded to int. `vis_bfs` accepted for API symmetry; unused.
     On status=2: raise `LPInfeasibleError`.
+
+    **Side effect:** mutates `breaks["delta_v"]` in-place with the LP-solved
+    `vc_i` values (rounded to int). Downstream rendering in
+    `pipeline._split_rc_by_visibility` walks the polyline using these
+    delta_v values; without the LP-adjusted overrides the renderer would
+    re-introduce the within-segment positive vis that the LP just removed.
     """
     from scipy.optimize import linprog
     from scipy.sparse import csr_matrix
@@ -362,10 +374,19 @@ def lp_refine_visibility(
     # col(vc_i)       = N_vis + i
     # col(s_i)        = N_vis + N_breaks + i
 
-    # Breaks indexed by (rc, segment).
+    # Breaks indexed by (rc, segment), pre-sorted by `t` so the LP's
+    # within-segment prefix-sum constraints (see _ub_ section below) follow
+    # the actual polyline walk order from sample k toward sample k+1.
     bks_in_seg: dict[tuple[int, int], list[int]] = {}
     for bi, bk in enumerate(breaks):
         bks_in_seg.setdefault((int(bk["rc_idx"]), int(bk["sample_idx"])), []).append(bi)
+    has_t = (
+        breaks.dtype.names is not None and "t" in breaks.dtype.names
+        if len(breaks) else False
+    )
+    if has_t:
+        for key in bks_in_seg:
+            bks_in_seg[key].sort(key=lambda bi: float(breaks[bi]["t"]))
 
     eq_rows: list[int] = []
     eq_cols: list[int] = []
@@ -436,6 +457,7 @@ def lp_refine_visibility(
     ub_cols: list[int] = []
     ub_data: list[float] = []
     ub_b: list[float] = []
+    # L1 slack on vc deviation from delta_v⁰.
     for bi in range(N_breaks):
         vc0 = float(breaks[bi]["delta_v"])
         # vc_i - s_i <= vc0
@@ -448,12 +470,42 @@ def lp_refine_visibility(
         ub_rows.append(r); ub_cols.append(N_vis + bi);              ub_data.append(-1.0)
         ub_rows.append(r); ub_cols.append(N_vis + N_breaks + bi);   ub_data.append(-1.0)
         ub_b.append(-vc0)
+
+    # Within-segment vis ≤ 0 enforcement (spec line 86: vis is the negation
+    # of the # of occluding sheets — always ≤ 0). The bound `vis[k] ≤ 0`
+    # constrains only sample variables; without these extra rows, a chain
+    # of break deltas inside one segment could push the running vis
+    # transiently positive between two samples, producing positive-vis
+    # polyline sections in `lines_by_visibility` (a spec violation).
+    #
+    # For segment (ri, k) with breaks sorted by t = [b_1, b_2, …, b_N] in
+    # walk order from sample k toward sample k+1, the post-break-i running
+    # vis is `vis[ri, k] + Σ_{j ≤ i} vc_{b_j}`. Adding
+    #   vis[ri, k] + Σ_{j ≤ i} vc_{b_j} ≤ 0   for i = 1..N−1
+    # forces every within-segment running-vis value ≤ 0. (i = N is the
+    # already-bounded vis[ri, k+1]; i = 0 is just vis[ri, k].)
+    next_row = 2 * N_breaks
+    for (ri, k), bk_indices in bks_in_seg.items():
+        n_in_seg = len(bk_indices)
+        if n_in_seg < 2:
+            continue
+        for i_prefix in range(1, n_in_seg):
+            ub_rows.append(next_row)
+            ub_cols.append(rc_offsets[ri] + k)
+            ub_data.append(1.0)
+            for bi in bk_indices[:i_prefix]:
+                ub_rows.append(next_row)
+                ub_cols.append(N_vis + bi)
+                ub_data.append(1.0)
+            ub_b.append(0.0)
+            next_row += 1
+
     A_ub = csr_matrix(
         (np.asarray(ub_data, dtype=float),
          (np.asarray(ub_rows, dtype=int), np.asarray(ub_cols, dtype=int))),
-        shape=(2 * N_breaks, N_vars),
-    ) if N_breaks > 0 else None
-    b_ub = np.asarray(ub_b, dtype=float) if N_breaks > 0 else None
+        shape=(next_row, N_vars),
+    ) if next_row > 0 else None
+    b_ub = np.asarray(ub_b, dtype=float) if next_row > 0 else None
 
     # Bounds.
     bounds: list[tuple[float | None, float | None]] = []
@@ -474,6 +526,14 @@ def lp_refine_visibility(
         raise RuntimeError(f"LP failed: status={res.status} message={res.message}")
 
     vis_flat = np.round(res.x[:N_vis]).astype(np.int32)
+    # Overwrite breaks["delta_v"] with the LP-adjusted vc_i values so the
+    # downstream polyline-walking renderer reproduces vis ≤ 0 segments.
+    if N_breaks > 0:
+        vc_solved = np.round(res.x[N_vis : N_vis + N_breaks]).astype(np.int64)
+        # break_dtype declares delta_v as i1 (signed byte). Clip before
+        # assignment so an aggressive LP doesn't overflow the dtype.
+        vc_solved = np.clip(vc_solved, -127, 127).astype(np.int8)
+        breaks["delta_v"][:] = vc_solved
     out: dict[int, np.ndarray] = {}
     for ri in range(n):
         N = len(rcs[ri].xy)

@@ -632,7 +632,19 @@ def build_helper_curves(
             surface.S(float(uv[0]), float(uv[1])), dtype=float,
         ).reshape(3)
         xy = projection.XY(xyz)
-        sp_idx = splits.add_sp(uv=uv, xyz=xyz, xy=xy, sp_type="ha")
+        # Propagate the other-sheet preimage for SIC HAs. Without this,
+        # `_build_polyline` cannot pick the alt preimage at the SubCurve's
+        # end SP, so an HA at the boundary between two SIS preimages forces
+        # the polyline to jump half a period in u (the fig8 v1 "tongue":
+        # a polyline going from sheet A internal walk to sheet B end SP).
+        # See sp_uv_alt_2026_05_26 memory and curves.py:344 sp_end_uv_alt
+        # picking.
+        uv_alt = (
+            sample.other_uv
+            if sample.parent_kind == "SIC" and sample.other_uv is not None
+            else None
+        )
+        sp_idx = splits.add_sp(uv=uv, xyz=xyz, xy=xy, sp_type="ha", uv_alt=uv_alt)
         ha_dedup[key] = sp_idx
         ha_dedup_uv[uv_key] = sp_idx
 

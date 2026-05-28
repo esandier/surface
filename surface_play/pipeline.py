@@ -337,10 +337,16 @@ def build_outline(
     newton_cusp: bool = True,
     canvas_resolution: int | None = None,
     project_resampled: bool = False,
-    propagation: Literal["BFS", "LP1", "LP4"] = "BFS",
+    propagation: Literal["BFS", "LP1", "LP4"] = "LP4",
 ) -> OutlineResult:
     """Project the cached construction under `(I, J, O, eye)` and assemble
-    per-visibility polylines."""
+    per-visibility polylines.
+
+    Default propagation is LP4 — matches the frontend's debug-panel default
+    (PROPAGATION="LP4" when the LP-visibility checkbox is ticked, which it
+    is by default). BFS is the fast/loose fallback the LP path falls
+    through to when the LP reports infeasible (G7).
+    """
     projection = Projection(init.surface, I=I, J=J, O=O, eye=eye)
 
     rcs, breaks, vis = _run_outline_pipeline(
