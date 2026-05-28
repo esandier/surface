@@ -395,19 +395,27 @@ def _vc_for_endpoint(
 
 def _argmin_pair(
     samples_i: list[_Sample], samples_j: list[_Sample],
+    *, uv_i_stacked: np.ndarray | None = None,
+    uv_j_stacked: np.ndarray | None = None,
 ) -> tuple[float, int, int]:
     """Return (min_dist, idx_i, idx_j) over the cartesian product.
 
-    Plain Euclidean (G19) — no `close()`.
+    Plain Euclidean (G19) — no `close()`. Falls back to building uv arrays
+    if pre-stacked ones aren't supplied (kept for direct callers + tests).
     """
-    uv_i = np.stack([s.uv for s in samples_i], axis=0)   # (Ni, 2)
-    uv_j = np.stack([s.uv for s in samples_j], axis=0)   # (Nj, 2)
-    diff = uv_i[:, None, :] - uv_j[None, :, :]
-    d2 = (diff * diff).sum(axis=-1)                       # (Ni, Nj)
-    k = int(np.argmin(d2))
-    Ni, Nj = d2.shape
+    if uv_i_stacked is None:
+        uv_i_stacked = np.stack([s.uv for s in samples_i], axis=0)
+    if uv_j_stacked is None:
+        uv_j_stacked = np.stack([s.uv for s in samples_j], axis=0)
+    # cdist is C-implemented and avoids the (Ni, Nj, 2) intermediate that
+    # the broadcast-diff version allocates — wins on pk=16 (9 components,
+    # ~1000 samples each → ~10⁶ allocations per pair × 36 pairs).
+    from scipy.spatial.distance import cdist
+    D = cdist(uv_i_stacked, uv_j_stacked)
+    k = int(np.argmin(D))
+    Nj = D.shape[1]
     ki, kj = divmod(k, Nj)
-    return float(np.sqrt(d2[ki, kj])), ki, kj
+    return float(D[ki, kj]), ki, kj
 
 
 # ── O12 main entry ───────────────────────────────────────────────────────────
@@ -638,17 +646,39 @@ def build_helper_curves(
                                  segment_label=label)
         return sp_idx
 
+    # Cached pairwise nearest-sample distances. Key (a, b) with a < b;
+    # value (d, k_a, k_b) — indices into comp_samples[a], comp_samples[b].
+    # On merge (b absorbs a's samples), we update each remaining root r's
+    # entry by combining the old (a, r) and (b, r) entries — no O(Ni·Nj)
+    # recomputation. Cuts pk=16 (Onde radiale, 9 components) from ~120
+    # _argmin_pair calls to 36 (initial population only).
+    pair_cache: dict[tuple[int, int], tuple[float, int, int]] = {}
+    # Pre-stack each component's uv array once; share across the 36 initial
+    # pair computations. Stale after merges but we only use these for the
+    # initial round (merged distances come from the cache trick below).
+    uv_stacks: dict[int, np.ndarray] = {
+        r: np.stack([s.uv for s in samples], axis=0)
+        for r, samples in comp_samples.items()
+    }
+    roots_initial = list(comp_samples.keys())
+    for i in range(len(roots_initial)):
+        for j in range(i + 1, len(roots_initial)):
+            ra, rb = roots_initial[i], roots_initial[j]
+            if ra > rb:
+                ra, rb = rb, ra
+            d, k_a, k_b = _argmin_pair(
+                comp_samples[ra], comp_samples[rb],
+                uv_i_stacked=uv_stacks[ra], uv_j_stacked=uv_stacks[rb],
+            )
+            pair_cache[(ra, rb)] = (d, k_a, k_b)
+
     while len(comp_samples) > 1:
-        roots_list = list(comp_samples.keys())
-        best: tuple[float, int, int, _Sample, _Sample] | None = None
-        for i in range(len(roots_list)):
-            for j in range(i + 1, len(roots_list)):
-                ri, rj = roots_list[i], roots_list[j]
-                d, ki, kj = _argmin_pair(comp_samples[ri], comp_samples[rj])
-                if best is None or d < best[0]:
-                    best = (d, ri, rj, comp_samples[ri][ki], comp_samples[rj][kj])
-        assert best is not None  # len(comp_samples) > 1 ⇒ at least one pair
-        _, ri, rj, qi, qj = best
+        best_key, (best_d, best_k_a, best_k_b) = min(
+            pair_cache.items(), key=lambda kv: kv[1][0]
+        )
+        ra, rb = best_key  # ra < rb
+        qi = comp_samples[ra][best_k_a]
+        qj = comp_samples[rb][best_k_b]
 
         sp_qi = _ensure_ha(qi)
         sp_qj = _ensure_ha(qj)
@@ -664,8 +694,56 @@ def build_helper_curves(
             internal=[], vc_in=vc_in, vc_out=vc_out, parent_idx=-1,
         ))
 
-        # Merge component ri into rj.
-        comp_samples[rj].extend(comp_samples[ri])
-        del comp_samples[ri]
+        # Merge rb's samples INTO ra; rb root is removed. Record old length
+        # of ra's samples so the cached rb-side indices map into new ra.
+        old_len_a = len(comp_samples[ra])
+        comp_samples[ra].extend(comp_samples[rb])
+        del comp_samples[rb]
+
+        # Update cache: for each remaining root X != ra, compute new (X, ra)
+        # by taking the min of cached (X, ra) and (X, rb). If (X, rb) wins,
+        # its rb-side sample is now at index old_len_a + k_rb_old in ra.
+        new_pair_cache: dict[tuple[int, int], tuple[float, int, int]] = {}
+        for key, val in pair_cache.items():
+            a, b = key
+            if a == ra or b == ra or a == rb or b == rb:
+                continue
+            new_pair_cache[key] = val
+
+        for X in comp_samples:
+            if X == ra:
+                continue
+            # Old (X, ra) — store as (X-side index, ra-side index)
+            key_X_a = (X, ra) if X < ra else (ra, X)
+            d_a, k_first_a, k_second_a = pair_cache[key_X_a]
+            if key_X_a[0] == X:
+                kX_from_a, k_ra_old = k_first_a, k_second_a
+            else:
+                k_ra_old, kX_from_a = k_first_a, k_second_a
+
+            # Old (X, rb)
+            key_X_b = (X, rb) if X < rb else (rb, X)
+            d_b, k_first_b, k_second_b = pair_cache[key_X_b]
+            if key_X_b[0] == X:
+                kX_from_b, k_rb_old = k_first_b, k_second_b
+            else:
+                k_rb_old, kX_from_b = k_first_b, k_second_b
+
+            if d_a <= d_b:
+                new_d = d_a
+                new_kX = kX_from_a
+                new_k_ra = k_ra_old
+            else:
+                new_d = d_b
+                new_kX = kX_from_b
+                new_k_ra = old_len_a + k_rb_old
+
+            new_key = (X, ra) if X < ra else (ra, X)
+            if new_key[0] == X:
+                new_pair_cache[new_key] = (new_d, new_kX, new_k_ra)
+            else:
+                new_pair_cache[new_key] = (new_d, new_k_ra, new_kX)
+
+        pair_cache = new_pair_cache
 
     return hcs
