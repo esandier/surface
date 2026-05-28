@@ -541,6 +541,79 @@ def _tan_for_cc_sample(uv_sample: np.ndarray, css: np.ndarray, cps: np.ndarray,
     return projection.proj_vec(uv_sample, Tp_3d)
 
 
+def _tan_for_cc_samples_batched(
+    uv_samples: np.ndarray,    # (N, 2)
+    chain_segs: np.ndarray,    # (N,) int — CC chain segment index per sample
+    S_all: np.ndarray,         # (N, 3)
+    Su_all: np.ndarray,        # (N, 3)
+    Sv_all: np.ndarray,        # (N, 3)
+    Suu_all: np.ndarray,       # (N, 3)
+    Suv_all: np.ndarray,       # (N, 3)
+    Svv_all: np.ndarray,       # (N, 3)
+    css: np.ndarray, cps: np.ndarray,
+    projection,
+) -> np.ndarray:
+    """Batched _tan_for_cc_sample. See its docstring for the math.
+
+    Uses the scalar-triple-product identity `(a × b) · c = det([a, b, c])` to
+    avoid the per-sample `np.cross + @` overhead, and inlines `proj_vec` so
+    every sample is processed in one numpy pass.
+    """
+    N = uv_samples.shape[0]
+    if N == 0:
+        return np.empty((0, 2), dtype=float)
+
+    axis = np.asarray(projection.viewer_direction(S_all), dtype=float)  # (N, 3)
+
+    def _stp(a, b, c):  # scalar triple product, batched over leading axis
+        return (
+            a[:, 0] * (b[:, 1] * c[:, 2] - b[:, 2] * c[:, 1])
+            + a[:, 1] * (b[:, 2] * c[:, 0] - b[:, 0] * c[:, 2])
+            + a[:, 2] * (b[:, 0] * c[:, 1] - b[:, 1] * c[:, 0])
+        )
+
+    Np_x = _stp(Suu_all, Sv_all, axis) + _stp(Su_all, Suv_all, axis)
+    Np_y = _stp(Suv_all, Sv_all, axis) + _stp(Su_all, Svv_all, axis)
+    Tp_uv = np.empty((N, 2), dtype=float)
+    Tp_uv[:, 0] = -Np_y
+    Tp_uv[:, 1] = Np_x
+
+    cs_rows = css[chain_segs]
+    p_uv = np.asarray(cps[cs_rows["p_cp"]]["uv"], dtype=float)
+    q_uv = np.asarray(cps[cs_rows["q_cp"]]["uv"], dtype=float)
+    chain_dir = q_uv - p_uv
+    dots = Tp_uv[:, 0] * chain_dir[:, 0] + Tp_uv[:, 1] * chain_dir[:, 1]
+    flip = dots < 0.0
+    if flip.any():
+        Tp_uv[flip] = -Tp_uv[flip]
+
+    Tp_3d = Tp_uv[:, 0:1] * Su_all + Tp_uv[:, 1:2] * Sv_all  # (N, 3)
+
+    # Batched equivalent of projection.proj_vec(uv, Tp_3d).
+    I, J = projection.I, projection.J
+    if projection.mode == "ortho":
+        out = np.empty((N, 2), dtype=float)
+        out[:, 0] = Tp_3d @ I
+        out[:, 1] = Tp_3d @ J
+        return out
+    eye = projection.eye
+    n_axis = projection._axis
+    d = S_all - eye
+    z = -(d @ n_axis)
+    if np.any(z == 0.0):
+        bad = int(np.argmax(z == 0.0))
+        raise ValueError(
+            f"proj_vec undefined: S(uv)={S_all[bad]} lies on the image plane through eye"
+        )
+    a = d @ I
+    b = d @ J
+    nv = Tp_3d @ n_axis
+    out = np.empty((N, 2), dtype=float)
+    out[:, 0] = ((Tp_3d @ I) + (a / z) * nv) / z
+    out[:, 1] = ((Tp_3d @ J) + (b / z) * nv) / z
+    return out
+
+
 def _newton_cc_refine(uv: np.ndarray, surface, projection, *, n_iter: int = 5
                       ) -> np.ndarray:
     """Run Newton along chord-normal to find nearby axis·SN = 0.
@@ -866,6 +939,20 @@ def resample_all(
             sample_xy[:] = projection.XY(S_all)
 
         # Phase 3 — per-sample dir/tan helpers (using precomputed derivs).
+        # CC tangents are batched (see _tan_for_cc_samples_batched); BC and
+        # CC dirs still loop per-sample (the BC formulas need per-sample
+        # edge lookups; CC dir is a simple per-segment interp).
+        if sample_dir is not None and sub.kind == "CC" and N > 0:
+            cc_mask = chain_segs >= 0
+            if cc_mask.any():
+                idx = np.flatnonzero(cc_mask)
+                cc_tans = _tan_for_cc_samples_batched(
+                    sample_uv[idx], chain_segs[idx],
+                    S_all[idx], Su_all[idx], Sv_all[idx],
+                    Suu_all[idx], Suv_all[idx], Svv_all[idx],
+                    css, cps, projection,
+                )
+                sample_tan[idx] = cc_tans
         if sample_dir is not None:
             for j in range(N):
                 cs = int(chain_segs[j])
@@ -884,11 +971,7 @@ def resample_all(
                     sample_dir[j] = _dir_for_cc_sample(
                         int(seg_ps[j]), float(alphas[j]), cs, css, cps,
                     )
-                    sample_tan[j] = _tan_for_cc_sample(
-                        sample_uv[j], css, cps, cs, surface, projection,
-                        S_p=S_all[j], Su=Su_all[j], Sv=Sv_all[j],
-                        Suu=Suu_all[j], Suv=Suv_all[j], Svv=Svv_all[j],
-                    )
+                    # sample_tan[j] computed via batched call above.
 
         # Endpoint pinning (G5 / G21) — first/last sample anchored to SP positions.
         if N >= 1 and sub.start >= 0:

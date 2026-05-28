@@ -661,15 +661,26 @@ def build_helper_curves(
         for r, samples in comp_samples.items()
     }
     roots_initial = list(comp_samples.keys())
+    # Initial pair-distance population: build one cKDTree per component
+    # (reused across all initial pairs), then for each pair query A's
+    # samples against B's tree. Replaces O(Σ Ni·Nj) cdist with
+    # O(Σ Ni log Nb) — large win when components have thousands of samples
+    # (pk=16 Onde radiale: ~2500 samples per component, was 694 ms in cdist).
+    from scipy.spatial import cKDTree
+    trees: dict[int, cKDTree] = {
+        r: cKDTree(uv) for r, uv in uv_stacks.items()
+    }
     for i in range(len(roots_initial)):
         for j in range(i + 1, len(roots_initial)):
             ra, rb = roots_initial[i], roots_initial[j]
             if ra > rb:
                 ra, rb = rb, ra
-            d, k_a, k_b = _argmin_pair(
-                comp_samples[ra], comp_samples[rb],
-                uv_i_stacked=uv_stacks[ra], uv_j_stacked=uv_stacks[rb],
-            )
+            # Query every sample in A against B's tree; pick global min.
+            uv_a = uv_stacks[ra]
+            d_per_a, idx_b_per_a = trees[rb].query(uv_a, k=1)
+            k_a = int(np.argmin(d_per_a))
+            k_b = int(idx_b_per_a[k_a])
+            d = float(d_per_a[k_a])
             pair_cache[(ra, rb)] = (d, k_a, k_b)
 
     while len(comp_samples) > 1:

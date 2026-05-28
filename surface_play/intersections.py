@@ -107,6 +107,135 @@ def _close_pair_array(p0: np.ndarray, p1: np.ndarray, domain) -> np.ndarray:
     return p0 + d
 
 
+@njit(cache=True)
+def _sweep_segments_kernel(
+    a_uv0,           # (n, 2)
+    a_d,             # (n, 2) — pre-computed close-aware direction
+    b_uv0,           # (m, 2)
+    b_d,             # (m, 2)
+    use_close,       # bool
+    u_period_mode,   # int: 0 = no wrap, 1 = wrap with period_u
+    v_period_mode,   # int: 0 = no wrap, 1 = wrap with period_v
+    period_u,        # float (ignored if u_period_mode == 0)
+    period_v,        # float
+    self_sweep,      # bool
+    tol,             # float
+):
+    """Numba kernel: O(n*m) brute-force pairwise segment intersection.
+
+    Mirrors `sweep_segments` semantics exactly:
+      - AABB overlap filter (close-aware diff if `use_close`),
+      - 2x2 linear solve for (t_a, t_b), strict interior acceptance,
+      - returns arrays of intersections in unspecified order.
+    """
+    n = a_uv0.shape[0]
+    m = b_uv0.shape[0]
+
+    cap = 64
+    out_uv = np.empty((cap, 2), dtype=np.float64)
+    out_a = np.empty(cap, dtype=np.int32)
+    out_b = np.empty(cap, dtype=np.int32)
+    out_ta = np.empty(cap, dtype=np.float64)
+    out_tb = np.empty(cap, dtype=np.float64)
+    k = 0
+
+    for i in range(n):
+        a0u = a_uv0[i, 0]
+        a0v = a_uv0[i, 1]
+        adu = a_d[i, 0]
+        adv = a_d[i, 1]
+        a1u = a0u + adu
+        a1v = a0v + adv
+        if adu >= 0.0:
+            a_lo_u = a0u; a_hi_u = a1u
+        else:
+            a_lo_u = a1u; a_hi_u = a0u
+        if adv >= 0.0:
+            a_lo_v = a0v; a_hi_v = a1v
+        else:
+            a_lo_v = a1v; a_hi_v = a0v
+
+        j_start = i + 1 if self_sweep else 0
+        for j in range(j_start, m):
+            b0u = b_uv0[j, 0]
+            b0v = b_uv0[j, 1]
+            bdu = b_d[j, 0]
+            bdv = b_d[j, 1]
+
+            diff_u = b0u - a0u
+            diff_v = b0v - a0v
+            if use_close:
+                if u_period_mode == 1:
+                    diff_u = (diff_u + 0.5 * period_u) % period_u - 0.5 * period_u
+                if v_period_mode == 1:
+                    diff_v = (diff_v + 0.5 * period_v) % period_v - 0.5 * period_v
+            b_anc_u = a0u + diff_u
+            b_anc_v = a0v + diff_v
+            b_end_u = b_anc_u + bdu
+            b_end_v = b_anc_v + bdv
+            if bdu >= 0.0:
+                b_lo_u = b_anc_u; b_hi_u = b_end_u
+            else:
+                b_lo_u = b_end_u; b_hi_u = b_anc_u
+            if bdv >= 0.0:
+                b_lo_v = b_anc_v; b_hi_v = b_end_v
+            else:
+                b_lo_v = b_end_v; b_hi_v = b_anc_v
+
+            # AABB overlap (close-aware in B's local frame).
+            if a_lo_u > b_hi_u + tol:
+                continue
+            if b_lo_u > a_hi_u + tol:
+                continue
+            if a_lo_v > b_hi_v + tol:
+                continue
+            if b_lo_v > a_hi_v + tol:
+                continue
+
+            denom = adu * bdv - adv * bdu
+            if -1e-14 < denom < 1e-14:
+                continue
+
+            d0_u = b_anc_u - a0u
+            d0_v = b_anc_v - a0v
+            t_a = (d0_u * bdv - d0_v * bdu) / denom
+            t_b = (d0_u * adv - d0_v * adu) / denom
+
+            if t_a <= tol or t_a >= 1.0 - tol:
+                continue
+            if t_b <= tol or t_b >= 1.0 - tol:
+                continue
+
+            if k >= cap:
+                new_cap = cap * 2
+                new_uv = np.empty((new_cap, 2), dtype=np.float64)
+                new_uv[:cap] = out_uv
+                out_uv = new_uv
+                new_a = np.empty(new_cap, dtype=np.int32)
+                new_a[:cap] = out_a
+                out_a = new_a
+                new_b = np.empty(new_cap, dtype=np.int32)
+                new_b[:cap] = out_b
+                out_b = new_b
+                new_ta = np.empty(new_cap, dtype=np.float64)
+                new_ta[:cap] = out_ta
+                out_ta = new_ta
+                new_tb = np.empty(new_cap, dtype=np.float64)
+                new_tb[:cap] = out_tb
+                out_tb = new_tb
+                cap = new_cap
+
+            out_uv[k, 0] = a0u + t_a * adu
+            out_uv[k, 1] = a0v + t_a * adv
+            out_a[k] = i
+            out_b[k] = j
+            out_ta[k] = t_a
+            out_tb[k] = t_b
+            k += 1
+
+    return out_uv[:k], out_a[:k], out_b[:k], out_ta[:k], out_tb[:k]
+
+
 def sweep_segments(
     seg_a_uv0: np.ndarray,
     seg_a_uv1: np.ndarray,
@@ -148,89 +277,27 @@ def sweep_segments(
 
     seg_a_uv1_loc = _close_pair_array(seg_a_uv0, seg_a_uv1, domain)
     seg_b_uv1_loc = _close_pair_array(seg_b_uv0, seg_b_uv1, domain)
-    a_dir = seg_a_uv1_loc - seg_a_uv0          # (n, 2)
-    b_dir = seg_b_uv1_loc - seg_b_uv0          # (m, 2)
+    a_d = np.ascontiguousarray(seg_a_uv1_loc - seg_a_uv0)
+    b_d = np.ascontiguousarray(seg_b_uv1_loc - seg_b_uv0)
+    a_uv0_c = np.ascontiguousarray(seg_a_uv0, dtype=np.float64)
+    b_uv0_c = np.ascontiguousarray(seg_b_uv0, dtype=np.float64)
 
-    use_close = (domain is not None and getattr(domain, "type", None) == "rect")
+    use_close = bool(domain is not None and getattr(domain, "type", None) == "rect")
     u_id = getattr(domain, "u_identify", "no") if domain is not None else "no"
     v_id = getattr(domain, "v_identify", "no") if domain is not None else "no"
+    u_mode = 1 if (use_close and u_id in ("cy", "mo")) else 0
+    v_mode = 1 if (use_close and v_id in ("cy", "mo")) else 0
+    p_u = float(getattr(domain, "period_u", 0.0)) if u_mode == 1 else 0.0
+    p_v = float(getattr(domain, "period_v", 0.0)) if v_mode == 1 else 0.0
 
-    out_uv: list[np.ndarray] = []
-    out_a: list[np.ndarray] = []
-    out_b: list[np.ndarray] = []
-    out_ta: list[np.ndarray] = []
-    out_tb: list[np.ndarray] = []
-    batch = max(1, 16384 // max(m, 1))
+    uv_all, a_all, b_all, ta_all, tb_all = _sweep_segments_kernel(
+        a_uv0_c, a_d, b_uv0_c, b_d,
+        use_close, u_mode, v_mode, p_u, p_v,
+        bool(self_sweep), float(tol),
+    )
 
-    for i0 in range(0, n, batch):
-        i1 = min(i0 + batch, n)
-        a_anchor = seg_a_uv0[i0:i1, None, :]            # (B, 1, 2)
-        a_d = a_dir[i0:i1, None, :]                     # (B, 1, 2)
-        b_anchor = seg_b_uv0[None, :, :]                # (1, m, 2)
-        b_d = b_dir[None, :, :]                         # (1, m, 2)
-
-        diff = b_anchor - a_anchor                      # (B, m, 2), broadcast copy
-        diff = np.broadcast_to(diff, (i1 - i0, m, 2)).copy()
-        if use_close:
-            if u_id in ("cy", "mo"):
-                diff[..., 0] = _half_period_adjust(diff[..., 0], domain.period_u)
-            if v_id in ("cy", "mo"):
-                diff[..., 1] = _half_period_adjust(diff[..., 1], domain.period_v)
-        b_anchor_local = a_anchor + diff                # (B, m, 2)
-        b_end_local = b_anchor_local + b_d              # (B, m, 2)
-
-        a_end = a_anchor + a_d
-        a_lo = np.minimum(a_anchor, a_end)
-        a_hi = np.maximum(a_anchor, a_end)
-        b_lo = np.minimum(b_anchor_local, b_end_local)
-        b_hi = np.maximum(b_anchor_local, b_end_local)
-        overlap = (
-            (a_lo[..., 0] <= b_hi[..., 0] + tol)
-            & (b_lo[..., 0] <= a_hi[..., 0] + tol)
-            & (a_lo[..., 1] <= b_hi[..., 1] + tol)
-            & (b_lo[..., 1] <= a_hi[..., 1] + tol)
-        )
-
-        if self_sweep:
-            i_idx = np.arange(i0, i1)[:, None]
-            j_idx = np.arange(m)[None, :]
-            overlap = overlap & (i_idx < j_idx)
-
-        if not overlap.any():
-            continue
-
-        ii_w, jj_w = np.where(overlap)
-        p0 = a_anchor[ii_w, 0, :]                        # (K, 2)
-        u_vec = a_d[ii_w, 0, :]                          # (K, 2)
-        q0 = b_anchor_local[ii_w, jj_w, :]               # (K, 2)
-        v_vec = b_d[0, jj_w, :]                          # (K, 2)
-
-        denom = u_vec[:, 0] * v_vec[:, 1] - u_vec[:, 1] * v_vec[:, 0]
-        ok = np.abs(denom) > 1e-14
-        diff0 = q0 - p0
-        denom_safe = np.where(ok, denom, 1.0)
-        t_a = (diff0[:, 0] * v_vec[:, 1] - diff0[:, 1] * v_vec[:, 0]) / denom_safe
-        t_b = (diff0[:, 0] * u_vec[:, 1] - diff0[:, 1] * u_vec[:, 0]) / denom_safe
-
-        hit = ok & (t_a > tol) & (t_a < 1.0 - tol) & (t_b > tol) & (t_b < 1.0 - tol)
-        if not hit.any():
-            continue
-
-        sel = np.where(hit)[0]
-        out_uv.append(p0[sel] + t_a[sel, None] * u_vec[sel])
-        out_a.append((ii_w[sel] + i0).astype(np.int32))
-        out_b.append(jj_w[sel].astype(np.int32))
-        out_ta.append(t_a[sel])
-        out_tb.append(t_b[sel])
-
-    if not out_uv:
+    if uv_all.shape[0] == 0:
         return np.empty(0, dtype=intersect_dtype)
-
-    uv_all = np.concatenate(out_uv)
-    a_all = np.concatenate(out_a)
-    b_all = np.concatenate(out_b)
-    ta_all = np.concatenate(out_ta)
-    tb_all = np.concatenate(out_tb)
 
     res = np.empty(uv_all.shape[0], dtype=intersect_dtype)
     res["uv"] = uv_all
