@@ -36,32 +36,46 @@ from surface_play.models import SurfaceRecord
 logger = logging.getLogger(__name__)
 
 
-# ── Debug-dict → build_outline kwargs ────────────────────────────────────────
+# ── Debug-dict → build_surface_init / build_outline kwargs ──────────────────
 
 
-_DEBUG_KEY_MAP = {
+# Maps spec-canonical debug key (Reorganization §"Debug panel" + roadmap line 71)
+# to the kwarg name on `build_outline`. Keys here go to the outline phase only.
+_OUTLINE_DEBUG_KEY_MAP = {
     "PROPAGATION": "propagation",
-    "RESOLUTION": "canvas_resolution",
     "NEWTON_CUSP": "newton_cusp",
     "PROJECT_RESAMPLED": "project_resampled",
 }
 
 
-def _debug_kwargs(debug: dict[str, Any] | None) -> dict[str, Any]:
-    """Validate `debug` dict and map known keys to build_outline kwargs.
+def _debug_kwargs(
+    debug: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split `debug` dict into (init_kwargs, outline_kwargs).
 
-    Unknown keys are logged at WARNING and ignored (preserve client compat).
+    - `RESOLUTION`: per settings.py the single resolution knob drives both the
+      mesh (build_surface_init) and the outline sampling (build_outline). Routed
+      to both so a slider change rebuilds the construction *and* matches the
+      outline density.
+    - Outline-only keys (PROPAGATION, NEWTON_CUSP, PROJECT_RESAMPLED) routed
+      via `_OUTLINE_DEBUG_KEY_MAP`.
+    - Unknown keys logged at WARNING and ignored (preserve client compat).
     """
+    init_out: dict[str, Any] = {}
+    outline_out: dict[str, Any] = {}
     if not debug:
-        return {}
-    out: dict[str, Any] = {}
+        return init_out, outline_out
     for k, v in debug.items():
-        target = _DEBUG_KEY_MAP.get(k)
+        if k == "RESOLUTION":
+            init_out["resolution"] = int(v)
+            outline_out["canvas_resolution"] = int(v)
+            continue
+        target = _OUTLINE_DEBUG_KEY_MAP.get(k)
         if target is None:
             logger.warning("play_outline: ignoring unknown debug key %r", k)
             continue
-        out[target] = v
-    return out
+        outline_out[target] = v
+    return init_out, outline_out
 
 
 # ── GET / POST endpoints ─────────────────────────────────────────────────────
@@ -126,10 +140,11 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
     eye = data.get("eye")  # None → ortho
     debug = data.get("debug", {}) or {}
 
-    init = pipeline.build_surface_init(record)
+    init_kwargs, outline_kwargs = _debug_kwargs(debug)
+    init = pipeline.build_surface_init(record, **init_kwargs)
     try:
         result = pipeline.build_outline(
-            init, I=I, J=J, O=O, eye=eye, **_debug_kwargs(debug),
+            init, I=I, J=J, O=O, eye=eye, **outline_kwargs,
         )
     except ValueError as exc:
         # P3 raises on persp O != eye; surface as 400.

@@ -108,21 +108,14 @@
                 <label for="dbg-newton" style="font-size:12px; color:#333; margin:0;">Newton cusps</label>
                 <input type="checkbox" id="dbg-newton" checked style="cursor:pointer; width:16px; height:16px;">
             </div>
-            <div style="margin-bottom:8px;">
-                <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
-                    <span style="font-size:12px; color:#333;">Simplify pts</span>
-                    <span id="dbg-simplify-val" style="font-size:11px; font-family:monospace; color:#555;">80</span>
-                </div>
-                <!-- direct value 5..200, default 80 = output points per unit screen width -->
-                <input type="range" id="dbg-simplify" min="5" max="200" step="5" value="80" style="width:100%; cursor:pointer;">
-            </div>
             <div style="margin-bottom:10px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
-                    <span style="font-size:12px; color:#333;">Grid res</span>
-                    <span id="dbg-gridres-val" style="font-size:11px; font-family:monospace; color:#555;">20</span>
+                    <span style="font-size:12px; color:#333;">Resolution</span>
+                    <span id="dbg-resolution-val" style="font-size:11px; font-family:monospace; color:#555;">200</span>
                 </div>
-                <!-- direct value 30..600, default 250 -->
-                <input type="range" id="dbg-gridres" min="10" max="600" step="10" value="20" style="width:100%; cursor:pointer;">
+                <!-- Single resolution knob — drives mesh density AND outline sampling
+                     (surface_play/settings.py RESOLUTION = 200 is the production default). -->
+                <input type="range" id="dbg-resolution" min="20" max="400" step="10" value="200" style="width:100%; cursor:pointer;">
             </div>
             <div style="display:flex; justify-content:flex-end;">
                 <button id="dbg-apply-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Apply</button>
@@ -293,11 +286,18 @@
 
     function getDebugParams() {
         if (!debugPanel) return {};
-        const use_lp      = document.getElementById('dbg-lp').checked;
-        const use_newton  = document.getElementById('dbg-newton').checked;
-        const simplify_pts = parseInt(document.getElementById('dbg-simplify').value);
-        const grid_res     = parseInt(document.getElementById('dbg-gridres').value);
-        return { use_lp, use_newton, simplify_pts, grid_res };
+        const use_lp     = document.getElementById('dbg-lp').checked;
+        const use_newton = document.getElementById('dbg-newton').checked;
+        const resolution = parseInt(document.getElementById('dbg-resolution').value);
+        // Keys match Reorganization_of_the_surface_app.md "Debug panel" /
+        // Modular_rewrite_roadmap.md line 71 ("All pass through the debug
+        // POST dict to build_outline(...) kwargs"). Backend translates via
+        // _OUTLINE_DEBUG_KEY_MAP in views.py.
+        return {
+            PROPAGATION: use_lp ? "LP4" : "BFS",
+            NEWTON_CUSP: use_newton,
+            RESOLUTION: resolution,
+        };
     }
 
     function mouseUp(fromControls = false) {
@@ -642,11 +642,8 @@
             debugToggle.style.opacity = visible ? '0.4' : '1';
         });
 
-        document.getElementById('dbg-simplify').addEventListener('input', function() {
-            document.getElementById('dbg-simplify-val').textContent = this.value;
-        });
-        document.getElementById('dbg-gridres').addEventListener('input', function() {
-            document.getElementById('dbg-gridres-val').textContent = this.value;
+        document.getElementById('dbg-resolution').addEventListener('input', function() {
+            document.getElementById('dbg-resolution-val').textContent = this.value;
         });
     }
 
