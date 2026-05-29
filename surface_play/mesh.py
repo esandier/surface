@@ -113,6 +113,7 @@ def _build_edges_faces(
     period). All other edges have `flip = +1`.
     """
     M = len(tris)
+    K = len(uv)
 
     u_is_mo = domain.type == "rect" and domain.u_identify == "mo"
     v_is_mo = domain.type == "rect" and domain.v_identify == "mo"
@@ -123,129 +124,141 @@ def _build_edges_faces(
     else:
         _u_range_half = _v_range_half = float("inf")
 
-    # records[key] : list of (f_idx, third_compacted, a_compacted, b_compacted, pre_pair)
-    # where pre_pair = (pre_p, pre_q) ordered to match key = (min, max) on canonical labels.
-    records: dict[tuple[int, int], list[tuple[int, int, int, int, tuple[int, int]]]] = {}
-    face_edge_idx = np.empty((M, 3), dtype=np.int32)
+    if M == 0:
+        return np.zeros(0, dtype=edge_dtype), np.zeros(0, dtype=face_dtype)
 
-    for f_idx in range(M):
-        i  = int(tris[f_idx, 0]);  ip = int(tris_pre[f_idx, 0])
-        j  = int(tris[f_idx, 1]);  jp = int(tris_pre[f_idx, 1])
-        k  = int(tris[f_idx, 2]);  kp = int(tris_pre[f_idx, 2])
-        local_edges = (
-            (i, j, k, ip, jp),
-            (j, k, i, jp, kp),
-            (k, i, j, kp, ip),
+    # ── Directed edges (3 per face, in local order (i,j),(j,k),(k,i)) ─────────
+    # Flattened in C-order so global directed-edge id g = f_idx*3 + local_pos.
+    i, j, k = tris[:, 0], tris[:, 1], tris[:, 2]
+    ip, jp, kp = tris_pre[:, 0], tris_pre[:, 1], tris_pre[:, 2]
+
+    a   = np.stack([i, j, k],   axis=1).ravel().astype(np.int64)   # edge start
+    b   = np.stack([j, k, i],   axis=1).ravel().astype(np.int64)   # edge end
+    third = np.stack([k, i, j], axis=1).ravel()                    # opposite vertex
+    ap  = np.stack([ip, jp, kp], axis=1).ravel()                   # pre-id label of a
+    bp  = np.stack([jp, kp, ip], axis=1).ravel()                   # pre-id label of b
+    fid = np.repeat(np.arange(M, dtype=np.int64), 3)               # owning face
+
+    # Canonical (min, max) endpoint pair + pre-id labels ordered to match.
+    lo = np.minimum(a, b)
+    hi = np.maximum(a, b)
+    a_lt_b = a < b
+    pre_lo = np.where(a_lt_b, ap, bp)
+    pre_hi = np.where(a_lt_b, bp, ap)
+
+    key = lo * np.int64(K) + hi   # unique per canonical pair (indices < K)
+
+    # ── Deduplicate into canonical edges ─────────────────────────────────────
+    # `first_idx` = first occurrence (lowest g) per unique key = `recs[0]`.
+    # `inverse` maps each directed edge to its unique-edge slot.
+    uniq_key, first_idx, inverse = np.unique(
+        key, return_index=True, return_inverse=True
+    )
+    inverse = inverse.ravel()
+    n_edges = len(uniq_key)
+
+    counts = np.bincount(inverse, minlength=n_edges)
+    if counts.max() > 2:
+        bad = int(np.flatnonzero(counts > 2)[0])
+        bkey = int(uniq_key[bad])
+        raise ValueError(
+            f"Edge ({bkey // K}, {bkey % K}) has {int(counts[bad])} face "
+            f"references (expected 1 or 2)."
         )
-        for a, b, third, ap, bp in local_edges:
-            if a < b:
-                key = (a, b)
-                pre_pair = (ap, bp)
-            else:
-                key = (b, a)
-                pre_pair = (bp, ap)
-            rec_list = records.get(key)
-            if rec_list is None:
-                rec_list = []
-                records[key] = rec_list
-            rec_list.append((f_idx, third, a, b, pre_pair))
 
-    key_to_idx = {key: idx for idx, key in enumerate(records.keys())}
+    # Preserve the legacy edge numbering (order of first appearance, not the
+    # sorted-key order `np.unique` yields) so edge indices match the previous
+    # dict-insertion scheme. `app` = unique slots in appearance order;
+    # `relabel` maps a unique slot to its appearance rank.
+    app = np.argsort(first_idx, kind="stable")
+    relabel = np.empty(n_edges, dtype=np.int64)
+    relabel[app] = np.arange(n_edges)
 
-    for f_idx in range(M):
-        i = int(tris[f_idx, 0])
-        j = int(tris[f_idx, 1])
-        k = int(tris[f_idx, 2])
-        local_edges = ((i, j, k), (j, k, i), (k, i, j))
-        for local_pos, (a, b, _third) in enumerate(local_edges):
-            key = (a, b) if a < b else (b, a)
-            face_edge_idx[f_idx, local_pos] = key_to_idx[key]
+    face_edge_idx = relabel[inverse].reshape(M, 3).astype(np.int32)
 
-    n_edges = len(records)
-    edges = np.zeros(n_edges, dtype=edge_dtype)
+    # Second incident face per edge (recs[1]): the face of the 2nd directed
+    # edge in g order. lexsort by (g, inverse) groups directed edges by slot
+    # with g ascending inside each group; positions that are not group-firsts
+    # are the second occurrences.
+    g_order = np.lexsort((np.arange(3 * M), inverse))
+    inv_sorted = inverse[g_order]
+    fid_sorted = fid[g_order]
+    not_first = np.ones(len(inv_sorted), dtype=bool)
+    not_first[0] = False
+    not_first[1:] = inv_sorted[1:] == inv_sorted[:-1]
+    g_face = np.full(n_edges, -1, dtype=np.int64)
+    g_face[inv_sorted[not_first]] = fid_sorted[not_first]
 
-    for key, recs in records.items():
-        e_idx = key_to_idx[key]
-        if len(recs) > 2:
-            raise ValueError(
-                f"Edge {key} has {len(recs)} face references (expected 1 or 2). "
-                f"Records: {recs}"
-            )
+    # ── Per-edge geometry, in unique-slot order ──────────────────────────────
+    fi = first_idx
+    p_idx = lo[fi]
+    q_idx = hi[fi]
+    pre_p = pre_lo[fi]
+    pre_q = pre_hi[fi]
+    third0 = third[fi]
+    f0 = fid[fi]
 
-        f_idx, third, a, b, pre_pair = recs[0]
-        p_idx, q_idx = key  # already sorted (compacted)
-        pre_p, pre_q = pre_pair
-        p  = uv[p_idx]
-        pq = uv_pre[pre_q] - uv_pre[pre_p]   # pre-id subtraction (G15-compliant)
+    P = uv[p_idx]                          # (n_edges, 2)
+    PQ = uv_pre[pre_q] - uv_pre[pre_p]      # pre-id subtraction (G15-compliant)
 
-        # mo-seam axis-flip correction for `p + s·pq` interpolation.
-        # When canonical p and pre-id pre_p live in different identification
-        # copies (canonical chose the OTHER side of the seam as representative),
-        # the pre-id chord pq is expressed in pre_p's copy. To keep
-        # `p + s·pq` evaluating to the geometrically correct 3D point in
-        # canonical p's copy, we must flip the OTHER axis under mo:
-        #   - mo on u (identification (0, v) ~ (u_max, -v)): u-seam crossing
-        #     reverses v across copies → flip pq[1].
-        #   - mo on v: analogous with axes swapped → flip pq[0].
-        # cy identifications don't reverse any axis, so no flip.
-        diff_p = p - uv_pre[pre_p]
-        if u_is_mo and abs(float(diff_p[0])) > _u_range_half:
-            pq[1] = -pq[1]
-        elif v_is_mo and abs(float(diff_p[1])) > _v_range_half:
-            pq[0] = -pq[0]
+    # mo-seam axis-flip correction for `p + s·pq` interpolation. When canonical
+    # p and pre-id pre_p live in different identification copies, the pre-id
+    # chord pq is expressed in pre_p's copy. To keep `p + s·pq` geometrically
+    # correct in canonical p's copy, flip the OTHER axis under mo:
+    #   - mo on u: u-seam crossing reverses v across copies → flip pq[1].
+    #   - mo on v: analogous with axes swapped → flip pq[0].
+    # cy identifications don't reverse any axis, so no flip. Only one of
+    # u_is_mo / v_is_mo can be true ((mo, mo) is rejected upstream).
+    diff_p = P - uv_pre[pre_p]
+    if u_is_mo:
+        m = np.abs(diff_p[:, 0]) > _u_range_half
+        PQ[m, 1] = -PQ[m, 1]
+    if v_is_mo:
+        m = np.abs(diff_p[:, 1]) > _v_range_half
+        PQ[m, 0] = -PQ[m, 0]
 
-        edges[e_idx]["p_idx"] = p_idx
-        edges[e_idx]["q_idx"] = q_idx
-        edges[e_idx]["p"] = p
-        edges[e_idx]["pq"] = pq
+    # Boundary-edge inward direction (g == -1 only); interior edges get (0, 0).
+    is_bdry = g_face == -1
+    d = np.stack([-PQ[:, 1], PQ[:, 0]], axis=1)
+    offset = uv[third0] - P                 # boundary triangle: never spans a seam
+    neg = np.einsum("ij,ij->i", d, offset) < 0.0
+    d[neg] = -d[neg]
+    nrm = np.linalg.norm(d, axis=1)
+    nz = nrm > 0.0
+    d[nz] = d[nz] / nrm[nz, None]
+    DIR = np.zeros((n_edges, 2), dtype=np.float64)
+    DIR[is_bdry] = d[is_bdry]
 
-        if len(recs) == 1:
-            edges[e_idx]["f"] = f_idx
-            edges[e_idx]["g"] = -1
-            d = np.array([-pq[1], pq[0]], dtype=np.float64)
-            offset = uv[third] - p  # boundary triangle: never spans a seam
-            if float(np.dot(d, offset)) < 0.0:
-                d = -d
-            nrm = float(np.linalg.norm(d))
-            if nrm > 0.0:
-                d = d / nrm
-            edges[e_idx]["dir"] = d
-        else:
-            edges[e_idx]["f"] = f_idx
-            edges[e_idx]["g"] = recs[1][0]
-            edges[e_idx]["dir"] = (0.0, 0.0)
+    # flip = -1 iff the canonical-uv chord straddles a Möbius seam (its
+    # periodic-axis component exceeds half the range). Chord-jump test (not
+    # the narrower on-seam membership test, nor the over-eager SN·SN<0
+    # heuristic) — see history at [[bug_mesh_flip_chord_jump]].
+    crosses_mo = np.zeros(n_edges, dtype=bool)
+    if u_is_mo:
+        crosses_mo |= np.abs(uv[q_idx, 0] - uv[p_idx, 0]) > _u_range_half
+    if v_is_mo:
+        crosses_mo |= np.abs(uv[q_idx, 1] - uv[p_idx, 1]) > _v_range_half
 
-        # flip = -1 iff the canonical-uv chord straddles a Möbius seam
-        # (i.e. its periodic-axis component is longer than half the range).
-        # The `on_u_seam[p] and on_u_seam[q]` test was too narrow: across
-        # the mo-u seam, the triangle on one side has its third vertex in
-        # the interior, and the edge between that interior vertex (canonical
-        # close to u=0) and an opposite-side seam vertex (canonical at
-        # u=u_max) is a genuine mo-flip edge but only one endpoint is on
-        # the seam. A wider `SN·SN<0` heuristic (pre-9f02eab) spuriously
-        # fired on highly-curved smooth surfaces (Vagues at res=200, fig8
-        # near a fold) — the chord-jump test is the precise replacement.
-        if u_is_mo and abs(float(uv[q_idx, 0] - uv[p_idx, 0])) > _u_range_half:
-            crosses_mo = True
-        elif v_is_mo and abs(float(uv[q_idx, 1] - uv[p_idx, 1])) > _v_range_half:
-            crosses_mo = True
-        else:
-            crosses_mo = False
-        edges[e_idx]["flip"] = -1 if crosses_mo else 1
+    edges_uq = np.zeros(n_edges, dtype=edge_dtype)
+    edges_uq["p_idx"] = p_idx
+    edges_uq["q_idx"] = q_idx
+    edges_uq["p"] = P
+    edges_uq["pq"] = PQ
+    edges_uq["f"] = f0
+    edges_uq["g"] = g_face
+    edges_uq["dir"] = DIR
+    edges_uq["flip"] = np.where(crosses_mo, -1, 1).astype(np.int8)
+    edges_uq["split1"] = -1
+    edges_uq["split2"] = -1
 
-        edges[e_idx]["split1"] = -1
-        edges[e_idx]["split2"] = -1
+    edges = edges_uq[app]   # reorder into appearance (legacy) numbering
 
     faces = np.zeros(M, dtype=face_dtype)
-    for f_idx in range(M):
-        i  = int(tris[f_idx, 0]);  ip = int(tris_pre[f_idx, 0])
-        j  = int(tris[f_idx, 1]);  jp = int(tris_pre[f_idx, 1])
-        k  = int(tris[f_idx, 2]);  kp = int(tris_pre[f_idx, 2])
-        faces[f_idx]["verts"] = (i, j, k)
-        faces[f_idx]["edges"] = face_edge_idx[f_idx]
-        faces[f_idx]["p"]  = uv[i]
-        faces[f_idx]["pq"] = uv_pre[jp] - uv_pre[ip]   # pre-id subtraction
-        faces[f_idx]["pr"] = uv_pre[kp] - uv_pre[ip]   # pre-id subtraction
+    faces["verts"] = tris
+    faces["edges"] = face_edge_idx
+    faces["p"] = uv[i]
+    faces["pq"] = uv_pre[jp] - uv_pre[ip]   # pre-id subtraction
+    faces["pr"] = uv_pre[kp] - uv_pre[ip]   # pre-id subtraction
 
     return edges, faces
 

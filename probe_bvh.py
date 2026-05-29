@@ -1,10 +1,10 @@
-"""C14 — BVH broad phase visualization in 2D (XY projection).
+"""C14 — edge/face broad phase visualization in 2D (XY projection).
 
-Renders edge AABBs (blue), face AABBs (gray), and candidate overlapping
-pairs as segments connecting the AABB centroids (red). BVH partition
-boundaries themselves are not exposed by `candidate_pairs` so are not
-overlaid here — this probe is for visual sanity on the *broad-phase
-output*, not the internal tree structure.
+Renders edge AABBs (blue), face AABBs (gray), and candidate non-adjacent
+overlapping pairs as segments connecting the AABB centroids (red). Uses the
+fused-grid broad phase (`edge_face_candidates`), so shared-vertex adjacency
+pairs are already excluded — this probe is for visual sanity on the
+*broad-phase output*, not any internal acceleration-structure layout.
 """
 
 from pathlib import Path
@@ -16,7 +16,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
-from surface_play.intersections import candidate_pairs
+from surface_play.intersections import edge_face_candidates
 from surface_play.mesh import build_mesh
 from surface_play.test_fixtures import fig8
 
@@ -38,7 +38,9 @@ def main():
     f_pts = xyz[tris]
     f_bbox = np.hstack([f_pts.min(axis=1), f_pts.max(axis=1)])
 
-    ei, fi = candidate_pairs(e_bbox, f_bbox)
+    ei, fi = edge_face_candidates(
+        e_bbox, f_bbox, edges["p_idx"], edges["q_idx"], tris
+    )
 
     fig, ax = plt.subplots(figsize=(9, 9))
     for box in f_bbox:

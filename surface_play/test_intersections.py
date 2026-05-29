@@ -1,4 +1,4 @@
-"""Tests for P5: sweep_segments; C8: candidate_pairs; C9: find_double_points."""
+"""Tests for P5: sweep_segments; C8: edge_face_candidates; C9: find_double_points."""
 
 import math
 import time
@@ -10,7 +10,7 @@ from surface_play.domain import Domain
 from surface_play.intersections import (
     build_sics,
     build_sis_pairs,
-    candidate_pairs,
+    edge_face_candidates,
     dp_dtype,
     find_double_points,
     find_triple_points,
@@ -131,7 +131,11 @@ def test_performance_smoke():
     assert 0 <= len(hits) < n * n // 4
 
 
-# --- C8: candidate_pairs ----------------------------------------------------
+# --- C8: edge_face_candidates -----------------------------------------------
+# Uniform-grid edge-vs-face AABB broad phase with the shared-vertex skip (G13)
+# fused into the kernel. Returns ONLY non-adjacent overlapping pairs, deduped
+# and combined-key sorted. (Replaced the spatial-split BVH; see
+# construction-perf-2026-05-29.)
 
 def _random_bboxes(rng, n, *, low=0.0, high=1.0, size=0.05):
     """Random AABBs with corners in [low, high] and extent ≤ size on each axis."""
@@ -140,14 +144,31 @@ def _random_bboxes(rng, n, *, low=0.0, high=1.0, size=0.05):
     return np.concatenate([mins, mins + extents], axis=1)
 
 
-def _brute_force_pairs(e_bbox, f_bbox):
-    """Vectorized AABB-overlap brute force. Returns sorted (e_idx, f_idx) int64 arrays."""
+def _disjoint_labels(rng, n_e, n_f, n_verts):
+    """Random per-edge endpoints (ep, eq) and per-face vertices (tris).
+
+    Small `n_verts` so that some edge/face pairs genuinely share a vertex —
+    exercising the fused shared-vertex skip.
+    """
+    ep = rng.integers(0, n_verts, n_e).astype(np.int32)
+    eq = rng.integers(0, n_verts, n_e).astype(np.int32)
+    tris = rng.integers(0, n_verts, (n_f, 3)).astype(np.int32)
+    return ep, eq, tris
+
+
+def _brute_force_nonadjacent(e_bbox, f_bbox, ep, eq, tris):
+    """Vectorized AABB-overlap brute force, minus shared-vertex pairs."""
     e_mins = e_bbox[:, None, :3]
     e_maxs = e_bbox[:, None, 3:]
     f_mins = f_bbox[None, :, :3]
     f_maxs = f_bbox[None, :, 3:]
-    overlap = np.all((e_mins <= f_maxs) & (e_maxs >= f_mins), axis=-1)
-    e_idx, f_idx = np.where(overlap)
+    overlap = np.all((e_mins <= f_maxs) & (e_maxs >= f_mins), axis=-1)  # (Ne, Nf)
+    shared = (
+        (ep[:, None, None] == tris[None, :, :]).any(axis=-1)
+        | (eq[:, None, None] == tris[None, :, :]).any(axis=-1)
+    )
+    keep = overlap & ~shared
+    e_idx, f_idx = np.where(keep)
     return e_idx.astype(np.int64), f_idx.astype(np.int64)
 
 
@@ -155,122 +176,85 @@ def _pair_set(e_idx, f_idx):
     return set(zip(e_idx.tolist(), f_idx.tolist()))
 
 
-def test_candidate_pairs_empty():
-    """Empty inputs → empty outputs (int64)."""
+def test_edge_face_candidates_empty():
+    """Empty inputs → empty int64 outputs."""
     empty = np.empty((0, 6), dtype=np.float64)
     nonempty = np.array([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]], dtype=np.float64)
+    ie = np.array([0], np.int32); iq = np.array([1], np.int32)
+    tri = np.array([[2, 3, 4]], np.int32)
+    e0 = np.empty(0, np.int32); t0 = np.empty((0, 3), np.int32)
 
-    e_idx, f_idx = candidate_pairs(empty, empty)
+    e_idx, f_idx = edge_face_candidates(empty, empty, e0, e0, t0)
     assert e_idx.shape == (0,) and f_idx.shape == (0,)
     assert e_idx.dtype == np.int64 and f_idx.dtype == np.int64
 
-    e_idx, f_idx = candidate_pairs(empty, nonempty)
+    e_idx, f_idx = edge_face_candidates(empty, nonempty, e0, e0, tri)
     assert e_idx.shape == (0,) and f_idx.shape == (0,)
 
-    e_idx, f_idx = candidate_pairs(nonempty, empty)
+    e_idx, f_idx = edge_face_candidates(nonempty, empty, ie, iq, t0)
     assert e_idx.shape == (0,) and f_idx.shape == (0,)
 
 
-def test_candidate_pairs_non_overlapping():
+def test_edge_face_candidates_non_overlapping():
     """Two disjoint AABBs → no pair."""
     e_bbox = np.array([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]], dtype=np.float64)
     f_bbox = np.array([[2.0, 2.0, 2.0, 3.0, 3.0, 3.0]], dtype=np.float64)
-    e_idx, f_idx = candidate_pairs(e_bbox, f_bbox)
+    ep = np.array([0], np.int32); eq = np.array([1], np.int32)
+    tris = np.array([[2, 3, 4]], np.int32)
+    e_idx, f_idx = edge_face_candidates(e_bbox, f_bbox, ep, eq, tris)
     assert e_idx.shape == (0,) and f_idx.shape == (0,)
 
 
-def test_candidate_pairs_overlapping():
-    """Two overlapping AABBs → exactly one pair (0, 0)."""
+def test_edge_face_candidates_overlapping_non_adjacent():
+    """Overlapping AABBs with no shared vertex → exactly one pair (0, 0)."""
     e_bbox = np.array([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]], dtype=np.float64)
     f_bbox = np.array([[0.5, 0.5, 0.5, 1.5, 1.5, 1.5]], dtype=np.float64)
-    e_idx, f_idx = candidate_pairs(e_bbox, f_bbox)
+    ep = np.array([0], np.int32); eq = np.array([1], np.int32)
+    tris = np.array([[2, 3, 4]], np.int32)
+    e_idx, f_idx = edge_face_candidates(e_bbox, f_bbox, ep, eq, tris)
     assert e_idx.tolist() == [0] and f_idx.tolist() == [0]
     assert e_idx.dtype == np.int64 and f_idx.dtype == np.int64
 
 
-def test_candidate_pairs_brute_force_equivalence():
-    """Random (N=200, M=300) AABBs: BVH output ≡ brute-force output as set of pairs.
+def test_edge_face_candidates_shared_vertex_skipped():
+    """Overlapping AABBs that share a vertex → skipped (no pair)."""
+    e_bbox = np.array([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]], dtype=np.float64)
+    f_bbox = np.array([[0.5, 0.5, 0.5, 1.5, 1.5, 1.5]], dtype=np.float64)
+    ep = np.array([2], np.int32); eq = np.array([1], np.int32)
+    tris = np.array([[2, 3, 4]], np.int32)  # shares vertex 2 with edge endpoint
+    e_idx, f_idx = edge_face_candidates(e_bbox, f_bbox, ep, eq, tris)
+    assert e_idx.shape == (0,) and f_idx.shape == (0,)
 
-    AABB size is kept small (≤ 5% of domain) so that no AABB straddles the
-    BVH's partition midpoints — the legacy object-split BVH places each AABB
-    in exactly one child by its min-coord, so a wide AABB spanning a midpoint
-    would be invisible to its overlapping neighbors on the other side. In real
-    use (mesh edges/faces from a regular grid) AABB extents are O(1/N) of the
-    domain and this regime holds. Density here is low (~ tens of pairs); the
-    test is about contract equivalence, not density coverage.
-    """
+
+def test_edge_face_candidates_brute_force_equivalence():
+    """Random (N=200, M=300) AABBs + labels: grid output ≡ brute force (minus
+    shared-vertex pairs), as a set of pairs, with no duplicates."""
     rng = np.random.default_rng(42)
-    e_bbox = _random_bboxes(rng, 200, size=0.05)
-    f_bbox = _random_bboxes(rng, 300, size=0.05)
+    e_bbox = _random_bboxes(rng, 200, size=0.08)
+    f_bbox = _random_bboxes(rng, 300, size=0.08)
+    ep, eq, tris = _disjoint_labels(rng, 200, 300, n_verts=400)
 
-    bvh_e, bvh_f = candidate_pairs(e_bbox, f_bbox)
-    bf_e, bf_f = _brute_force_pairs(e_bbox, f_bbox)
+    g_e, g_f = edge_face_candidates(e_bbox, f_bbox, ep, eq, tris)
+    bf_e, bf_f = _brute_force_nonadjacent(e_bbox, f_bbox, ep, eq, tris)
 
-    assert len(bf_e) > 0, "test setup: expected at least one brute-force pair"
-    assert _pair_set(bvh_e, bvh_f) == _pair_set(bf_e, bf_f)
-    # BVH dedup: no duplicate pairs.
-    assert len(bvh_e) == len(set(zip(bvh_e.tolist(), bvh_f.tolist())))
-
-
-def test_candidate_pairs_performance():
-    """N=10_000 BVH < 1s after JIT warmup; brute-force ≫ BVH (speedup > 30×).
-
-    The roadmap's "brute-force baseline takes > 30s" is captured here as a
-    *ratio* assertion (per the roadmap's "Assert ratio" instruction): we don't
-    actually run 30s of brute force in CI. Instead we time a naive Python
-    nested-loop brute force on a small (n0 × n0) subset, extrapolate to n × n,
-    and assert the BVH is at least 30× faster.
-    """
-    rng = np.random.default_rng(7)
-    n = 10_000
-    # Small AABBs to (a) keep overlap density low (~few × n hits) and
-    # (b) stay within the legacy BVH's correctness envelope (see equivalence test).
-    e_bbox = _random_bboxes(rng, n, size=0.005)
-    f_bbox = _random_bboxes(rng, n, size=0.005)
-
-    # JIT warm-up (so we don't time Numba compilation).
-    _ = candidate_pairs(e_bbox[:10], f_bbox[:10])
-
-    t0 = time.perf_counter()
-    e_idx, f_idx = candidate_pairs(e_bbox, f_bbox)
-    t_bvh = time.perf_counter() - t0
-    assert t_bvh < 1.0, f"BVH took {t_bvh:.3f}s, expected < 1s"
-
-    # Naive pure-Python brute force on a small (n0 × n0) subset; extrapolate.
-    e_list = e_bbox.tolist()
-    f_list = f_bbox.tolist()
-    n0 = 500
-    t0 = time.perf_counter()
-    cnt = 0
-    for i in range(n0):
-        eb = e_list[i]
-        for j in range(n0):
-            fb = f_list[j]
-            if (eb[0] <= fb[3] and eb[3] >= fb[0]
-                and eb[1] <= fb[4] and eb[4] >= fb[1]
-                and eb[2] <= fb[5] and eb[5] >= fb[2]):
-                cnt += 1
-    t_brute_small = time.perf_counter() - t0
-    t_brute_full = t_brute_small * (n * n) / (n0 * n0)
-    assert t_brute_full / max(t_bvh, 1e-6) > 30.0, (
-        f"BVH speedup only {t_brute_full / max(t_bvh, 1e-6):.1f}× "
-        f"(t_bvh={t_bvh:.4f}s, t_brute_extrapolated={t_brute_full:.1f}s)"
-    )
+    assert len(bf_e) > 0, "test setup: expected at least one non-adjacent pair"
+    assert _pair_set(g_e, g_f) == _pair_set(bf_e, bf_f)
+    assert len(g_e) == len(set(zip(g_e.tolist(), g_f.tolist())))  # deduped
 
 
-def test_candidate_pairs_determinism():
-    """Same input → identical output across runs (no RNG inside BVH)."""
+def test_edge_face_candidates_determinism():
+    """Same input → identical, combined-key-sorted output across runs."""
     rng = np.random.default_rng(123)
-    e_bbox = _random_bboxes(rng, 150, size=0.3)
-    f_bbox = _random_bboxes(rng, 150, size=0.3)
+    e_bbox = _random_bboxes(rng, 150, size=0.1)
+    f_bbox = _random_bboxes(rng, 150, size=0.1)
+    ep, eq, tris = _disjoint_labels(rng, 150, 150, n_verts=300)
 
-    e1, f1 = candidate_pairs(e_bbox, f_bbox)
-    e2, f2 = candidate_pairs(e_bbox, f_bbox)
+    e1, f1 = edge_face_candidates(e_bbox, f_bbox, ep, eq, tris)
+    e2, f2 = edge_face_candidates(e_bbox, f_bbox, ep, eq, tris)
     np.testing.assert_array_equal(e1, e2)
     np.testing.assert_array_equal(f1, f2)
-    # Stable sort: combined-key non-decreasing.
     combined = (e1.astype(np.int64) << 32) | f1.astype(np.int64)
-    assert np.all(np.diff(combined) > 0)
+    assert np.all(np.diff(combined) > 0)  # strictly increasing ⇒ sorted + deduped
 
 
 # --- C9: find_double_points -------------------------------------------------
