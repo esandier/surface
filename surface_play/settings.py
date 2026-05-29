@@ -14,7 +14,9 @@ RESOLUTION: int = 200
 # full construction density — a coarser mesh ships a much smaller payload so
 # the canvas appears sooner. The outline pipeline keeps RESOLUTION for full
 # precision; canvas and outline are independent representations of S(u, v).
-CANVAS_RESOLUTION: int = 80
+# NB: distinct from the roadmap's CANVAS_RESOLUTION (which there means the
+# outline *sampling* density); this is the display-mesh density only.
+DISPLAY_RESOLUTION: int = 80
 SURFACE_CACHE_SIZE: int = 16
 
 # Chain-step buffer used in helpers.py `_cc_samples` / `_sic_samples` to

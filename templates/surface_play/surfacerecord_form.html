@@ -71,7 +71,7 @@
                                             value="{{ form.u_max.value|default:'1' }}" style="font-family:monospace;">
                                     </td>
                                     <td class="pl-3">
-                                        <select name="u_identify" id="id_u_identify" class="form-control form-control-sm">
+                                        <select name="u_identify" id="id_u_identify" class="form-control form-control-sm" style="font-family:monospace;">
                                             <option value="no" {% if form.u_identify.value == 'no' %}selected{% endif %}>none</option>
                                             <option value="cy" {% if form.u_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
                                             <option value="mo" {% if form.u_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
@@ -92,7 +92,7 @@
                                             value="{{ form.v_max.value|default:'1' }}" style="font-family:monospace;">
                                     </td>
                                     <td class="pl-3">
-                                        <select name="v_identify" id="id_v_identify" class="form-control form-control-sm">
+                                        <select name="v_identify" id="id_v_identify" class="form-control form-control-sm" style="font-family:monospace;">
                                             <option value="no" {% if form.v_identify.value == 'no' %}selected{% endif %}>none</option>
                                             <option value="cy" {% if form.v_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
                                             <option value="mo" {% if form.v_identify.value == 'mo' %}selected{% endif %}>Möbius</option>

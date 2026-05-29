@@ -1,11 +1,5 @@
 Claude:
 
-A) Bugs
-
-* Form: for disk/annulus domains, textinputs for names of variables not OK, should be as in the rectangle case.
-* When specifying surface in cylindrical coordinates, thumbnails are wrong
-* Save view should also save the fact that the view is orthographic/perspective, and the thumbnail be updated accordingly.
-
 B) immersed surfaces: 
 
 The algorithm should be as follows:

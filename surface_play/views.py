@@ -105,11 +105,11 @@ def _legacy_threejs_context(threejs: dict, mesh_xyz: np.ndarray) -> dict:
 
 def _play_get(request, record: SurfaceRecord) -> HttpResponse:
     # Mesh only — no self-intersection detection — so the 3D canvas renders
-    # ASAP. Built at the coarser CANVAS_RESOLUTION (smaller payload → faster
+    # ASAP. Built at the coarser DISPLAY_RESOLUTION (smaller payload → faster
     # time-to-canvas); the outline pipeline keeps RESOLUTION for full precision.
     # The full construction (incl. self-intersections) is computed later, warmed
     # in the background by the client and/or on the first outline POST.
-    init = pipeline.build_mesh_init(record, resolution=_settings.CANVAS_RESOLUTION)
+    init = pipeline.build_mesh_init(record, resolution=_settings.DISPLAY_RESOLUTION)
     ctx = _legacy_threejs_context(init.threejs, init.mesh.xyz)
     ctx.update({
         "threejs": init.threejs,
