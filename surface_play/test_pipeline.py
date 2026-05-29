@@ -126,8 +126,10 @@ def _clear_cache():
     """Each test gets a fresh LRU cache so is-equality and miss tests don't
     spuriously hit leftovers from earlier tests in the module."""
     pipeline._cached_surface_init.cache_clear()
+    pipeline._cached_mesh.cache_clear()
     yield
     pipeline._cached_surface_init.cache_clear()
+    pipeline._cached_mesh.cache_clear()
 
 
 # ── 1. build_surface_init parity with standalone calls ───────────────────────
@@ -157,6 +159,37 @@ def test_build_surface_init_matches_standalone():
     np.testing.assert_allclose(
         init.construction.mesh.xyz, standalone.mesh.xyz, atol=1e-12,
     )
+
+
+# ── 1b. build_mesh_init: mesh-only canvas path ───────────────────────────────
+
+
+def test_build_mesh_init_no_construction_and_shares_mesh():
+    """build_mesh_init returns mesh + threejs without running construction, and
+    the mesh object is reused (is-identity) by the later full build, so the
+    self-intersection-only cost is all that's paid on the first outline."""
+    rec = _make_record("paraboloid")
+    mi = pipeline.build_mesh_init(rec, resolution=16, seed=5)
+
+    # No self-intersection artifacts on the mesh-only init.
+    assert isinstance(mi, pipeline.MeshInit)
+    assert not hasattr(mi, "construction")
+    # threejs payload shape parity with the mesh.
+    assert len(mi.threejs["vertices"]) == len(mi.mesh.xyz)
+    assert len(mi.threejs["faces"]) == len(mi.mesh.tris)
+
+    # The full init reuses the exact same Mesh object (shared _cached_mesh).
+    si = pipeline.build_surface_init(rec, resolution=16, seed=5)
+    assert mi.mesh is si.construction.mesh
+    assert mi.cache_key == si.cache_key
+    assert mi.threejs == si.threejs
+
+
+def test_build_mesh_init_cache_hit_same_object():
+    rec = _make_record("paraboloid")
+    a = pipeline.build_mesh_init(rec, resolution=14, seed=1)
+    b = pipeline.build_mesh_init(rec, resolution=14, seed=1)
+    assert a.mesh is b.mesh
 
 
 # ── 2. Cache hit returns the same Python object ──────────────────────────────

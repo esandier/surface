@@ -7,6 +7,7 @@ import json
 import math
 import re
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from django.test import Client, TestCase
@@ -40,6 +41,7 @@ class PlayEndpointTests(TestCase):
     def setUp(self):
         # Fresh LRU on every test so cache-observable tests aren't poisoned.
         pipeline._cached_surface_init.cache_clear()
+        pipeline._cached_mesh.cache_clear()
         self.client = Client()
         self.url = reverse("surface-play", kwargs={"pk": self.record.pk})
 
@@ -52,6 +54,51 @@ class PlayEndpointTests(TestCase):
         # The legacy template consumes positions/normals/faces/center/radius.
         for key in ("positions", "normals", "faces", "center", "radius"):
             self.assertIn(key, body)
+
+    def test_get_serves_mesh_without_running_construction(self):
+        """The canvas GET must render from the mesh alone — never trigger the
+        self-intersection-bearing full construction (so it isn't blocked on it).
+        """
+        called = {"n": 0}
+        orig = pipeline.build_surface_init
+
+        def _spy(*a, **k):
+            called["n"] += 1
+            return orig(*a, **k)
+
+        pipeline.build_surface_init = _spy
+        try:
+            response = self.client.get(self.url)
+        finally:
+            pipeline.build_surface_init = orig
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(called["n"], 0, "GET must not run full build_surface_init")
+
+    # ── 1b. Warm POST ────────────────────────────────────────────────────────
+
+    def test_warm_post_caches_construction_without_outline(self):
+        """A `{"warm": true}` POST computes + caches the full construction and
+        returns no outline; a subsequent outline POST is then a cache hit."""
+        response = self.client.post(
+            self.url, data=json.dumps({"warm": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"warmed": True})
+        # Construction now cached: the outline POST reuses it (no extra build).
+        with mock.patch.object(
+            pipeline, "build_construction", wraps=pipeline.build_construction
+        ) as spy:
+            r2 = self.client.post(
+                self.url,
+                data=json.dumps({
+                    "I": [1.0, 0.0, 0.0], "J": [0.0, 0.0, 1.0],
+                    "O": [0.0, 0.0, 0.0], "eye": None,
+                }),
+                content_type="application/json",
+            )
+        self.assertEqual(r2.status_code, 200)
+        spy.assert_not_called()
 
     # ── 2. POST ortho minimal ────────────────────────────────────────────────
 

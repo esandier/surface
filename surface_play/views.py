@@ -29,6 +29,7 @@ from django.views.generic import ListView
 from django.views.generic.edit import CreateView, DeleteView, UpdateView
 
 from surface_play import pipeline
+from surface_play import settings as _settings
 from surface_play.forms import SurfaceRecordForm
 from surface_play.models import SurfaceRecord
 
@@ -103,8 +104,13 @@ def _legacy_threejs_context(threejs: dict, mesh_xyz: np.ndarray) -> dict:
 
 
 def _play_get(request, record: SurfaceRecord) -> HttpResponse:
-    init = pipeline.build_surface_init(record)
-    ctx = _legacy_threejs_context(init.threejs, init.construction.mesh.xyz)
+    # Mesh only — no self-intersection detection — so the 3D canvas renders
+    # ASAP. Built at the coarser CANVAS_RESOLUTION (smaller payload → faster
+    # time-to-canvas); the outline pipeline keeps RESOLUTION for full precision.
+    # The full construction (incl. self-intersections) is computed later, warmed
+    # in the background by the client and/or on the first outline POST.
+    init = pipeline.build_mesh_init(record, resolution=_settings.CANVAS_RESOLUTION)
+    ctx = _legacy_threejs_context(init.threejs, init.mesh.xyz)
     ctx.update({
         "threejs": init.threejs,
         "surface": record,
@@ -131,6 +137,17 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
     except json.JSONDecodeError as exc:
         return HttpResponseBadRequest(f"invalid JSON body: {exc}")
 
+    debug = data.get("debug", {}) or {}
+    init_kwargs, outline_kwargs = _debug_kwargs(debug)
+
+    # Warm request: compute + cache the full construction (mesh already cached
+    # from the GET; this adds the self-intersection detection) without an
+    # outline. The client fires this in the background once the canvas is up,
+    # so the first real mouse-up outline isn't slowed by self-intersections.
+    if data.get("warm"):
+        pipeline.build_surface_init(record, **init_kwargs)
+        return JsonResponse({"warmed": True})
+
     for field in ("I", "J", "O"):
         if field not in data:
             return HttpResponseBadRequest(f"missing required field: {field}")
@@ -138,9 +155,7 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
     J = data["J"]
     O = data["O"]
     eye = data.get("eye")  # None → ortho
-    debug = data.get("debug", {}) or {}
 
-    init_kwargs, outline_kwargs = _debug_kwargs(debug)
     init = pipeline.build_surface_init(record, **init_kwargs)
     try:
         result = pipeline.build_outline(

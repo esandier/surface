@@ -45,9 +45,15 @@ def build_construction(
     *,
     jitter: bool = True,
     seed: int | None = None,
+    mesh: Mesh | None = None,
 ) -> ConstructionResult:
-    """Run the full Construction phase and return all artifacts."""
-    mesh = build_mesh(domain, surface, resolution, jitter=jitter, seed=seed)
+    """Run the full Construction phase and return all artifacts.
+
+    `mesh`: reuse an already-built mesh (e.g. the one cached for the 3D canvas
+    display) instead of regenerating it. When ``None`` the mesh is built here.
+    """
+    if mesh is None:
+        mesh = build_mesh(domain, surface, resolution, jitter=jitter, seed=seed)
     bcs = build_bcs(mesh)
     dps = find_double_points(mesh, surface)
     sis_pairs = build_sis_pairs(dps)

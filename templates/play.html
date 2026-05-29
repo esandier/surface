@@ -108,6 +108,10 @@
                 <label for="dbg-newton" style="font-size:12px; color:#333; margin:0;">Newton cusps</label>
                 <input type="checkbox" id="dbg-newton" checked style="cursor:pointer; width:16px; height:16px;">
             </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-project-resampled" style="font-size:12px; color:#333; margin:0;">Project resampled</label>
+                <input type="checkbox" id="dbg-project-resampled" style="cursor:pointer; width:16px; height:16px;">
+            </div>
             <div style="margin-bottom:10px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
                     <span style="font-size:12px; color:#333;">Resolution</span>
@@ -288,6 +292,7 @@
         if (!debugPanel) return {};
         const use_lp     = document.getElementById('dbg-lp').checked;
         const use_newton = document.getElementById('dbg-newton').checked;
+        const project_resampled = document.getElementById('dbg-project-resampled').checked;
         const resolution = parseInt(document.getElementById('dbg-resolution').value);
         // Keys match Reorganization_of_the_surface_app.md "Debug panel" /
         // Modular_rewrite_roadmap.md line 71 ("All pass through the debug
@@ -296,6 +301,7 @@
         return {
             PROPAGATION: use_lp ? "LP4" : "BFS",
             NEWTON_CUSP: use_newton,
+            PROJECT_RESAMPLED: project_resampled,
             RESOLUTION: resolution,
         };
     }
@@ -354,6 +360,22 @@
             controls.enabled = true;
             spinner.replaceWith(downloadButton);
         });
+    }
+
+    // Background warm: the GET served only the mesh (canvas shows ASAP), so
+    // the self-intersection detection still has to run. Kick it off now, while
+    // the user looks at / rotates the canvas, so the first mouse-up outline
+    // isn't slowed by it. Fire-and-forget; the outline POST recomputes (cache
+    // hit) if this hasn't finished.
+    let warmed = false;
+    function warmConstruction() {
+        if (warmed) return;
+        warmed = true;
+        fetch("{% url 'surface-play' pk=pk %}", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ warm: true, debug: getDebugParams() }),
+        }).catch(err => { warmed = false; console.error("warm failed:", err); });
     }
 
     /* ---------------- SVG DRAWING ---------------- */
@@ -724,6 +746,9 @@
     applyZoom(SAVED_ANGLES.zoom);
     updateAllDialDisplays();
     updateDialsFromAngles(readAnglesFromCamera());
+
+    // Let the canvas paint first, then warm the self-intersection computation.
+    setTimeout(warmConstruction, 100);
 
 </script>
 {% endblock %}

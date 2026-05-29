@@ -5,10 +5,16 @@ so callers can override per-call without mutating module state.
 """
 
 PROJECT_RESAMPLED: bool = False
-# Single resolution knob driving both mesh density (build_construction) and
-# outline sampling density (resample_all). Per-call overrides via the
+# Resolution knob driving the construction mesh density (build_construction)
+# and outline sampling density (resample_all). Per-call overrides via the
 # `resolution=` kwarg on build_surface_init / resample_all.
 RESOLUTION: int = 200
+# Separate, coarser resolution for the 3D *display* mesh served to the canvas
+# (build_mesh_init). The colored surface the user rotates does not need the
+# full construction density — a coarser mesh ships a much smaller payload so
+# the canvas appears sooner. The outline pipeline keeps RESOLUTION for full
+# precision; canvas and outline are independent representations of S(u, v).
+CANVAS_RESOLUTION: int = 80
 SURFACE_CACHE_SIZE: int = 16
 
 # Chain-step buffer used in helpers.py `_cc_samples` / `_sic_samples` to

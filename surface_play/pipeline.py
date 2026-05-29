@@ -33,6 +33,7 @@ from surface_play.contour import (
 from surface_play.curves import resample_all
 from surface_play.domain import Domain
 from surface_play.helpers import build_helper_curves
+from surface_play.mesh import Mesh, build_mesh
 from surface_play.projection import Projection
 from surface_play.splitting import (
     SplitArrays,
@@ -57,6 +58,22 @@ from surface_play.visibility import (
 
 
 @dataclass
+class MeshInit:
+    """Projection- AND self-intersection-independent half of the pipeline.
+
+    Holds just the mesh + its three.js payload — everything the 3D canvas needs
+    to display and be rotated/zoomed. Built cheaply (no self-intersection
+    detection) so the canvas can appear before the full construction is ready.
+    """
+    record_pk: int
+    cache_key: str
+    domain: Domain
+    surface: SurfaceParams
+    mesh: Mesh
+    threejs: dict
+
+
+@dataclass
 class SurfaceInit:
     record_pk: int
     cache_key: str
@@ -76,14 +93,15 @@ class OutlineResult:
 # ── mesh_to_threejs ──────────────────────────────────────────────────────────
 
 
-def mesh_to_threejs(construction: ConstructionResult) -> dict:
+def mesh_to_threejs(source) -> dict:
     """Projection-independent three.js mesh payload.
 
+    Accepts either a `Mesh` or a `ConstructionResult` (uses its `.mesh`).
     Returns one row per compacted vertex (post-C4 identification) — the
     `Mesh.uv/.xyz/.SN` arrays are already deduplicated, so `tris` indexes
     them directly with no further remap.
     """
-    mesh = construction.mesh
+    mesh = source.mesh if isinstance(source, ConstructionResult) else source
     return {
         "vertices": mesh.xyz.tolist(),
         "faces": mesh.tris.tolist(),
@@ -146,6 +164,25 @@ def _build_domain_and_surface(sig: tuple) -> tuple[Domain, SurfaceParams]:
     return domain, surface
 
 
+def _cache_key(sig: tuple, resolution: int) -> str:
+    return hashlib.sha256(repr(sig + (resolution,)).encode("utf-8")).hexdigest()
+
+
+@functools.lru_cache(maxsize=_settings.SURFACE_CACHE_SIZE)
+def _cached_mesh(
+    record_pk: int,
+    sig: tuple,
+    resolution: int,
+    jitter: bool,
+    seed: int | None,
+) -> Mesh:
+    """The mesh alone — no self-intersection detection. Shared by the cheap
+    canvas path (`build_mesh_init`) and the full construction (which reuses
+    this exact object via `build_construction(..., mesh=...)`)."""
+    domain, surface = _build_domain_and_surface(sig)
+    return build_mesh(domain, surface, resolution, jitter=jitter, seed=seed)
+
+
 @functools.lru_cache(maxsize=_settings.SURFACE_CACHE_SIZE)
 def _cached_surface_init(
     record_pk: int,
@@ -155,16 +192,14 @@ def _cached_surface_init(
     seed: int | None,
 ) -> SurfaceInit:
     domain, surface = _build_domain_and_surface(sig)
+    mesh = _cached_mesh(record_pk, sig, resolution, jitter, seed)
     construction = build_construction(
-        domain, surface, resolution, jitter=jitter, seed=seed,
+        domain, surface, resolution, jitter=jitter, seed=seed, mesh=mesh,
     )
     threejs = mesh_to_threejs(construction)
-    cache_key = hashlib.sha256(
-        repr(sig + (resolution,)).encode("utf-8")
-    ).hexdigest()
     return SurfaceInit(
         record_pk=int(record_pk),
-        cache_key=cache_key,
+        cache_key=_cache_key(sig, resolution),
         domain=domain,
         surface=surface,
         construction=construction,
@@ -189,6 +224,35 @@ def build_surface_init(
         resolution = _settings.RESOLUTION
     sig = _record_signature(record)
     return _cached_surface_init(int(record.pk), sig, int(resolution), bool(jitter), seed)
+
+
+def build_mesh_init(
+    record,
+    *,
+    resolution: int | None = None,
+    jitter: bool = True,
+    seed: int | None = None,
+) -> MeshInit:
+    """Build (and cache) just the mesh + three.js payload for the 3D canvas.
+
+    Skips self-intersection detection entirely, so the canvas can be served
+    before the full construction is ready. The mesh object is the *same* one
+    `build_surface_init` reuses (shared `_cached_mesh`), so a later full build
+    pays only the self-intersection cost, not another mesh generation.
+    """
+    if resolution is None:
+        resolution = _settings.RESOLUTION
+    sig = _record_signature(record)
+    mesh = _cached_mesh(int(record.pk), sig, int(resolution), bool(jitter), seed)
+    domain, surface = _build_domain_and_surface(sig)
+    return MeshInit(
+        record_pk=int(record.pk),
+        cache_key=_cache_key(sig, int(resolution)),
+        domain=domain,
+        surface=surface,
+        mesh=mesh,
+        threejs=mesh_to_threejs(mesh),
+    )
 
 
 # ── build_outline ────────────────────────────────────────────────────────────
