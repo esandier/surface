@@ -260,8 +260,21 @@ def _run_outline_pipeline(
     if propagation == "BFS":
         vis = bfs
     elif propagation in ("LP1", "LP4"):
+        # Per spec G24: LP1 uses a single leftmost-x anchor; LP4 uses 4
+        # anchors at the xy-bbox extremes (leftmost-x, rightmost-x,
+        # bottommost-y, topmost-y). Each anchor is pinned to vis=0. With
+        # only 1 anchor on surfaces whose silhouette has multiple
+        # disconnected components in image space (e.g. Onde radiale's
+        # concentric ridge ellipses at low elevation), the single
+        # leftmost-x anchor may land on the front of one ridge while
+        # other front-visible ridges propagate to vis<0 because the only
+        # propagation path goes through occluder crossings. 4 anchors
+        # pin more silhouette pieces at vis=0 directly.
+        anchors = "extremes" if propagation == "LP4" else "leftmost"
         try:
-            lp = lp_refine_visibility(rcs, breaks, splits, vis_bfs=bfs)
+            lp = lp_refine_visibility(
+                rcs, breaks, splits, vis_bfs=bfs, anchors=anchors,
+            )
             vis = lp
         except LPInfeasibleError:
             vis = bfs
