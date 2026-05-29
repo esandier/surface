@@ -69,7 +69,12 @@ def _generate_rect_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np
     area = rect_area / resolution ** 2
 
     pslg = {"vertices": bverts, "segments": bsegs}
-    result = triangle.triangulate(pslg, opts=f"pYq30a{area:.17g}")
+    # Use fixed-point format (NOT .17g): for small areas, .17g switches to
+    # scientific notation (e.g. "7.85e-05") and the C triangle library's
+    # option parser treats 'e' as the -e flag, truncating the area number
+    # and silently dropping the area constraint. Bites disk domains with
+    # r_max=1 at resolution=200 (area=7.85e-5 < 1e-4 threshold).
+    result = triangle.triangulate(pslg, opts=f"pYq30a{area:.20f}")
 
     uv = np.asarray(result["vertices"], dtype=np.float64)
     tris = np.asarray(result["triangles"], dtype=np.int32)
@@ -521,7 +526,7 @@ def _generate_disk_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np
         pslg = {"vertices": all_verts, "segments": all_segs}
 
     area = domain_area / resolution ** 2
-    result = triangle.triangulate(pslg, opts=f"pYq30a{area:.17g}")
+    result = triangle.triangulate(pslg, opts=f"pYq30a{area:.20f}")
 
     uv = np.asarray(result["vertices"], dtype=np.float64)
     tris = np.asarray(result["triangles"], dtype=np.int32)

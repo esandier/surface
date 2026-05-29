@@ -160,15 +160,27 @@ def _compute_d_batch(
     d_arr[safe_n] = diff2[safe_n] / n[safe_n, None]
 
     # ── front_uv: oriented Np = grad_uv(axis . SN) ──────────────────────────
+    # `axis` is per-point in persp (viewer_direction(S)), constant in ortho.
+    # Matches the convention used by `_bvis_chge` in splitting.py and the
+    # other vis_chge sites. The Np simplification still holds: any extra
+    # gradient term `d(viewer_direction)/duv · SN = -dS/duv · SN` vanishes
+    # via the triple product (Su · SN = Sv · SN = 0).
+    if projection.mode == "ortho":
+        axis_per = np.broadcast_to(axis, S_arr.shape)   # (N, 3)
+    else:
+        axis_per = projection.eye - S_arr               # (N, 3)
+
     # Step A. Orient `ker` so axis . dS(ker) > 0.
     dS_ker = k0 * Su_arr + k1 * Sv_arr                  # (N, 3)
-    axis_dot_dS_ker = dS_ker @ axis                     # (N,)
+    axis_dot_dS_ker = np.einsum("ij,ij->i", dS_ker, axis_per)
     sign_ker = np.where(axis_dot_dS_ker >= 0.0, 1.0, -1.0)
     ker_oriented = ker * sign_ker[:, None]              # (N, 2)
 
     # Step B. Compute Np = grad_uv(axis . SN) in uv space (per _bvis_chge).
-    Np_u = (np.cross(Suu_arr, Sv_arr) + np.cross(Su_arr, Suv_arr)) @ axis  # (N,)
-    Np_v = (np.cross(Suv_arr, Sv_arr) + np.cross(Su_arr, Svv_arr)) @ axis  # (N,)
+    cross_a = np.cross(Suu_arr, Sv_arr) + np.cross(Su_arr, Suv_arr)  # (N, 3)
+    cross_b = np.cross(Suv_arr, Sv_arr) + np.cross(Su_arr, Svv_arr)  # (N, 3)
+    Np_u = np.einsum("ij,ij->i", cross_a, axis_per)     # (N,)
+    Np_v = np.einsum("ij,ij->i", cross_b, axis_per)     # (N,)
     Np = np.stack([Np_u, Np_v], axis=-1)                # (N, 2)
 
     # Step C. Orient Np so Np . ker_oriented > 0.
@@ -515,7 +527,13 @@ def find_vps(
 
     Visibility change (G10): ``+1 if dS(p, q-p) · axis > 0 else -1``, with
     dS evaluated at the *left* CP p (Reorganization §"Cusp points" line 373).
-    axis = projection._axis (image-plane normal; the view direction in ortho).
+    axis = `projection.viewer_direction(xyz_vp)` — per-point viewer direction
+    at the cusp's 3D location. In ortho this returns the constant principal
+    axis (matching the original spec); in persp it returns `eye - xyz_vp`,
+    which differs from the camera axis whenever the cusp is off the optical
+    axis. Using the constant axis in persp flipped vis_change on cusps far
+    from the principal direction, producing phantom BFS updates that LP had
+    to repair.
 
     The dot product is computed in the CS's NATIVE direction (p_cp → q_cp),
     not the CC's chain direction, because downstream `_emit_subcurves` applies
@@ -524,7 +542,6 @@ def find_vps(
     `vis_change` in chain direction here would double-correct on CSs that
     appear with a negative sign in the CC chain.
     """
-    axis = projection._axis
     rows: list[tuple] = []
 
     for cc in ccs:
@@ -565,7 +582,8 @@ def find_vps(
             Su_p = np.asarray(surface.Su(up_, vp_), dtype=float).reshape(3)
             Sv_p = np.asarray(surface.Sv(up_, vp_), dtype=float).reshape(3)
             dS_3d = Su_p * dir_uv_nat[0] + Sv_p * dir_uv_nat[1]
-            vis = np.int8(1) if float(dS_3d @ axis) > 0.0 else np.int8(-1)
+            axis_at_vp = projection.viewer_direction(xyz_vp).reshape(3)
+            vis = np.int8(1) if float(dS_3d @ axis_at_vp) > 0.0 else np.int8(-1)
 
             rows.append((cs_idx, 0.5, uv_vp, xyz_vp, vis))
 
