@@ -254,11 +254,20 @@ def _seg_uv_at_bary(sub_kind: str, seg_idx: int, bary: float,
     raise ValueError(f"_seg_uv_at_bary: unsupported kind {sub_kind!r}")
 
 
+def _needs_close(domain) -> bool:
+    """True iff `domain.close` can actually move a point — i.e. a rect domain
+    with at least one identified axis. For unidentified rect (and disk/annulus)
+    `close` is a no-op, so callers skip the call entirely (it dominated the
+    resample profile at ~100k no-op invocations on non-periodic surfaces)."""
+    return (
+        domain is not None
+        and getattr(domain, "type", None) == "rect"
+        and (domain.u_identify != "no" or domain.v_identify != "no")
+    )
+
+
 def _close_aware_lerp(a_uv: np.ndarray, b_uv: np.ndarray, t: float, domain) -> np.ndarray:
-    if domain is not None and getattr(domain, "type", None) == "rect":
-        b_loc = domain.close(a_uv, b_uv)
-    else:
-        b_loc = b_uv
+    b_loc = domain.close(a_uv, b_uv) if _needs_close(domain) else b_uv
     return a_uv + float(t) * (b_loc - a_uv)
 
 
@@ -309,7 +318,7 @@ def _build_polyline(
                 cand2 = _seg_uv_at_bary("SIC", int(seg_idx), float(bary),
                                         mesh, css, sis_pairs, cps, dps,
                                         sis_preimage=2)
-                if domain_local is not None and getattr(domain_local, "type", None) == "rect":
+                if _needs_close(domain_local):
                     cand1_close = domain_local.close(prev, cand1)
                     cand2_close = domain_local.close(prev, cand2)
                 else:
@@ -330,7 +339,7 @@ def _build_polyline(
                 and not np.any(np.isnan(sp_start_uv_alt))
                 and first_internal_for_start_pick is not None):
             target = first_internal_for_start_pick
-            if domain_local is not None and getattr(domain_local, "type", None) == "rect":
+            if _needs_close(domain_local):
                 a_close = domain_local.close(target, sp_start_uv)
                 b_close = domain_local.close(target, sp_start_uv_alt)
             else:
@@ -345,7 +354,7 @@ def _build_polyline(
             sp_end_uv_alt = np.asarray(splits.sps[sub.end][4], dtype=float)
             if not np.any(np.isnan(sp_end_uv_alt)):
                 prev = uvs[-1]
-                if domain_local is not None and getattr(domain_local, "type", None) == "rect":
+                if _needs_close(domain_local):
                     a_close = domain_local.close(prev, sp_end_uv)
                     b_close = domain_local.close(prev, sp_end_uv_alt)
                 else:
@@ -357,7 +366,7 @@ def _build_polyline(
 
     # Close-aware adjust consecutive vertices, then lift to xyz/xy.
     domain = getattr(mesh, "domain", None)
-    if domain is not None and getattr(domain, "type", None) == "rect":
+    if _needs_close(domain):
         for i in range(1, len(uvs)):
             uvs[i] = domain.close(uvs[i - 1], uvs[i])
 
@@ -426,7 +435,7 @@ def _uv_for_bc_lift(edge, mesh, uv_sample: np.ndarray) -> np.ndarray:
     same seam-canonical uv (cf. [[bc_lift_patch_match_2026_05_26]]).
     """
     domain = getattr(mesh, "domain", None)
-    if domain is not None and getattr(domain, "type", None) == "rect":
+    if _needs_close(domain):
         p_canonical = mesh.uv[int(edge["p_idx"])]
         return domain.close(p_canonical, uv_sample)
     return uv_sample
@@ -983,7 +992,8 @@ def resample_all(
 
         # SP-less closed SC → verbatim copy.
         if sub.start == -1 and sub.end == -1:
-            depth = np.array([projection.Z(p) for p in xyz_p], dtype=float)
+            depth = (np.asarray(projection.Z(xyz_p), dtype=float)
+                     if len(xyz_p) else np.zeros(0, dtype=float))
             out.append(ResampledCurve(
                 kind=sub.kind, start=-1, end=-1,
                 depth=depth, xy=xy_p.copy(), dir=None,
@@ -1061,7 +1071,8 @@ def resample_all(
                 sample_tan = np.empty((len(sample_uv), 2), dtype=float)
                 for j in range(len(sample_uv)):
                     sample_tan[j] = projection.proj_vec(sample_uv[j], T_3d[j])
-            depth = np.array([projection.Z(p) for p in sample_xyz], dtype=float)
+            depth = (np.asarray(projection.Z(sample_xyz), dtype=float)
+                     if len(sample_xyz) else np.zeros(0, dtype=float))
             out.append(ResampledCurve(
                 kind="HC", start=sub.start, end=sub.end,
                 depth=depth, xy=sample_xy, dir=None, tan=sample_tan,
@@ -1222,7 +1233,8 @@ def resample_all(
                 if float(sample_tan[j] @ chord) < 0.0:
                     sample_tan[j] = -sample_tan[j]
 
-        depth = np.array([projection.Z(p) for p in sample_xyz], dtype=float)
+        depth = (np.asarray(projection.Z(sample_xyz), dtype=float)
+                 if N else np.zeros(0, dtype=float))
         out.append(ResampledCurve(
             kind=sub.kind, start=sub.start, end=sub.end,
             depth=depth, xy=sample_xy, dir=sample_dir, tan=sample_tan,
