@@ -100,9 +100,13 @@ def test_resample_all():
         and len(rc.xy) > 0
     ]
     assert open_rcs, "expected at least one open BC/CC SubCurve"
+    # Per-sample ≥8 check removed 2026-05-29: BC/CC now sample at CPs
+    # verbatim (see [[resume-hc-match-cc]]). Short SCs between two SPs with
+    # no intermediate CPs naturally have only 2 samples — the SP endpoints
+    # ARE the curve geometrically; there is nothing in between.
     for rc in open_rcs:
-        assert len(rc.xy) >= 8, (
-            f"open RC should have ≥8 samples (4/half), got {len(rc.xy)}"
+        assert len(rc.xy) >= 2, (
+            f"open RC must include both SP endpoints, got {len(rc.xy)}"
         )
 
     # ─── sub-assert 2: closed CC (torus side, no SPs would have been added) ─
@@ -129,12 +133,10 @@ def test_resample_all():
     for i, _ in closed_subs:
         rc = rcs_t[i]
         assert rc.start == rc.end and rc.start >= 0
-        # Uniform spacing: arclengths between consecutive samples within ~2×.
-        if len(rc.xy) >= 3:
-            diffs = np.linalg.norm(np.diff(rc.xy, axis=0), axis=1)
-            assert diffs.max() < 3.0 * diffs.min() + 1e-9, (
-                f"closed RC spacing not uniform: min={diffs.min()}, max={diffs.max()}"
-            )
+        # Uniformity-of-spacing check removed 2026-05-29: CCs now use their
+        # CPs verbatim as samples (see [[resume-hc-match-cc]]). CP positions
+        # follow the triangulation contour-chain, not a uniform ladder, so
+        # consecutive xy chord-diffs are not bounded by a small factor.
 
     # ─── sub-assert 3: annular/disk BC snap ─────────────────────────────────
     surf_d = disk_paraboloid_ca(perturb=False)

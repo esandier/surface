@@ -480,14 +480,20 @@ The algorithm is as follows, and is very simple: every curve is cut at SPTs, and
 + `vcin` is computed by taking the `vis_chge` field of the starting SPT, multiplying it by -1 if the initial segment of the curve is reversed, and taking the `min` of the result and 0. Thus `vcin` can be either `0` or `-1`. For `vcout`, take the `vis_chge` field of the ending SPT, multiply it by -1 if the last segment of the curve is **not** reversed, and take the `min` of the result and 0. Here too, `vcout` can be either `0` or `-1`. 
 
 # Curve resampling.
-## Resampeled points.
-Curves need to be resampled because we will compute their intersections in projected space, and these intersections will have discretization artefacts if the segments have non uniform lengths.
+## Resampled points.
+Curves need to be resampled because we will compute their intersections in projected space, and these intersections will have discretization artefacts if the segments have non uniform lengths. Chord-alignment between curves sharing an SP suppresses near-tangent graze phantoms (same-sign break clusters and `+1/-1` pairs that BFS accumulates as visibility errors).
 
-The resampling is done as follows.
+The resampling rule is **per kind**, with arclength inheritance at certain SP types to align chord boundaries between curves that meet there:
 
-For every SP, we consider the curves originating or ending at it, compute the smallest length **in projected space** of these curves, call it `L`. We let `d = min(L/10, M/RESOLUTION)`, where  `M`is an approximation of the diameter of the surface in projected space and `RESOLUTION` is the resampling density (distinct from the mesh `GRID_RESOLUTION`). Then every curve is cut in its middle (with respect to arclength in projected space). On each half curve, points are placed at arclengths coordinates `0,d,2d,3d,...` until we reach `L/2 - d` (by definition of `d`, there are at least 4 points per half-curve).
+**CC (contour curve).** Samples = the SubCurve's own raw CPs verbatim. The CPs come from `find_contour_points` (Newton-refined), so they lie on the true contour. The CC defines the authoritative arclength ladder at every SP it ends at.
 
-**SP-less SubCurves.** A SubCurve with no Split Points at all (closed parent whose component was alone — e.g., a flat disk with only its boundary curve, no silhouette and no helper curve) is passed through to the resampled output without subdivision. Its polyline is taken verbatim from the chain. There is no `L` to derive a step size from, and no SP to anchor at.
+**BC (boundary curve).** Samples = the SubCurve's own raw CPs (mesh-boundary vertices crossed by the chain), **plus** inherited CC arclengths near each endpoint that is a **BCP**. Specifically: at each endpoint SP of kind `bcp`, find the unique CC ending at that BCP whose outgoing image-space tangent has positive dot product with the BC's outgoing tangent (the "tangent-aligned" BC arc at the BCP). On that winning BC arc, add samples at xy-arclengths from the BCP equal to the CC's CP xy-arclengths from the BCP, capped at `L_BC / 2` to avoid overlap with the inheritance from the other endpoint. The losing BC arc (whose tangent is antiparallel to the CC's) has no positive-aligned neighbour at this BCP and keeps only its own CPs.
+
+The rule does **not** apply at BCs' corner endpoints, BDPs, CDPs, or any non-BCP SP.
+
+**HC (helper curve).** At each HC endpoint (an HA), tangent-pick among all non-HC SubCurves incident at the HA — typically the two halves of the CC the HA is anchored to. The winner is the half whose outgoing tangent has the largest positive dot product with the HC's outgoing tangent. Resample the HC's emanating half at xy-arclengths from the HA equal to the winning CC half's CP xy-arclengths from the HA, capped at `L_HC / 2`. If no neighbour aligns (degenerate), fall back on the standard tapered ladder `d_k = min(k·δ, ell)` with `δ = (min incident SC length)/10` and `ell = M / RESOLUTION` on that half.
+
+**SP-less SubCurves.** A SubCurve with no Split Points at all (closed parent whose component was alone — e.g., a flat disk with only its boundary curve, no silhouette and no helper curve) is passed through to the resampled output without subdivision. Its polyline is taken verbatim from the chain.
 
 
 ## Projection of the new points.

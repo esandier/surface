@@ -715,6 +715,186 @@ def _sample_arclengths(L_total: float, ell: float,
     return np.array(sorted(set(start + end)))
 
 
+def _sub_outgoing_xy_tangent(sub, sp_idx: int, xy_p: np.ndarray):
+    """Image-space outgoing tangent of a non-HC sub at SP `sp_idx`, normalised
+    to point AWAY from SP into the curve. Returns None if the polyline has no
+    non-zero-length step on the relevant side.
+    """
+    if len(xy_p) < 2:
+        return None
+    if sp_idx == sub.start:
+        anchor = xy_p[0]
+        for k in range(1, len(xy_p)):
+            d = xy_p[k] - anchor
+            n = float(np.linalg.norm(d))
+            if n > 0:
+                return d / n
+    elif sp_idx == sub.end:
+        anchor = xy_p[-1]
+        for k in range(len(xy_p) - 2, -1, -1):
+            d = xy_p[k] - anchor
+            n = float(np.linalg.norm(d))
+            if n > 0:
+                return d / n
+    return None
+
+
+def _pick_neighbour_arclengths(
+    sp_idx: int, T_self: np.ndarray, subcurves, polys, half_L: float,
+    exclude_kinds=("HC",), self_idx: int | None = None,
+):
+    """Tangent-pick: among subs incident at sp_idx whose kind is NOT in
+    `exclude_kinds` and whose index is not `self_idx`, pick the one with the
+    largest T_sub · T_self (must be > 0). Return its near-SP CP arclengths in
+    (0, half_L]. Returns None when no positive-aligned neighbour exists
+    (degenerate; caller falls back to its own ladder).
+    """
+    if T_self is None:
+        return None
+    exclude_set = set(exclude_kinds)
+    candidates = []
+    for i, sub in enumerate(subcurves):
+        if sub.kind in exclude_set:
+            continue
+        if self_idx is not None and i == self_idx:
+            continue
+        if sub.start != sp_idx and sub.end != sp_idx:
+            continue
+        xy_p = polys[i][2]
+        T = _sub_outgoing_xy_tangent(sub, sp_idx, xy_p)
+        if T is None:
+            continue
+        dotp = float(np.dot(T, T_self))
+        candidates.append((dotp, i, sub, xy_p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (-x[0], x[1]))
+    best_dot, best_i, best_sub, xy_p = candidates[0]
+    if best_dot <= 0:
+        return None
+    diffs = xy_p[1:] - xy_p[:-1]
+    seg_len = np.sqrt(np.einsum("ij,ij->i", diffs, diffs))
+    cum = np.concatenate(([0.0], np.cumsum(seg_len)))
+    L_sub = float(cum[-1])
+    if best_sub.start == sp_idx:
+        arc_from_sp = cum
+    else:
+        arc_from_sp = L_sub - cum
+    arcs = arc_from_sp[(arc_from_sp > 0) & (arc_from_sp <= half_L)]
+    return np.sort(np.unique(arcs))
+
+
+def _hc_s_targets(
+    sub_hc, i_hc: int, subcurves, polys,
+    surface, projection,
+    L_xy_total: float, ell: float, delta_s: float, delta_e: float,
+) -> np.ndarray:
+    """HC sample arclengths using the tangent-pick / arclength-match rule.
+
+    At each of the HC's two endpoint SPs, find the non-HC sub incident there
+    whose outgoing image tangent is closest to T_HC (largest dot product).
+    Inherit its near-SP CP arclengths in (0, L_xy_total/2]. If no such
+    neighbour exists (no positive-dot alignment), fall back to the standard
+    `_sample_arclengths` ladder on that half. See [[resume-hc-match-cc]].
+    """
+    uv_q0 = polys[i_hc][0][0]
+    uv_q1 = polys[i_hc][0][1]
+    duv = uv_q1 - uv_q0
+
+    def _T_HC_at(uv_sp: np.ndarray, duv_signed: np.ndarray):
+        Su = np.asarray(surface.Su(uv_sp[0], uv_sp[1]), dtype=float).ravel()
+        Sv = np.asarray(surface.Sv(uv_sp[0], uv_sp[1]), dtype=float).ravel()
+        T_3d = duv_signed[0] * Su + duv_signed[1] * Sv
+        T_xy = projection.proj_vec(uv_sp, T_3d)
+        n = float(np.linalg.norm(T_xy))
+        return None if n == 0 else T_xy / n
+
+    T_start = _T_HC_at(uv_q0, +duv)
+    T_end   = _T_HC_at(uv_q1, -duv)
+    half_L = L_xy_total / 2.0
+
+    start_arcs = _pick_neighbour_arclengths(
+        sub_hc.start, T_start, subcurves, polys, half_L,
+        exclude_kinds=("HC",), self_idx=i_hc,
+    )
+    end_arcs = _pick_neighbour_arclengths(
+        sub_hc.end, T_end, subcurves, polys, half_L,
+        exclude_kinds=("HC",), self_idx=i_hc,
+    )
+
+    s_set = {0.0, float(L_xy_total)}
+    std_ladder = None
+    if start_arcs is None:
+        std_ladder = _sample_arclengths(L_xy_total, ell, delta_s, delta_e, False)
+        for s in std_ladder:
+            if 0.0 < float(s) <= half_L:
+                s_set.add(float(s))
+    else:
+        for a in start_arcs:
+            s_set.add(float(a))
+    if end_arcs is None:
+        if std_ladder is None:
+            std_ladder = _sample_arclengths(L_xy_total, ell, delta_s, delta_e, False)
+        for s in std_ladder:
+            if half_L <= float(s) < L_xy_total:
+                s_set.add(float(s))
+    else:
+        for a in end_arcs:
+            s_set.add(float(L_xy_total - a))
+
+    return np.array(sorted(s_set), dtype=float)
+
+
+def _bc_s_targets(
+    sub_bc, i_bc: int, subcurves, polys, splits,
+    L_total: float, own_cum: np.ndarray,
+) -> np.ndarray:
+    """BC sample arclengths via tangent-pick at BCP endpoints only.
+
+    At each BC endpoint that is a **BCP** (BC × CC tangent boundary contact),
+    tangent-pick the CC ending at the BCP whose outgoing image tangent aligns
+    with the BC's outgoing tangent. Inherit its near-SP CP arclengths in
+    (0, L_total/2] and UNION them into the BC's own CP set, shortening the
+    BC's first/last chord so it doesn't reach into grazing-neighbour
+    territory. The BC keeps all its native CPs.
+
+    The rule does NOT apply at corners, BDPs, CDPs, or other non-BCP SPs.
+    See [[resume-hc-match-cc]].
+    """
+    if sub_bc.start < 0 or sub_bc.end < 0:
+        return own_cum.copy()
+    xy_p = polys[i_bc][2]
+    half_L = L_total / 2.0
+    s_set = {float(s) for s in own_cum}
+
+    def _sp_is_bcp(sp_idx: int) -> bool:
+        try:
+            t = str(splits.sps[sp_idx][3])
+        except (IndexError, TypeError):
+            return False
+        return t == "bcp"
+
+    if _sp_is_bcp(sub_bc.start):
+        T_start = _sub_outgoing_xy_tangent(sub_bc, sub_bc.start, xy_p)
+        start_arcs = _pick_neighbour_arclengths(
+            sub_bc.start, T_start, subcurves, polys, half_L,
+            exclude_kinds=("BC", "HC", "SIC"), self_idx=i_bc,
+        )
+        if start_arcs is not None:
+            for a in start_arcs:
+                s_set.add(float(a))
+    if _sp_is_bcp(sub_bc.end):
+        T_end = _sub_outgoing_xy_tangent(sub_bc, sub_bc.end, xy_p)
+        end_arcs = _pick_neighbour_arclengths(
+            sub_bc.end, T_end, subcurves, polys, half_L,
+            exclude_kinds=("BC", "HC", "SIC"), self_idx=i_bc,
+        )
+        if end_arcs is not None:
+            for a in end_arcs:
+                s_set.add(float(L_total - a))
+    return np.array(sorted(s_set), dtype=float)
+
+
 def resample_all(
     subcurves: "list[SubCurve]",
     surface: "SurfaceParams",
@@ -832,7 +1012,11 @@ def resample_all(
 
             delta_s = delta_per_sp.get(sub.start, ell)
             delta_e = delta_per_sp.get(sub.end, ell)
-            s_targets = _sample_arclengths(L_xy_total, ell, delta_s, delta_e, False)
+            s_targets = _hc_s_targets(
+                sub, i, subcurves, polys,
+                surface, projection,
+                L_xy_total, ell, delta_s, delta_e,
+            )
 
             sample_uv = np.empty((len(s_targets), 2), dtype=float)
             sample_xyz = np.empty((len(s_targets), 3), dtype=float)
@@ -851,16 +1035,36 @@ def resample_all(
                 uv_s = uv_q0 + t * (uv_q1 - uv_q0)
                 sample_uv[j] = uv_s
             # Batched sample xyz/xy for all selected samples.
+            sample_tan = None
             if len(sample_uv):
                 S_samples = np.asarray(
                     surface.S(sample_uv[:, 0], sample_uv[:, 1]), dtype=float,
                 )
                 sample_xyz[:] = S_samples.T
                 sample_xy[:] = projection.XY(sample_xyz)
+                # Analytic image-space tangent: lift the constant uv-line
+                # direction via S_u·Δu + S_v·Δv at each sample, then project.
+                # Replaces the chord fallback in compute_projection_breaks
+                # (xy[k+1]-xy[k]), which shares one coarse tangent across all
+                # crossings inside the same segment and breaks dv-sign
+                # alternation when multiple breaks land in one segment.
+                duv = uv_q1 - uv_q0
+                Su_samples = np.asarray(
+                    surface.Su(sample_uv[:, 0], sample_uv[:, 1]),
+                    dtype=float,
+                ).T  # (N, 3)
+                Sv_samples = np.asarray(
+                    surface.Sv(sample_uv[:, 0], sample_uv[:, 1]),
+                    dtype=float,
+                ).T  # (N, 3)
+                T_3d = duv[0] * Su_samples + duv[1] * Sv_samples
+                sample_tan = np.empty((len(sample_uv), 2), dtype=float)
+                for j in range(len(sample_uv)):
+                    sample_tan[j] = projection.proj_vec(sample_uv[j], T_3d[j])
             depth = np.array([projection.Z(p) for p in sample_xyz], dtype=float)
             out.append(ResampledCurve(
                 kind="HC", start=sub.start, end=sub.end,
-                depth=depth, xy=sample_xy, dir=None,
+                depth=depth, xy=sample_xy, dir=None, tan=sample_tan,
                 vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
             ))
             continue
@@ -868,9 +1072,21 @@ def resample_all(
         # Pick sample arclengths (two-phase tapered spacing).
         delta_s = delta_per_sp.get(sub.start, ell)
         delta_e = delta_per_sp.get(sub.end, ell)
-        s_targets = _sample_arclengths(L_total, ell, delta_s, delta_e, sub.is_closed)
-
         cum = _arclengths(xy_p)
+        if sub.kind == "CC":
+            # CC samples = polyline vertices verbatim. The CPs are already on
+            # the true contour (find_contour_points uses Newton). The CC
+            # defines the authoritative arclength ladder at each shared SP;
+            # BCs and HCs inherit it via tangent-pick at BCPs / HAs.
+            # See [[resume-hc-match-cc]].
+            s_targets = cum.copy()
+        elif sub.kind == "BC":
+            # BC samples = own CPs + inherited CC arclengths near BCPs.
+            # See `_bc_s_targets` for the tangent-pick rule.
+            s_targets = _bc_s_targets(sub, i, subcurves, polys, splits,
+                                       L_total, cum)
+        else:
+            s_targets = _sample_arclengths(L_total, ell, delta_s, delta_e, sub.is_closed)
         N = len(s_targets)
         sample_uv = np.zeros((N, 2), dtype=float)
         sample_xyz = np.zeros((N, 3), dtype=float)

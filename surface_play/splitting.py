@@ -1115,27 +1115,45 @@ def _split_one_chain(
         # The last marker's OUT-side becomes the first marker's OUT-side.
         markers[0] = (first[0], last[1], last[2], last[3], first[4], first[5], first[6])
 
-    def _internal_forward(cp_a: int, cp_b: int, wrap: bool) -> list[tuple[int, float]]:
+    def _internal_forward(cp_a: int, cp_b: int, wrap: bool,
+                          in_bc: float | None = None,
+                          out_bc: float | None = None) -> list[tuple[int, float]]:
         """Segment-end intermediate points for an arc starting in segment cp_a
         and ending in segment cp_b. Each entry is (abs_seg_idx, segment_local_bary)
         — the end of segment j in chain-traversal direction, expressed in the
         segment's NATIVE parameterization (1.0 if the segment is forward in the
         chain, 0.0 if reversed). O14 reads uv as `seg.p + bary * seg.pq` directly.
+
+        When the start marker sits at the END of cp_a in chain direction
+        (in_bc == 1.0), the j=cp_a entry would duplicate the start SP — drop it.
+        Symmetrically, when the end marker sits at the START of cp_b in chain
+        direction (out_bc == 0.0), the j=cp_b-1 entry would duplicate the end
+        SP — drop it. Without this, `_build_polyline` produces zero-length
+        tail/head segments at vertex-located SPTs (e.g., HAs).
         """
         pts: list[tuple[int, float]] = []
         def _end_bary(j: int) -> float:
             return 1.0 if int(signs[j]) > 0 else 0.0
+        skip_first = (in_bc is not None and in_bc == 1.0)
+        skip_last = (out_bc is not None and out_bc == 0.0)
         if not wrap:
             if cp_a == cp_b:
                 return pts
-            for j in range(cp_a, cp_b):
+            j_lo = cp_a + 1 if skip_first else cp_a
+            j_hi = cp_b - 1 if skip_last else cp_b
+            for j in range(j_lo, j_hi):
                 pts.append((int(abs_segs[j]), _end_bary(j)))
             return pts
         # Wrap: walk forward (mod N_seg) from cp_a, stop when we'd re-enter cp_b.
         j = cp_a
+        is_first = True
         while True:
-            pts.append((int(abs_segs[j]), _end_bary(j)))
+            will_be_last = (((j + 1) % N_seg) == cp_b)
+            skip_this = (is_first and skip_first) or (will_be_last and skip_last)
+            if not skip_this:
+                pts.append((int(abs_segs[j]), _end_bary(j)))
             j = (j + 1) % N_seg
+            is_first = False
             if j == cp_b:
                 break
         return pts
@@ -1176,7 +1194,8 @@ def _split_one_chain(
                 else:
                     wrap = in_bc_a > out_bc_b
 
-            internal = _internal_forward(in_cp_a, out_cp_b, wrap)
+            internal = _internal_forward(in_cp_a, out_cp_b, wrap,
+                                         in_bc=in_bc_a, out_bc=out_bc_b)
 
             sign_in = int(signs[in_cp_a])
             sign_out = int(signs[out_cp_b])
@@ -1203,7 +1222,8 @@ def _split_one_chain(
         sp_b = int(nxt[0])
         out_cp_b, out_bc_b, out_vc_b = int(nxt[1]), float(nxt[2]), int(nxt[3])
 
-        internal = _internal_forward(in_cp_a, out_cp_b, wrap=False)
+        internal = _internal_forward(in_cp_a, out_cp_b, wrap=False,
+                                     in_bc=in_bc_a, out_bc=out_bc_b)
         sign_in = int(signs[in_cp_a])
         sign_out = int(signs[out_cp_b])
         vc_in = min(0, sign_in * in_vc_a)
