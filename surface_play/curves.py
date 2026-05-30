@@ -225,6 +225,7 @@ class ResampledCurve:
     tan: Optional[np.ndarray] = None  # (N, 2) analytic TANGENT in image; BC/CC only
     vc_in: int = 0
     vc_out: int = 0
+    uv: Optional[np.ndarray] = None   # (N, 2) canonical domain preimage of each sample
 
 
 def _seg_uv_at_bary(sub_kind: str, seg_idx: int, bary: float,
@@ -411,6 +412,56 @@ def _interp_along_polyline(
     uv_b = uv_poly[seg + 1]
     uv = _close_aware_lerp(uv_a, uv_b, alpha, domain)
     return uv, seg, alpha
+
+
+# Subdivisions per BC build-polyline segment for arclength-accurate resampling
+# (see _densify_bc_polyline). Each boundary mesh-edge segment is split into this
+# many pieces in uv so the cumulative arclength tracks the true projected curve
+# through a fold. One batched surface eval over the dense uv — cheap.
+_BC_DENSIFY_NSUB = 24
+
+
+def _densify_bc_polyline(uv_p: np.ndarray, surface, projection, domain,
+                         n_sub: int):
+    """Densify a BC build-polyline for arclength-accurate resampling.
+
+    The BC build-polyline has one vertex per boundary mesh edge — far too
+    coarse to track the true projected curve near a *projection fold* (an
+    apparent-contour extremity / BCP), where uv→image is near-singular and the
+    surface bends sharply away from the straight build-polyline chord. The
+    coarse `cum = _arclengths(xy_p)` then mis-measures arclength inside the
+    first segment, so the BCP arclength-match (`_bc_s_targets` inheriting the
+    CC ladder) reprojects to the wrong positions and the BC/CC image polylines
+    weave (spurious projection-break visibility changes). See
+    [[bfs-foldtip-weaving-2026-05-30]].
+
+    Each original segment is subdivided into exactly `n_sub` pieces *linear in
+    uv* (a BC segment is a straight uv line along the domain boundary), so the
+    original segment that owns dense segment `d` is simply `d // n_sub` — this
+    preserves the seg→mesh-edge mapping the BC inward-normal `dir` relies on.
+    Mirrors the dense-reparam the HC branch already uses (curves.py HC path).
+
+    Returns `(uv_dense, xy_dense, cum_dense)` where `cum_dense` is an accurate
+    cumulative xy-arclength. The original vertex k sits at dense index
+    `k * n_sub`.
+    """
+    M = len(uv_p)
+    if M < 2 or n_sub < 1:
+        xy = projection.XY(np.ascontiguousarray(
+            np.asarray(surface.S(uv_p[:, 0], uv_p[:, 1]), dtype=float).T))
+        return uv_p.copy(), xy, _arclengths(xy)
+    # Build dense uv: start vertex + n_sub interior+end points per segment.
+    pieces = [uv_p[:1]]
+    for k in range(M - 1):
+        a = uv_p[k]; b = uv_p[k + 1]
+        t = (np.arange(1, n_sub + 1) / float(n_sub))[:, None]
+        pieces.append(a[None, :] + t * (b - a)[None, :])
+    uv_dense = np.ascontiguousarray(np.vstack(pieces))
+    S = np.asarray(surface.S(uv_dense[:, 0], uv_dense[:, 1]), dtype=float)
+    xyz_dense = np.ascontiguousarray(S.T)
+    xy_dense = projection.XY(xyz_dense)
+    cum_dense = _arclengths(xy_dense)
+    return uv_dense, xy_dense, cum_dense
 
 
 def _snap_annular_bc(uv: np.ndarray, mesh) -> np.ndarray:
@@ -998,6 +1049,7 @@ def resample_all(
                 kind=sub.kind, start=-1, end=-1,
                 depth=depth, xy=xy_p.copy(), dir=None,
                 vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
+                uv=uv_p.copy() if len(uv_p) else uv_p,
             ))
             continue
 
@@ -1077,6 +1129,7 @@ def resample_all(
                 kind="HC", start=sub.start, end=sub.end,
                 depth=depth, xy=sample_xy, dir=None, tan=sample_tan,
                 vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
+                uv=sample_uv.copy(),
             ))
             continue
 
@@ -1084,6 +1137,13 @@ def resample_all(
         delta_s = delta_per_sp.get(sub.start, ell)
         delta_e = delta_per_sp.get(sub.end, ell)
         cum = _arclengths(xy_p)
+        # Per-kind interpolation polyline. BC densifies for arclength accuracy
+        # near projection folds (see _densify_bc_polyline); CC/SIC interpolate
+        # against their own (already-fine) build-polyline. `interp_nsub` maps a
+        # dense segment index back to the original segment via `// interp_nsub`,
+        # preserving the seg→mesh-edge mapping the BC `dir` lookup needs.
+        interp_uv, interp_xy, interp_cum = uv_p, xy_p, cum
+        interp_nsub = 1
         if sub.kind == "CC":
             # CC samples = polyline vertices verbatim. The CPs are already on
             # the true contour (find_contour_points uses Newton). The CC
@@ -1092,10 +1152,17 @@ def resample_all(
             # See [[resume-hc-match-cc]].
             s_targets = cum.copy()
         elif sub.kind == "BC":
+            interp_nsub = _BC_DENSIFY_NSUB
+            interp_uv, interp_xy, interp_cum = _densify_bc_polyline(
+                uv_p, surface, projection, domain, interp_nsub)
+            # Native-vertex arclengths in the ACCURATE metric (dense vertex k
+            # lives at index k*interp_nsub) — so own CPs and inherited CC arcs
+            # share one consistent arclength scale.
+            native_arc = interp_cum[np.arange(len(uv_p)) * interp_nsub]
             # BC samples = own CPs + inherited CC arclengths near BCPs.
             # See `_bc_s_targets` for the tangent-pick rule.
             s_targets = _bc_s_targets(sub, i, subcurves, polys, splits,
-                                       L_total, cum)
+                                       float(interp_cum[-1]), native_arc)
         else:
             s_targets = _sample_arclengths(L_total, ell, delta_s, delta_e, sub.is_closed)
         N = len(s_targets)
@@ -1121,7 +1188,10 @@ def resample_all(
         seg_ps = np.zeros(N, dtype=np.int64)
         alphas = np.zeros(N, dtype=float)
         for j, s in enumerate(s_targets):
-            uv_s, seg_p, alpha = _interp_along_polyline(uv_p, xy_p, cum, s, domain)
+            uv_s, dseg, alpha = _interp_along_polyline(
+                interp_uv, interp_xy, interp_cum, s, domain)
+            # Map dense segment back to the original build-polyline segment.
+            seg_p = dseg // interp_nsub
             if (sub.kind == "BC" and domain is not None
                     and getattr(domain, "type", None) in ("disk", "annulus")):
                 uv_s = _snap_annular_bc(uv_s, mesh)
@@ -1239,6 +1309,7 @@ def resample_all(
             kind=sub.kind, start=sub.start, end=sub.end,
             depth=depth, xy=sample_xy, dir=sample_dir, tan=sample_tan,
             vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
+            uv=sample_uv.copy(),
         ))
 
     return out
