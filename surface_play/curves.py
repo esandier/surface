@@ -808,15 +808,20 @@ def _sub_outgoing_xy_tangent(sub, sp_idx: int, xy_p: np.ndarray):
 def _pick_neighbour_arclengths(
     sp_idx: int, T_self: np.ndarray, subcurves, polys, half_L: float,
     exclude_kinds=("HC",), self_idx: int | None = None,
+    return_length: bool = False,
 ):
     """Tangent-pick: among subs incident at sp_idx whose kind is NOT in
     `exclude_kinds` and whose index is not `self_idx`, pick the one with the
     largest T_sub · T_self (must be > 0). Return its near-SP CP arclengths in
     (0, half_L]. Returns None when no positive-aligned neighbour exists
     (degenerate; caller falls back to its own ladder).
+
+    If `return_length` is True, return `(arcs, L_neighbour)` instead of `arcs`
+    (and `(None, None)` on the degenerate paths) so the caller can cap the
+    matched region at the neighbour's own half (`_bc_s_targets`).
     """
     if T_self is None:
-        return None
+        return (None, None) if return_length else None
     exclude_set = set(exclude_kinds)
     candidates = []
     for i, sub in enumerate(subcurves):
@@ -833,11 +838,11 @@ def _pick_neighbour_arclengths(
         dotp = float(np.dot(T, T_self))
         candidates.append((dotp, i, sub, xy_p))
     if not candidates:
-        return None
+        return (None, None) if return_length else None
     candidates.sort(key=lambda x: (-x[0], x[1]))
     best_dot, best_i, best_sub, xy_p = candidates[0]
     if best_dot <= 0:
-        return None
+        return (None, None) if return_length else None
     diffs = xy_p[1:] - xy_p[:-1]
     seg_len = np.sqrt(np.einsum("ij,ij->i", diffs, diffs))
     cum = np.concatenate(([0.0], np.cumsum(seg_len)))
@@ -847,7 +852,8 @@ def _pick_neighbour_arclengths(
     else:
         arc_from_sp = L_sub - cum
     arcs = arc_from_sp[(arc_from_sp > 0) & (arc_from_sp <= half_L)]
-    return np.sort(np.unique(arcs))
+    arcs_sorted = np.sort(np.unique(arcs))
+    return (arcs_sorted, L_sub) if return_length else arcs_sorted
 
 
 def _hc_s_targets(
@@ -919,10 +925,19 @@ def _bc_s_targets(
 
     At each BC endpoint that is a **BCP** (BC × CC tangent boundary contact),
     tangent-pick the CC ending at the BCP whose outgoing image tangent aligns
-    with the BC's outgoing tangent. Inherit its near-SP CP arclengths in
-    (0, L_total/2] and UNION them into the BC's own CP set, shortening the
-    BC's first/last chord so it doesn't reach into grazing-neighbour
-    territory. The BC keeps all its native CPs.
+    with the BC's outgoing tangent, and adopt that CC's vertex arclengths-from-
+    the-SP as the BC's samples (REPLACING — not unioning — the BC's own raw
+    vertices) out to `min(L_BC/2, L_CC/2)`, whichever half comes first. Beyond
+    that matched extent (the un-matched middle) the BC reverts to its own raw
+    vertices (`own_cum`).
+
+    Rationale: at a BCP the BC and the tangent CC are near-coincident in the
+    image; sampling them at *identical* arclengths-from-the-shared-origin makes
+    their polylines coincide, so they cannot weave (the old UNION kept the BC's
+    own vertices in the matched region, which bulged off the CC's chord and
+    produced spurious grazing crossings — the Onde fold-tip "lune" ±4 defect).
+    For a lune (both endpoints share the same CC, near-equal lengths) the two
+    matched halves meet → the BC becomes a vertex-exact copy of the CC.
 
     The rule does NOT apply at corners, BDPs, CDPs, or other non-BCP SPs.
     See [[resume-hc-match-cc]].
@@ -931,7 +946,6 @@ def _bc_s_targets(
         return own_cum.copy()
     xy_p = polys[i_bc][2]
     half_L = L_total / 2.0
-    s_set = {float(s) for s in own_cum}
 
     def _sp_is_bcp(sp_idx: int) -> bool:
         try:
@@ -940,24 +954,39 @@ def _bc_s_targets(
             return False
         return t == "bcp"
 
+    # Matched region from each BCP end: CC vertex arclengths-from-SP, capped at
+    # min(BC half, CC half). `ext_*` is the matched extent (0 = no match).
+    ext_start = 0.0
+    ext_end = 0.0
+    matched: list[float] = []  # arclengths-from-the-BC-start of matched samples
+
     if _sp_is_bcp(sub_bc.start):
         T_start = _sub_outgoing_xy_tangent(sub_bc, sub_bc.start, xy_p)
-        start_arcs = _pick_neighbour_arclengths(
+        start_arcs, L_cc = _pick_neighbour_arclengths(
             sub_bc.start, T_start, subcurves, polys, half_L,
             exclude_kinds=("BC", "HC", "SIC"), self_idx=i_bc,
+            return_length=True,
         )
         if start_arcs is not None:
-            for a in start_arcs:
-                s_set.add(float(a))
+            ext_start = min(half_L, L_cc / 2.0)
+            matched.extend(float(a) for a in start_arcs if a <= ext_start)
     if _sp_is_bcp(sub_bc.end):
         T_end = _sub_outgoing_xy_tangent(sub_bc, sub_bc.end, xy_p)
-        end_arcs = _pick_neighbour_arclengths(
+        end_arcs, L_cc = _pick_neighbour_arclengths(
             sub_bc.end, T_end, subcurves, polys, half_L,
             exclude_kinds=("BC", "HC", "SIC"), self_idx=i_bc,
+            return_length=True,
         )
         if end_arcs is not None:
-            for a in end_arcs:
-                s_set.add(float(L_total - a))
+            ext_end = min(half_L, L_cc / 2.0)
+            matched.extend(float(L_total - a) for a in end_arcs if a <= ext_end)
+
+    s_set = {0.0, float(L_total)}
+    s_set.update(matched)
+    # Un-matched middle: BC's own raw vertices strictly outside both matched
+    # regions [0, ext_start] and [L_total - ext_end, L_total].
+    lo, hi = ext_start, L_total - ext_end
+    s_set.update(float(c) for c in own_cum if lo < float(c) < hi)
     return np.array(sorted(s_set), dtype=float)
 
 
