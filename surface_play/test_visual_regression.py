@@ -115,6 +115,39 @@ def _viewpoints_for(name: str) -> list[tuple[list, list, list | None]]:
 # ── Legacy and new outline drivers ───────────────────────────────────────────
 
 
+# Path to the retired legacy module. Kept out of `surface_play/` (W5) so it is
+# never importable as part of the package; loaded by file path on demand for
+# the `record` baseline path only.
+_LEGACY_SILHOUETTE_PATH = _REPO_ROOT / "old stuff" / "silhouette_legacy.py"
+
+
+def _load_legacy_surface():
+    """Import `Surface` from the retired `old stuff/silhouette_legacy.py`.
+
+    The folder name contains a space, so a normal `import` is impossible —
+    load by file path via importlib. Cached on the function object so repeated
+    record-mode calls don't re-exec the heavy module.
+    """
+    cached = getattr(_load_legacy_surface, "_cached", None)
+    if cached is not None:
+        return cached
+    import importlib.util
+
+    if not _LEGACY_SILHOUETTE_PATH.exists():
+        raise FileNotFoundError(
+            f"legacy silhouette module not found at {_LEGACY_SILHOUETTE_PATH}. "
+            f"It was retired here in W5; record mode needs it to regenerate "
+            f"baselines (check mode does not)."
+        )
+    spec = importlib.util.spec_from_file_location(
+        "silhouette_legacy", _LEGACY_SILHOUETTE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _load_legacy_surface._cached = module.Surface
+    return module.Surface
+
+
 def _legacy_outline(name: str, I, J, eye) -> dict[str, list]:
     """Run silhouette.Surface.traitement and shape its output to the new format.
 
@@ -123,8 +156,10 @@ def _legacy_outline(name: str, I, J, eye) -> dict[str, list]:
     everything lands in one dict (matches the merged view the comparator
     uses on the new side).
     """
-    # Lazy import — silhouette.py is heavy and not needed for `check` mode.
-    from surface_play.silhouette import Surface
+    # Lazy import — the legacy module is heavy and not needed for `check`
+    # mode. It was retired to `old stuff/silhouette_legacy.py` in W5; the
+    # folder name has a space, so load it by file path via importlib.
+    Surface = _load_legacy_surface()
 
     fields = _FIXTURE_RECORD_DICTS[name]
     bounds = (fields["u_min"], fields["u_max"], fields["v_min"], fields["v_max"])

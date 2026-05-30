@@ -1,5 +1,7 @@
 # General goal of the app: plot a contour outline of a parametrized surface S.
 
+> **Status (W5, 2026-05-30): `silhouette.py` retired.** The modular rewrite (Layers C/O/W) is complete and is now the sole production path (`surface_play/pipeline.py`, `views.py`, `thumbnail.py`). The legacy monolith was moved to `old stuff/silhouette_legacy.py` (history preserved via `git mv`); it is no longer importable as part of the package. It is loaded by file path only by the visual-regression *record* path (`test_visual_regression.py`) to regenerate baselines — check-mode pytest does not need it.
+
 This file describes an app to compute the outline of the surface. Currently, it is partially and mainly implemented in the file silhouette.py, with the html templates located elsewhere. However several attempts to start from this file to add self-intersection logic have failed.
 
 I would like Claude to refactor the code, only using the current silhouette.py as extra information. The present file remains the true specification of the app, the bible. Claude should not hesitate to diverge from silhouette.py implementation choices if it serves unification of functions, streamlining and performance. However I am quite happy with the frontend. It should not be  modified in a way that would significantly change the user experience. Also, silhouette.py actually works, and is quite good at what it does. Therefore, for logic which does not involve self-intersections, it can be used to clarify points which are not detailed in this document. 
