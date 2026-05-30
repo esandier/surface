@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 
+from django.conf import settings as django_settings
 from django.http import (
     HttpResponse,
     HttpResponseBadRequest,
@@ -120,7 +121,9 @@ def _play_get(request, record: SurfaceRecord) -> HttpResponse:
         "initial_inplane": record.initial_inplane,
         "initial_zoom": record.initial_zoom,
         "initial_perspective": record.initial_perspective,
-        "debug_ui": True,
+        # Debug panel toggle is dev-only; hidden when DEBUG=False (production).
+        # NB: Django's settings (django.conf), not the app's surface_play.settings.
+        "debug_ui": django_settings.DEBUG,
     })
     return render(request, "play.html", ctx)
 
