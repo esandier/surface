@@ -10,6 +10,7 @@ No silhouette imports (W2 sign-off gate, test 10).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import Any
@@ -49,35 +50,81 @@ _OUTLINE_DEBUG_KEY_MAP = {
     "PROJECT_RESAMPLED": "project_resampled",
 }
 
+# Debug keys that map directly to `surface_play.settings` constants which have
+# no per-call kwarg (they're read deep in the outline phase). The panel can
+# tweak them via a scoped, per-request override of the module attribute (see
+# `_override_app_settings`). Safe because all are read in the OUTLINE phase
+# (not the LRU-cached construction), so no stale-cache risk.
+_SETTINGS_OVERRIDE_KEYS = {"BC_DENSIFY_NSUB", "HC_DENSIFY_N", "HA_CUSP_TRIM"}
+
+
+@contextlib.contextmanager
+def _override_app_settings(overrides: dict[str, Any]):
+    """Temporarily set `surface_play.settings` attributes for one request.
+
+    Debug-panel only. Restores the originals in a finally block. Single-request
+    scope is fine under gunicorn's sync workers; the overridable knobs affect
+    only the (non-cached) outline build, so a temporary change can't poison the
+    construction LRU cache.
+    """
+    if not overrides:
+        yield
+        return
+    saved: dict[str, Any] = {}
+    try:
+        for k, v in overrides.items():
+            saved[k] = getattr(_settings, k)
+            setattr(_settings, k, v)
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(_settings, k, v)
+
 
 def _debug_kwargs(
     debug: dict[str, Any] | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Split `debug` dict into (init_kwargs, outline_kwargs).
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Split `debug` dict into (init_kwargs, outline_kwargs, settings_overrides).
 
     - `RESOLUTION`: per settings.py the single resolution knob drives both the
       mesh (build_surface_init) and the outline sampling (build_outline). Routed
       to both so a slider change rebuilds the construction *and* matches the
       outline density.
+    - `JITTER` (bool) / `SEED` (int) → construction kwargs on build_surface_init
+      (mesh jitter on/off + deterministic seed). Empty/None SEED → omit (random).
     - Outline-only keys (PROPAGATION, NEWTON_CUSP, PROJECT_RESAMPLED) routed
       via `_OUTLINE_DEBUG_KEY_MAP`.
+    - `_SETTINGS_OVERRIDE_KEYS` (BC_DENSIFY_NSUB, HC_DENSIFY_N, HA_CUSP_TRIM) →
+      scoped per-request override of the matching settings constant.
     - Unknown keys logged at WARNING and ignored (preserve client compat).
     """
     init_out: dict[str, Any] = {}
     outline_out: dict[str, Any] = {}
+    settings_overrides: dict[str, Any] = {}
     if not debug:
-        return init_out, outline_out
+        return init_out, outline_out, settings_overrides
     for k, v in debug.items():
         if k == "RESOLUTION":
             init_out["resolution"] = int(v)
             outline_out["canvas_resolution"] = int(v)
+            continue
+        if k == "JITTER":
+            init_out["jitter"] = bool(v)
+            continue
+        if k == "SEED":
+            if v is None or v == "":
+                continue  # no seed → build_surface_init default (random)
+            init_out["seed"] = int(v)
+            continue
+        if k in _SETTINGS_OVERRIDE_KEYS:
+            settings_overrides[k] = int(v)
             continue
         target = _OUTLINE_DEBUG_KEY_MAP.get(k)
         if target is None:
             logger.warning("play_outline: ignoring unknown debug key %r", k)
             continue
         outline_out[target] = v
-    return init_out, outline_out
+    return init_out, outline_out, settings_overrides
 
 
 # ── GET / POST endpoints ─────────────────────────────────────────────────────
@@ -141,7 +188,7 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
         return HttpResponseBadRequest(f"invalid JSON body: {exc}")
 
     debug = data.get("debug", {}) or {}
-    init_kwargs, outline_kwargs = _debug_kwargs(debug)
+    init_kwargs, outline_kwargs, settings_overrides = _debug_kwargs(debug)
 
     # Warm request: compute + cache the full construction (mesh already cached
     # from the GET; this adds the self-intersection detection) without an
@@ -161,9 +208,13 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
 
     init = pipeline.build_surface_init(record, **init_kwargs)
     try:
-        result = pipeline.build_outline(
-            init, I=I, J=J, O=O, eye=eye, **outline_kwargs,
-        )
+        # settings_overrides (BC/HC densify, HA trim) affect only the outline
+        # build, so scope them around build_outline (construction is already
+        # built/cached above).
+        with _override_app_settings(settings_overrides):
+            result = pipeline.build_outline(
+                init, I=I, J=J, O=O, eye=eye, **outline_kwargs,
+            )
     except ValueError as exc:
         # P3 raises on persp O != eye; surface as 400.
         return HttpResponseBadRequest(str(exc))

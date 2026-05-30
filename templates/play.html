@@ -121,6 +121,26 @@
                      (surface_play/settings.py RESOLUTION = 200 is the production default). -->
                 <input type="range" id="dbg-resolution" min="20" max="400" step="10" value="200" style="width:100%; cursor:pointer;">
             </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-jitter" style="font-size:12px; color:#333; margin:0;">Jitter mesh</label>
+                <input type="checkbox" id="dbg-jitter" checked style="cursor:pointer; width:16px; height:16px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-seed" style="font-size:12px; color:#333; margin:0;">Seed <span style="color:#999; font-size:10px;">(blank=random)</span></label>
+                <input type="number" id="dbg-seed" placeholder="random" style="width:72px; font-size:11px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-bc-densify" style="font-size:12px; color:#333; margin:0;" title="BC build-polyline subdivisions per boundary mesh-edge segment">BC densify /seg</label>
+                <input type="number" id="dbg-bc-densify" value="24" min="1" max="200" style="width:72px; font-size:11px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-hc-densify" style="font-size:12px; color:#333; margin:0;" title="HC straight-line total dense samples (arclength table)">HC densify total</label>
+                <input type="number" id="dbg-hc-densify" value="200" min="2" max="2000" style="width:72px; font-size:11px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                <label for="dbg-ha-trim" style="font-size:12px; color:#333; margin:0;" title="Trim HA samples within this many chain steps of a cusp/VP/TP">HA cusp trim</label>
+                <input type="number" id="dbg-ha-trim" value="5" min="0" max="50" style="width:72px; font-size:11px;">
+            </div>
             <div style="display:flex; justify-content:flex-end;">
                 <button id="dbg-apply-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Apply</button>
             </div>
@@ -294,15 +314,25 @@
         const use_newton = document.getElementById('dbg-newton').checked;
         const project_resampled = document.getElementById('dbg-project-resampled').checked;
         const resolution = parseInt(document.getElementById('dbg-resolution').value);
-        // Keys match Reorganization_of_the_surface_app.md "Debug panel" /
-        // Modular_rewrite_roadmap.md line 71 ("All pass through the debug
-        // POST dict to build_outline(...) kwargs"). Backend translates via
-        // _OUTLINE_DEBUG_KEY_MAP in views.py.
+        const jitter     = document.getElementById('dbg-jitter').checked;
+        const seedRaw    = document.getElementById('dbg-seed').value;
+        const bcDensify  = parseInt(document.getElementById('dbg-bc-densify').value);
+        const hcDensify  = parseInt(document.getElementById('dbg-hc-densify').value);
+        const haTrim     = parseInt(document.getElementById('dbg-ha-trim').value);
+        // Backend (views._debug_kwargs) routes: PROPAGATION/NEWTON_CUSP/
+        // PROJECT_RESAMPLED → build_outline kwargs; RESOLUTION/JITTER/SEED →
+        // build_surface_init; BC_DENSIFY_NSUB/HC_DENSIFY_N/HA_CUSP_TRIM →
+        // scoped surface_play.settings override for the outline build.
         return {
             PROPAGATION: use_lp ? "LP4" : "BFS",
             NEWTON_CUSP: use_newton,
             PROJECT_RESAMPLED: project_resampled,
             RESOLUTION: resolution,
+            JITTER: jitter,
+            SEED: seedRaw === "" ? null : parseInt(seedRaw),
+            BC_DENSIFY_NSUB: bcDensify,
+            HC_DENSIFY_N: hcDensify,
+            HA_CUSP_TRIM: haTrim,
         };
     }
 
