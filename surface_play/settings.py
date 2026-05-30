@@ -38,6 +38,5 @@ BC_DENSIFY_NSUB: int = 24
 # an accurate arclength table before picking sample positions (resample_all HC
 # branch).
 HC_DENSIFY_N: int = 200
-# CC contour-point Newton-refinement iterations onto the true silhouette
-# (curves._newton_cc_refine), applied when PROJECT_RESAMPLED is on.
-CC_NEWTON_ITERS: int = 5
+# (CC Newton refinement runs to convergence — see curves._newton_cc_refine —
+# so there is no iteration-count setting.)

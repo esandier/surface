@@ -667,40 +667,53 @@ def _tan_for_cc_samples_batched(
     return out
 
 
-def _newton_cc_refine(uv: np.ndarray, surface, projection, *, n_iter: int = 5
+def _newton_cc_refine(uv: np.ndarray, surface, projection, *, max_iter: int = 50
                       ) -> np.ndarray:
-    """Run Newton along chord-normal to find nearby axis·SN = 0.
+    """Run Newton in uv to land the point on the silhouette `axis·SN = 0`.
 
-    Direction = uv-grad of `axis·SN`. This is rough but sufficient for the
-    G7 / PROJECT_RESAMPLED test (the test only asserts convergence to a sign
-    change, not a tight tolerance).
+    Step = uv-gradient descent of `f(uv) = axis·SN`, using ANALYTIC derivatives
+    `dSN/du = Suu×Sv + Su×Suv`, `dSN/dv = Suv×Sv + Su×Svv` (same as
+    `_newton_orthogonal_cp`). In perspective the `d(axis)/duv` term vanishes
+    because `SN ⊥ Su, Sv`, so the gradient is just `axis · dSN/d·`.
+
+    Iterates to convergence — until the Newton step no longer moves `uv` at
+    double precision (or the residual is negligible) — not a fixed count. The
+    analytic gradient lets it reach machine precision in a few iterations; a
+    finite-difference gradient would plateau at the fd-step floor. `max_iter`
+    is a generous safety cap against a non-converging / oscillating point.
 
     Persp (2026-05-27): `axis = viewer_direction(S(uv))` recomputed each
     iteration as `uv` moves.
     """
     uv_cur = uv.copy()
-    for _ in range(n_iter):
+    for _ in range(max_iter):
         u, v = float(uv_cur[0]), float(uv_cur[1])
-        S_p = np.asarray(surface.S(u, v), dtype=float).reshape(3)
+        vals = surface._eval_all(u, v)
+        S_p = np.asarray(vals[0], dtype=float).reshape(3)
+        Su  = np.asarray(vals[1], dtype=float).reshape(3)
+        Sv  = np.asarray(vals[2], dtype=float).reshape(3)
+        Suu = np.asarray(vals[3], dtype=float).reshape(3)
+        Suv = np.asarray(vals[4], dtype=float).reshape(3)
+        Svv = np.asarray(vals[5], dtype=float).reshape(3)
+        SN  = np.asarray(vals[6], dtype=float).reshape(3)
         axis = projection.viewer_direction(S_p).reshape(3)
-        SN = np.asarray(surface.SN(u, v), dtype=float).reshape(3)
         f = float(axis @ SN)
-        if abs(f) < 1e-10:
+        if not np.isfinite(f) or abs(f) < 1e-13:
             break
-        # Numerical gradient in uv (small fd step). In persp the axis
-        # itself depends on S(u,v), so the finite-difference SN_u/SN_v
-        # are evaluated with the same axis at uv_cur (consistent with
-        # Newton's Jacobian approximation).
-        h = 1e-5
-        SN_u = np.asarray(surface.SN(u + h, v), dtype=float).reshape(3)
-        SN_v = np.asarray(surface.SN(u, v + h), dtype=float).reshape(3)
-        gu = (float(axis @ SN_u) - f) / h
-        gv = (float(axis @ SN_v) - f) / h
+        dSN_du = np.cross(Suu, Sv) + np.cross(Su, Suv)
+        dSN_dv = np.cross(Suv, Sv) + np.cross(Su, Svv)
+        gu = float(axis @ dSN_du)
+        gv = float(axis @ dSN_dv)
         g2 = gu * gu + gv * gv
         if g2 < 1e-20:
             break
-        uv_cur[0] -= f * gu / g2
-        uv_cur[1] -= f * gv / g2
+        du = f * gu / g2
+        dv = f * gv / g2
+        uv_cur[0] -= du
+        uv_cur[1] -= dv
+        # Converged: the step no longer moves uv at double precision.
+        if du * du + dv * dv < 1e-26:
+            break
     return uv_cur
 
 
@@ -1189,8 +1202,7 @@ def resample_all(
                     and getattr(domain, "type", None) in ("disk", "annulus")):
                 uv_s = _snap_annular_bc(uv_s, mesh)
             if sub.kind == "CC" and project_resampled:
-                uv_s = _newton_cc_refine(uv_s, surface, projection,
-                                         n_iter=_settings.CC_NEWTON_ITERS)
+                uv_s = _newton_cc_refine(uv_s, surface, projection)
             sample_uv[j] = uv_s
             seg_ps[j] = seg_p
             alphas[j] = alpha
