@@ -25,3 +25,19 @@ SURFACE_CACHE_SIZE: int = 16
 # (silhouette.py ~line 957). Avoids placing HAs on top of an existing
 # cusp where the front-sheet normal evaluation is degenerate.
 HA_CUSP_TRIM: int = 5
+
+# ── Resampling densification / Newton refinement ─────────────────────────────
+# Centralized here as the single source of truth (e.g. for the debug panel);
+# all are consumed in curves.resample_all.
+
+# BC build-polyline: subdivisions per boundary mesh-edge segment, so cumulative
+# xy-arclength tracks the true projected curve through a projection fold
+# (curves._densify_bc_polyline). One batched surface eval over the dense uv.
+BC_DENSIFY_NSUB: int = 24
+# HC (helper-curve) straight uv-line: number of dense pre-samples used to build
+# an accurate arclength table before picking sample positions (resample_all HC
+# branch).
+HC_DENSIFY_N: int = 200
+# CC contour-point Newton-refinement iterations onto the true silhouette
+# (curves._newton_cc_refine), applied when PROJECT_RESAMPLED is on.
+CC_NEWTON_ITERS: int = 5

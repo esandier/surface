@@ -414,13 +414,6 @@ def _interp_along_polyline(
     return uv, seg, alpha
 
 
-# Subdivisions per BC build-polyline segment for arclength-accurate resampling
-# (see _densify_bc_polyline). Each boundary mesh-edge segment is split into this
-# many pieces in uv so the cumulative arclength tracks the true projected curve
-# through a fold. One batched surface eval over the dense uv — cheap.
-_BC_DENSIFY_NSUB = 24
-
-
 def _densify_bc_polyline(uv_p: np.ndarray, surface, projection, domain,
                          n_sub: int):
     """Densify a BC build-polyline for arclength-accurate resampling.
@@ -1060,7 +1053,7 @@ def resample_all(
         # target arclengths just like BC. Step 3: interpolate back to uv.
         if sub.kind == "HC":
             uv_q0 = uv_p[0]; uv_q1 = uv_p[1]
-            N_dense = 200
+            N_dense = _settings.HC_DENSIFY_N
             t_dense = np.linspace(0.0, 1.0, N_dense)
             uv_dense = uv_q0[None, :] + t_dense[:, None] * (uv_q1 - uv_q0)[None, :]
             # Batched dense xyz/xy: one `surface.S` call for all 200 uv pairs.
@@ -1152,7 +1145,7 @@ def resample_all(
             # See [[resume-hc-match-cc]].
             s_targets = cum.copy()
         elif sub.kind == "BC":
-            interp_nsub = _BC_DENSIFY_NSUB
+            interp_nsub = _settings.BC_DENSIFY_NSUB
             interp_uv, interp_xy, interp_cum = _densify_bc_polyline(
                 uv_p, surface, projection, domain, interp_nsub)
             # Native-vertex arclengths in the ACCURATE metric (dense vertex k
@@ -1196,7 +1189,8 @@ def resample_all(
                     and getattr(domain, "type", None) in ("disk", "annulus")):
                 uv_s = _snap_annular_bc(uv_s, mesh)
             if sub.kind == "CC" and project_resampled:
-                uv_s = _newton_cc_refine(uv_s, surface, projection)
+                uv_s = _newton_cc_refine(uv_s, surface, projection,
+                                         n_iter=_settings.CC_NEWTON_ITERS)
             sample_uv[j] = uv_s
             seg_ps[j] = seg_p
             alphas[j] = alpha

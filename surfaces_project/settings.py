@@ -148,8 +148,8 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-
-# Constantes de l'application
-RESOLUTION = int(os.getenv('RESOLUTION', 300)) # résolution assez importante pour la triangulation
+# NB: the pipeline's resolution knob lives in surface_play/settings.py
+# (RESOLUTION). The former Django-level RESOLUTION here was inert (nothing read
+# it) and has been removed to avoid confusion.
 
 
