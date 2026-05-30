@@ -1,0 +1,14 @@
+# Development / test dependencies. Installs the runtime set plus the tools
+# needed to run `pytest surface_play/` (matplotlib backs the visual-regression
+# diff PNGs and the probe_*.py diagnostic scripts). Not used by the prod image.
+-r requirements.txt
+contourpy==1.0.6
+cycler==0.11.0
+fonttools==4.33.3
+kiwisolver==1.4.4
+matplotlib==3.10.8
+packaging==26.2
+pyparsing==3.0.9
+python-dateutil==2.8.2
+six==1.16.0
+pytest==9.0.3
