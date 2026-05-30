@@ -100,6 +100,18 @@ class SurfaceRecordForm(forms.ModelForm):
             except SympifyError:
                 pass
 
+        if domain_type == 'rect':
+            # Rect domain bounds are (u_min, u_max, v_min, v_max); a zero- or
+            # negative-width interval is degenerate and crashes triangulation
+            # downstream (a 500). Reject at the form. (Disk ignores u/v bounds —
+            # it uses r_min/r_max + 0..2π — so this check is rect-only.)
+            u_min = cleaned.get('u_min'); u_max = cleaned.get('u_max')
+            v_min = cleaned.get('v_min'); v_max = cleaned.get('v_max')
+            if u_min is not None and u_max is not None and u_min >= u_max:
+                self.add_error('u_max', "Upper bound must be greater than lower bound (need u_min < u_max).")
+            if v_min is not None and v_max is not None and v_min >= v_max:
+                self.add_error('v_max', "Upper bound must be greater than lower bound (need v_min < v_max).")
+
         if domain_type == 'disk':
             r_min = cleaned.get('r_min', 0.0)
             r_max = cleaned.get('r_max', 1.0)
