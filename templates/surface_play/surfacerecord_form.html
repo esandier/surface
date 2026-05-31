@@ -176,28 +176,19 @@
                     </div>
 
                     <div class="form-row">
-                        <div class="form-group col-4">
+                        <div class="form-group col-12">
                             <label for="id_X" id="label_X">X(<em id="lbl_p0">u</em>, <em id="lbl_p1">v</em>) =</label>
-                            <input type="text" name="X" id="id_X"
-                                class="form-control{% if form.X.errors %} is-invalid{% endif %}"
-                                value="{{ form.X.value|default:'u' }}" maxlength="400"
-                                style="font-family:monospace;">
+                            {{ form.X }}
                             {% for e in form.X.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
                         </div>
-                        <div class="form-group col-4">
+                        <div class="form-group col-12">
                             <label for="id_Y" id="label_Y">Y(<em id="lbl_p0b">u</em>, <em id="lbl_p1b">v</em>) =</label>
-                            <input type="text" name="Y" id="id_Y"
-                                class="form-control{% if form.Y.errors %} is-invalid{% endif %}"
-                                value="{{ form.Y.value|default:'v' }}" maxlength="400"
-                                style="font-family:monospace;">
+                            {{ form.Y }}
                             {% for e in form.Y.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
                         </div>
-                        <div class="form-group col-4">
+                        <div class="form-group col-12">
                             <label for="id_Z" id="label_Z">Z(<em id="lbl_p0c">u</em>, <em id="lbl_p1c">v</em>) =</label>
-                            <input type="text" name="Z" id="id_Z"
-                                class="form-control{% if form.Z.errors %} is-invalid{% endif %}"
-                                value="{{ form.Z.value|default:'0' }}" maxlength="400"
-                                style="font-family:monospace;">
+                            {{ form.Z }}
                             {% for e in form.Z.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
                         </div>
                     </div>
@@ -293,6 +284,17 @@
     });
 
     updateUI();
+
+    // Expandable X/Y/Z expression boxes: auto-grow the textarea height to fit
+    // its (wrapped) content, on load and on input.
+    function autoGrow(el) {
+        el.style.height = 'auto';
+        el.style.height = el.scrollHeight + 'px';
+    }
+    document.querySelectorAll('textarea.surface-expr').forEach(function (t) {
+        autoGrow(t);
+        t.addEventListener('input', function () { autoGrow(this); });
+    });
 })();
 </script>
 {% endblock content %}

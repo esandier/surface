@@ -37,6 +37,19 @@ class SurfaceRecordForm(forms.ModelForm):
         fields = ['name', 'X', 'Y', 'Z', 'parameter_names',
                   'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify',
                   'domain_type', 'coord_type', 'r_min', 'r_max', 'output_type']
+        # X/Y/Z are TextField on the model → render as expandable monospace
+        # textareas. Defined here (not hardcoded in the template) so the form
+        # owns presentation and there is no length cap to keep in sync.
+        widgets = {
+            f: forms.Textarea(attrs={
+                'class': 'form-control surface-expr',
+                'rows': 1,
+                'style': 'font-family:monospace; resize:vertical; '
+                         'overflow:hidden; white-space:pre-wrap; '
+                         'word-break:break-all;',
+            })
+            for f in ('X', 'Y', 'Z')
+        }
 
     def _float_to_display(self, v):
         """Format float for display: use comma decimal, strip trailing zeros."""
@@ -53,6 +66,13 @@ class SurfaceRecordForm(forms.ModelForm):
                 val = getattr(self.instance, field, None)
                 if val is not None and field not in self.data:
                     self.initial[field] = self._float_to_display(val)
+        # The X/Y/Z textarea widgets carry a fixed class from Meta, so add
+        # Bootstrap's `is-invalid` on bound errors to surface .invalid-feedback.
+        if self.is_bound:
+            for name in ('X', 'Y', 'Z'):
+                if name in self.errors:
+                    w = self.fields[name].widget
+                    w.attrs['class'] = (w.attrs.get('class', '') + ' is-invalid').strip()
 
     def _check_expr(self, field_name):
         val = self.cleaned_data.get(field_name, '')
