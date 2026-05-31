@@ -17,7 +17,7 @@ from surface_play._probe_common import (
     build_context, draw_domain_box, draw_outline_uv, draw_outline_xy,
     draw_surface_3d, parse_cli, save_two_panels,
 )
-from surface_play.curves import _seg_uv_at_bary
+from surface_play.curves import _seg_uv_at_bary, _sic_preAB_at
 
 
 # Per-type marker / color for SPs
@@ -60,7 +60,15 @@ def _list_spts_by_segment(R):
 
 
 def _spt_uv(kind, seg_idx, bary, R):
-    """uv position of an SPT on its host segment."""
+    """uv position of an SPT on its host segment.
+
+    SIC: preimage-A at the SPT bary (matches `resample_all`'s per-SIS model);
+    BC/CC: the segment's single-valued uv.
+    """
+    if kind == "SIC":
+        A, _B = _sic_preAB_at(seg_idx, bary, R['sis_pairs'], R['dps'],
+                              R['surf'].domain)
+        return A
     return _seg_uv_at_bary(kind, seg_idx, bary,
                            R['mesh'], R['css'], R['sis_pairs'],
                            R['cps'], R['dps'])

@@ -229,9 +229,14 @@ class ResampledCurve:
 
 
 def _seg_uv_at_bary(sub_kind: str, seg_idx: int, bary: float,
-                    mesh, css, sis_pairs, cps, dps,
-                    sis_preimage: int | None = None) -> np.ndarray:
-    """uv at bary on a chain segment. `bary` is segment-local (0..1)."""
+                    mesh, css, sis_pairs, cps, dps) -> np.ndarray:
+    """uv at bary on a BC/CC chain segment. `bary` is segment-local (0..1).
+
+    SIC segments are NOT handled here: a SIC is one curve of DPs whose two
+    preimages are deduced per-SIS via `flip` (spec §SIC, lines 219/231) — see
+    `_sic_preAB_at`. `sis_pairs`/`dps` are kept in the signature for caller
+    compatibility (probes pass the same positional args for all kinds).
+    """
     if sub_kind == "BC":
         edge = mesh.edges[seg_idx]
         return np.asarray(edge["p"], dtype=float) + float(bary) * np.asarray(edge["pq"], dtype=float)
@@ -239,18 +244,6 @@ def _seg_uv_at_bary(sub_kind: str, seg_idx: int, bary: float,
         cs = css[seg_idx]
         p_uv = np.asarray(cps[int(cs["p_cp"])]["uv"], dtype=float)
         q_uv = np.asarray(cps[int(cs["q_cp"])]["uv"], dtype=float)
-        return (1.0 - float(bary)) * p_uv + float(bary) * q_uv
-    if sub_kind == "SIC":
-        row = sis_pairs[seg_idx]
-        p = int(row["p_dp"]); q = int(row["q_dp"]); f = int(row["flip"])
-        # Preimage 1: uv1[p] → (uv1 if f=+1 else uv2)[q].
-        # Preimage 2: uv2[p] → (uv2 if f=+1 else uv1)[q].
-        if sis_preimage == 2:
-            p_uv = np.asarray(dps[p]["uv2"], dtype=float)
-            q_uv = np.asarray(dps[q]["uv2" if f == 1 else "uv1"], dtype=float)
-        else:
-            p_uv = np.asarray(dps[p]["uv1"], dtype=float)
-            q_uv = np.asarray(dps[q]["uv1" if f == 1 else "uv2"], dtype=float)
         return (1.0 - float(bary)) * p_uv + float(bary) * q_uv
     raise ValueError(f"_seg_uv_at_bary: unsupported kind {sub_kind!r}")
 
@@ -282,6 +275,11 @@ def _build_polyline(
 
     HC: just [start, end] (2 vertices). SP-less closed SC: walk internal only.
     """
+    # SIC is one curve of DPs — node skeleton from DP/SP xyz (sheet-independent);
+    # preimages are deduced per-SIS via `flip` at resample time, not here.
+    if sub.kind == "SIC":
+        return _sic_node_polyline(sub, sis_pairs, dps, splits, projection)
+
     uvs: list[np.ndarray] = []
 
     if sub.kind == "HC":
@@ -295,75 +293,12 @@ def _build_polyline(
         if uvs:
             uvs.append(uvs[0].copy())
     else:
-        # Normal SC: start SP → internal → end SP.
-        # For SIC subs we pick the preimage of each endpoint that lies on the
-        # same sheet as the chain walk (using SP.uv_alt = other preimage uv).
-        # Start SP: defer the decision until the first internal sample is
-        # known, then choose the start preimage closer to it.
-        sp_start_uv = np.asarray(splits.sps[sub.start][0], dtype=float)
-        sp_start_uv_alt = (
-            np.asarray(splits.sps[sub.start][4], dtype=float)
-            if sub.kind == "SIC" else None
-        )
-        uvs.append(sp_start_uv)
-        domain_local = getattr(mesh, "domain", None)
-        first_internal_for_start_pick = None
+        # Normal BC/CC SC: start SP → internal → end SP.
+        uvs.append(np.asarray(splits.sps[sub.start][0], dtype=float))
         for seg_idx, bary in sub.internal:
-            if sub.kind == "SIC":
-                # Pick whichever preimage's vertex is closer (close-aware) to
-                # the previous polyline vertex — preserves G21 sheet identity.
-                prev = uvs[-1]
-                cand1 = _seg_uv_at_bary("SIC", int(seg_idx), float(bary),
-                                        mesh, css, sis_pairs, cps, dps,
-                                        sis_preimage=1)
-                cand2 = _seg_uv_at_bary("SIC", int(seg_idx), float(bary),
-                                        mesh, css, sis_pairs, cps, dps,
-                                        sis_preimage=2)
-                if _needs_close(domain_local):
-                    cand1_close = domain_local.close(prev, cand1)
-                    cand2_close = domain_local.close(prev, cand2)
-                else:
-                    cand1_close, cand2_close = cand1, cand2
-                d1 = float(np.linalg.norm(cand1_close - prev))
-                d2 = float(np.linalg.norm(cand2_close - prev))
-                picked = cand1 if d1 <= d2 else cand2
-                uvs.append(picked)
-                if first_internal_for_start_pick is None:
-                    first_internal_for_start_pick = picked
-            else:
-                uvs.append(_seg_uv_at_bary(sub.kind, int(seg_idx), float(bary),
-                                           mesh, css, sis_pairs, cps, dps))
-        # Retroactively fix the SIC start SP if uv_alt is closer to the first
-        # internal sample (start uv was just a placeholder above).
-        if (sub.kind == "SIC"
-                and sp_start_uv_alt is not None
-                and not np.any(np.isnan(sp_start_uv_alt))
-                and first_internal_for_start_pick is not None):
-            target = first_internal_for_start_pick
-            if _needs_close(domain_local):
-                a_close = domain_local.close(target, sp_start_uv)
-                b_close = domain_local.close(target, sp_start_uv_alt)
-            else:
-                a_close, b_close = sp_start_uv, sp_start_uv_alt
-            if (np.linalg.norm(a_close - target)
-                    > np.linalg.norm(b_close - target)):
-                uvs[0] = sp_start_uv_alt
-        # End SP: same picking against the last internal sample (or start SP
-        # if there is no internal sample).
-        sp_end_uv = np.asarray(splits.sps[sub.end][0], dtype=float)
-        if sub.kind == "SIC":
-            sp_end_uv_alt = np.asarray(splits.sps[sub.end][4], dtype=float)
-            if not np.any(np.isnan(sp_end_uv_alt)):
-                prev = uvs[-1]
-                if _needs_close(domain_local):
-                    a_close = domain_local.close(prev, sp_end_uv)
-                    b_close = domain_local.close(prev, sp_end_uv_alt)
-                else:
-                    a_close, b_close = sp_end_uv, sp_end_uv_alt
-                if (np.linalg.norm(a_close - prev)
-                        > np.linalg.norm(b_close - prev)):
-                    sp_end_uv = sp_end_uv_alt
-        uvs.append(sp_end_uv)
+            uvs.append(_seg_uv_at_bary(sub.kind, int(seg_idx), float(bary),
+                                       mesh, css, sis_pairs, cps, dps))
+        uvs.append(np.asarray(splits.sps[sub.end][0], dtype=float))
 
     # Close-aware adjust consecutive vertices, then lift to xyz/xy.
     domain = getattr(mesh, "domain", None)
@@ -990,6 +925,185 @@ def _bc_s_targets(
     return np.array(sorted(s_set), dtype=float)
 
 
+# ── SIC resampling (single curve of DPs; preimages deduced per-SIS via flip) ──
+#
+# Spec §SIC (lines 219, 231): an SIC is ONE curve; its two domain preimages are
+# deduced per-DP by `flip`, NOT extracted as two resampled polylines. We mirror
+# BC/CC resampling: the arclength skeleton is the DP/SP `xyz` polyline (a DP's
+# `xyz` is sheet-independent, so it is single-valued and continuous regardless
+# of how `flip` alternates). Each resampled sample is itself a DP: within a SIS
+# we interpolate BOTH preimages (close-aware) using `flip` to pair the two DP
+# endpoints' sheets, then lift `xyz = S(preimage-A)`. No sheet is ever "picked"
+# by proximity, and no continuous preimage curve is materialised.
+
+def _dp_of_internal(entry, sis_pairs) -> int:
+    """DP index at the chain-forward end of an SIC `internal` segment entry.
+
+    `entry = (sis_idx, end_bary)`; `end_bary` is 1.0 if the segment is forward
+    in the chain (its q-end is the join vertex) else 0.0 (its p-end).
+    """
+    s = int(entry[0])
+    row = sis_pairs[s]
+    return int(row["q_dp"]) if float(entry[1]) > 0.5 else int(row["p_dp"])
+
+
+_SIC_BARY_EPS = 1e-9
+
+
+def _sic_preAB_at(s, bary, sis_pairs, dps, domain):
+    """(preimage-A, preimage-B) uv of SIS `s` at native bary `bary`.
+
+    Preimage-A is the sheet through `dps[p].uv1`; preimage-B through
+    `dps[p].uv2`; `flip` selects the q-end sheet. Both preimage segments are
+    interpolated close-aware at `bary` (bary 0 → p-end, 1 → q-end).
+    """
+    row = sis_pairs[s]
+    p = int(row["p_dp"]); q = int(row["q_dp"]); f = int(row["flip"])
+    uv1p = np.asarray(dps[p]["uv1"], dtype=float)
+    uv2p = np.asarray(dps[p]["uv2"], dtype=float)
+    qA = np.asarray(dps[q]["uv1" if f == 1 else "uv2"], dtype=float)
+    qB = np.asarray(dps[q]["uv2" if f == 1 else "uv1"], dtype=float)
+    A = _close_aware_lerp(uv1p, qA, float(bary), domain)
+    B = _close_aware_lerp(uv2p, qB, float(bary), domain)
+    return A, B
+
+
+def _sic_owning_sis(vk, vk1, sis_pairs, dp_pair_to_sis, sp_to_sis):
+    """Return `(sis_idx, bary_k, bary_k1)` for the polyline segment `vk → vk1`.
+
+    `bary_*` are native barys on the OWNING SIS (0 = p-end, 1 = q-end). An SP
+    sitting at a DP (its SPT bary is 0 or 1) is resolved to that DP and the
+    segment's owning SIS is the DP-pair edge; an SP at interior bary keeps its
+    own SIS. This is structural — no proximity.
+    """
+    def _dp_bary(dp, s):
+        row = sis_pairs[s]
+        if int(row["p_dp"]) == dp:
+            return 0.0
+        if int(row["q_dp"]) == dp:
+            return 1.0
+        return None
+
+    def _as_dp(vert):
+        """DP index if `vert` is a DP, or an SP located at a DP (bary 0/1)."""
+        if vert[0] == "DP":
+            return int(vert[1])
+        for s, t in sp_to_sis.get(int(vert[1]), ()):
+            if t <= _SIC_BARY_EPS:
+                return int(sis_pairs[s]["p_dp"])
+            if t >= 1.0 - _SIC_BARY_EPS:
+                return int(sis_pairs[s]["q_dp"])
+        return None
+
+    def _isp(vert):
+        """Interior-SP candidates [(sis, t)] for an SP not sitting at a DP."""
+        if vert[0] == "DP":
+            return []
+        return [(s, t) for s, t in sp_to_sis.get(int(vert[1]), ())
+                if _SIC_BARY_EPS < t < 1.0 - _SIC_BARY_EPS]
+
+    dk, dk1 = _as_dp(vk), _as_dp(vk1)
+    if dk is not None and dk1 is not None:
+        s = dp_pair_to_sis[(min(dk, dk1), max(dk, dk1))]
+        return s, _dp_bary(dk, s), _dp_bary(dk1, s)
+    if dk is None and dk1 is not None:
+        for s, t in _isp(vk):
+            b = _dp_bary(dk1, s)
+            if b is not None:
+                return s, t, b
+        raise RuntimeError(f"SIC: interior SP {vk[1]} shares no SIS with DP {dk1}")
+    if dk is not None and dk1 is None:
+        for s, t in _isp(vk1):
+            b = _dp_bary(dk, s)
+            if b is not None:
+                return s, b, t
+        raise RuntimeError(f"SIC: interior SP {vk1[1]} shares no SIS with DP {dk}")
+    map_k1 = {s: t for s, t in _isp(vk1)}
+    for s, t in _isp(vk):
+        if s in map_k1:
+            return s, t, map_k1[s]
+    raise RuntimeError(
+        f"SIC: interior SPs {vk[1]} and {vk1[1]} share no SIS")
+
+
+def _sic_vertices(sub, sis_pairs):
+    """Ordered vertices of an SIC SubCurve: list of `("SP", idx)` / `("DP", idx)`.
+
+    SP-less closed subs are pure DP loops; otherwise SP-start, internal DPs,
+    SP-end.
+    """
+    if sub.start == -1 and sub.end == -1:
+        return [("DP", _dp_of_internal(e, sis_pairs)) for e in sub.internal]
+    verts = [("SP", int(sub.start))]
+    verts.extend(("DP", _dp_of_internal(e, sis_pairs)) for e in sub.internal)
+    verts.append(("SP", int(sub.end)))
+    return verts
+
+
+def _sic_vert_xyz(vert, splits, dps) -> np.ndarray:
+    if vert[0] == "DP":
+        return np.asarray(dps[int(vert[1])]["xyz"], dtype=float)
+    return np.asarray(splits.sps[int(vert[1])][1], dtype=float)
+
+
+def _sic_build(sub, sis_pairs, dps, splits, dp_pair_to_sis, sp_to_sis, domain):
+    """Build the SIC arclength skeleton + per-segment preimage endpoints.
+
+    Returns `(node_xyz, seg_A, seg_B)` where `node_xyz` is the (M+1, 3) DP/SP
+    xyz polyline and `seg_A[k] = (A0, A1)` / `seg_B[k] = (B0, B1)` are the two
+    preimage-A / preimage-B endpoints of polyline segment k (already brought
+    close-aware-consistent). A sample at fraction α in segment k has preimage-A
+    `A0 + α·(A1 - A0)` (and likewise B), so the sample is a DP.
+    """
+    verts = _sic_vertices(sub, sis_pairs)
+    closed = (sub.start == -1 and sub.end == -1)
+    n = len(verts)
+    seg_A: list = []
+    seg_B: list = []
+    node_xyz: list = []
+    npair = n if closed else n - 1
+    for k in range(npair):
+        vk = verts[k]
+        vk1 = verts[(k + 1) % n]
+        s, b_k, b_k1 = _sic_owning_sis(vk, vk1, sis_pairs, dp_pair_to_sis, sp_to_sis)
+        A0, B0 = _sic_preAB_at(s, b_k, sis_pairs, dps, domain)
+        A1, B1 = _sic_preAB_at(s, b_k1, sis_pairs, dps, domain)
+        if _needs_close(domain):
+            A1 = domain.close(A0, A1)
+            B1 = domain.close(B0, B1)
+        seg_A.append((A0, A1))
+        seg_B.append((B0, B1))
+        node_xyz.append(_sic_vert_xyz(vk, splits, dps))
+    node_xyz.append(_sic_vert_xyz(verts[0] if closed else verts[-1], splits, dps))
+    return np.asarray(node_xyz, dtype=float), seg_A, seg_B
+
+
+def _sic_node_polyline(sub, sis_pairs, dps, splits, projection):
+    """Node-skeleton (uv, xyz, xy) for an SIC SubCurve — used by `_build_polyline`
+    for the arclength of `L_per_sub` and the SP-less verbatim pass-through.
+
+    `uv` is the canonical (sheet-1 / SP-uv) node coords; it is metadata only —
+    SIC visibility/rendering consume `xy`/`depth`, never `uv`.
+    """
+    verts = _sic_vertices(sub, sis_pairs)
+    if sub.start == -1 and sub.end == -1 and verts:
+        verts = verts + [verts[0]]   # close the loop
+    uvs: list = []
+    xyzs: list = []
+    for v in verts:
+        if v[0] == "DP":
+            uvs.append(np.asarray(dps[int(v[1])]["uv1"], dtype=float))
+            xyzs.append(np.asarray(dps[int(v[1])]["xyz"], dtype=float))
+        else:
+            sp = splits.sps[int(v[1])]
+            uvs.append(np.asarray(sp[0], dtype=float))
+            xyzs.append(np.asarray(sp[1], dtype=float))
+    uv_arr = np.asarray(uvs, dtype=float) if uvs else np.zeros((0, 2), dtype=float)
+    xyz_arr = np.asarray(xyzs, dtype=float) if xyzs else np.zeros((0, 3), dtype=float)
+    xy_arr = projection.XY(xyz_arr) if len(xyz_arr) else np.zeros((0, 2), dtype=float)
+    return uv_arr, xyz_arr, xy_arr
+
+
 def resample_all(
     subcurves: "list[SubCurve]",
     surface: "SurfaceParams",
@@ -1070,6 +1184,22 @@ def resample_all(
                 L_per_sp[sp] = min(L_per_sp.get(sp, float("inf")), L)
     delta_per_sp = {sp: L / 10.0 for sp, L in L_per_sp.items()}
 
+    # SIC interpolation maps (built once): DP-pair → SIS, and SP → [(SIS, bary)].
+    # Used to resolve each SIC polyline segment's owning SIS (and SP barys)
+    # structurally — no proximity heuristic.
+    dp_pair_to_sis: dict[tuple[int, int], int] = {}
+    sp_to_sis: dict[int, list[tuple[int, float]]] = {}
+    if len(sis_pairs):
+        for _s in range(len(sis_pairs)):
+            _row = sis_pairs[_s]
+            _p = int(_row["p_dp"]); _q = int(_row["q_dp"])
+            dp_pair_to_sis[(min(_p, _q), max(_p, _q))] = _s
+            for _slot_name in ("split1", "split2"):
+                _slot = int(_row[_slot_name])
+                if _slot >= 0:
+                    _spt = splits.spts[_slot]
+                    sp_to_sis.setdefault(int(_spt[0]), []).append((_s, float(_spt[1])))
+
     # Step E — sample each SC.
     out: list[ResampledCurve] = []
     for i, sub in enumerate(subcurves):
@@ -1085,6 +1215,57 @@ def resample_all(
                 depth=depth, xy=xy_p.copy(), dir=None,
                 vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
                 uv=uv_p.copy() if len(uv_p) else uv_p,
+            ))
+            continue
+
+        # SIC → arclength resample on the DP/SP xyz skeleton; each sample is a
+        # DP whose preimage-A is interpolated per-SIS (flip + close-aware). No
+        # sheet picked by proximity; `dir/tan = None`.
+        if sub.kind == "SIC":
+            node_xyz, seg_A, _seg_B = _sic_build(
+                sub, sis_pairs, dps, splits, dp_pair_to_sis, sp_to_sis, domain)
+            node_xy = (projection.XY(node_xyz) if len(node_xyz)
+                       else np.zeros((0, 2), dtype=float))
+            cum = _arclengths(node_xy)
+            L_xy = float(cum[-1]) if len(cum) else 0.0
+            delta_s = delta_per_sp.get(sub.start, ell)
+            delta_e = delta_per_sp.get(sub.end, ell)
+            s_targets = (_sample_arclengths(L_xy, ell, delta_s, delta_e, sub.is_closed)
+                         if L_xy > 0 and len(seg_A) else np.array([0.0, L_xy]))
+            N = len(s_targets)
+            sample_uv = np.zeros((N, 2), dtype=float)
+            for j, s in enumerate(s_targets):
+                st = float(np.clip(s, 0.0, cum[-1])) if len(cum) else 0.0
+                seg = int(np.searchsorted(cum, st, side="right") - 1)
+                seg = max(0, min(seg, len(seg_A) - 1))
+                span = cum[seg + 1] - cum[seg]
+                alpha = (st - cum[seg]) / span if span > 0 else 0.0
+                A0, A1 = seg_A[seg]
+                sample_uv[j] = A0 + alpha * (A1 - A0)
+            if N > 0:
+                S_all = np.asarray(surface.S(sample_uv[:, 0], sample_uv[:, 1]),
+                                   dtype=float)
+                sample_xyz = np.ascontiguousarray(S_all.T)
+                sample_xy = projection.XY(sample_xyz)
+            else:
+                sample_xyz = np.zeros((0, 3), dtype=float)
+                sample_xy = np.zeros((0, 2), dtype=float)
+            # Pin endpoints to their SP positions (image-exact).
+            if N >= 1 and sub.start >= 0:
+                sp0 = splits.sps[sub.start]
+                sample_xyz[0] = np.asarray(sp0[1], dtype=float)
+                sample_xy[0] = np.asarray(sp0[2], dtype=float)
+            if N >= 1 and sub.end >= 0:
+                sp1 = splits.sps[sub.end]
+                sample_xyz[-1] = np.asarray(sp1[1], dtype=float)
+                sample_xy[-1] = np.asarray(sp1[2], dtype=float)
+            depth = (np.asarray(projection.Z(sample_xyz), dtype=float)
+                     if N else np.zeros(0, dtype=float))
+            out.append(ResampledCurve(
+                kind="SIC", start=sub.start, end=sub.end,
+                depth=depth, xy=sample_xy, dir=None, tan=None,
+                vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
+                uv=sample_uv.copy(),
             ))
             continue
 

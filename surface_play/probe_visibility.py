@@ -31,7 +31,9 @@ from matplotlib.lines import Line2D
 
 from surface_play.contour import (build_contour_curves, build_contour_segments,
     find_contour_points, find_vps)
-from surface_play.curves import build_bcs, resample_all, _seg_uv_at_bary
+from surface_play.curves import (
+    build_bcs, resample_all, _seg_uv_at_bary, _sic_vertices,
+)
 from surface_play.helpers import build_helper_curves
 from surface_play.intersections import (build_sics, build_sis_pairs,
     find_double_points, find_triple_points, tp_dtype)
@@ -115,8 +117,22 @@ def _build_outline(surf, I, J, resolution, seed=42):
 def _rc_uv(sub, splits, mesh, css, sis_pairs, cps, dps):
     """uv polyline for a sub: [start SP] + internal samples + [end SP].
 
-    HC has no internal samples and only 2 SPs.
+    HC has no internal samples and only 2 SPs. SIC is one curve of DPs: its
+    node polyline is drawn in the canonical (uv1 / SP-uv) preimage, matching
+    `resample_all`'s skeleton (spec §SIC). The canonical preimage may switch
+    sheets at a DP where `flip` alternates — that is faithful, not a bug.
     """
+    if sub.kind == "SIC":
+        verts = _sic_vertices(sub, sis_pairs)
+        if sub.is_closed and verts:
+            verts = verts + [verts[0]]
+        uvs = [
+            np.asarray(dps[int(v[1])]["uv1"], dtype=float) if v[0] == "DP"
+            else np.asarray(splits.sps[int(v[1])][0], dtype=float)
+            for v in verts
+        ]
+        return np.array(uvs) if uvs else None
+
     uvs = []
     if sub.start >= 0:
         uvs.append(np.asarray(splits.sps[sub.start][0], dtype=float))

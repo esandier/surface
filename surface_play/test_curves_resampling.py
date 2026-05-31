@@ -173,9 +173,18 @@ def test_resample_all():
                 f"disk BC sample k={k} has ‖xy‖={norms[k]}, not on r_min={r_min} or r_max={r_max}"
             )
 
-    # ─── sub-assert 4: SIC two-sheet (G21) — uv close-aware step ────────────
-    # Tilted view (axis not aligned with the fig-8's symmetry planes) so SIC
-    # SubCurves don't collapse to image-space points.
+    # ─── sub-assert 4: SIC is one curve of DPs (spec §SIC, lines 219/231) ────
+    # The SIC is resampled on the sheet-independent DP/SP `xyz` skeleton; each
+    # sample's preimage is interpolated per-SIS via `flip` (close-aware), so the
+    # sample is itself a DP lying ON the surface. There is NO proximity-picked
+    # preimage polyline. Two invariants:
+    #   (a) image continuity — consecutive xy steps are bounded (a sheet hop
+    #       would manifest as a ~M-sized jump). This is the spurious-long-segment
+    #       guard. NOTE: domain `uv` may legitimately jump at a DP node (the two
+    #       sheets coincide in xyz but not in uv), so we do NOT test uv continuity.
+    #   (b) on-surface — each sample's stored `uv` lifts (via S, then XY) back to
+    #       its rendered `xy`, i.e. `uv` is the genuine on-surface preimage.
+    # Tilted view (axis off the fig-8's symmetry planes) so SICs don't collapse.
     surf_8 = fig8(perturb=False)
     mesh_8, proj_8, splits_8, cps_8, css_8, ccs_8, dps_8, sis_8, subs_8 = \
         _full_pipeline(surf_8, I=(1.0, 0.0, 0.3), J=(0.0, 1.0, 0.4), resolution=20)
@@ -184,22 +193,30 @@ def test_resample_all():
         subs_8, surf_8, proj_8, splits_8, mesh_8, css_8, sis_8, cps_8, dps_8,
         resolution=30,
     )
-    domain_8 = mesh_8.domain
     sic_subs_and_rcs = [
         (sub, rc) for sub, rc in zip(subs_8, rcs_8) if sub.kind == "SIC"
     ]
     assert sic_subs_and_rcs, "expected SIC SubCurves from fig8"
-    # Re-walk each SIC RC and check consecutive xy displacements are bounded
-    # (no preimage jumps — which would manifest as ~M-sized jumps in xy).
     M_xy = float(
         np.hypot(*(proj_8.XY(mesh_8.xyz).max(axis=0) - proj_8.XY(mesh_8.xyz).min(axis=0)))
     )
     for sub, rc in sic_subs_and_rcs:
         if len(rc.xy) < 2:
             continue
+        # (a) image continuity — no preimage jump.
         steps = np.linalg.norm(np.diff(rc.xy, axis=0), axis=1)
         assert steps.max() < 0.5 * M_xy, (
             f"SIC RC has a {steps.max():.3f} step (M={M_xy:.3f}) — preimage jump"
+        )
+        # (b) each sample is an on-surface DP: S(uv) reprojects to xy. Skip the
+        # two pinned endpoints (forced to SP positions, which may sit on the
+        # other sheet's uv).
+        if rc.uv is None or len(rc.uv) < 3:
+            continue
+        xy_from_uv = proj_8.XY(np.ascontiguousarray(
+            np.asarray(surf_8.S(rc.uv[1:-1, 0], rc.uv[1:-1, 1]), dtype=float).T))
+        assert np.allclose(xy_from_uv, rc.xy[1:-1], atol=1e-6 * max(M_xy, 1.0)), (
+            "SIC sample uv does not lift to its rendered xy (not on-surface)"
         )
 
     # ─── sub-assert 5: endpoint SP indices (G5) ────────────────────────────
