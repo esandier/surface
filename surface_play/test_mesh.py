@@ -538,3 +538,49 @@ def test_build_mesh():
     assert np.array_equal(m_a.uv, m_b.uv)
     assert np.array_equal(m_a.xyz, m_b.xyz)
     assert np.array_equal(m_a.tris, m_b.tris)
+
+
+def test_antipodal_disk():
+    """Antipodal boundary gluing closes the unit disk into ℝP²."""
+    TWO_PI = 2 * math.pi
+
+    # Domain validation: antipodal requires the full unit disk.
+    with pytest.raises(ValueError, match="unit disk"):
+        Domain(type="disk", bounds=(0.1, 0.95, 0.0, TWO_PI),
+               boundary_identify="antipodal")           # annulus
+    with pytest.raises(ValueError, match="unit disk"):
+        Domain(type="disk", bounds=(0.0, 2.0, 0.0, TWO_PI),
+               boundary_identify="antipodal")           # r_max != 1
+    with pytest.raises(ValueError, match="only valid on a disk"):
+        Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0),
+               boundary_identify="antipodal")
+
+    dom = Domain(type="disk", bounds=(0.0, 1.0, 0.0, TWO_PI),
+                 boundary_identify="antipodal")
+    assert dom.is_antipodal
+
+    # close(): point-reflection only near the boundary; interior unchanged.
+    p_b = np.array([0.98, 0.17]); q_b = np.array([-0.98, -0.17])
+    assert np.allclose(dom.close(p_b, q_b), [0.98, 0.17])     # reflected
+    p_i = np.array([0.1, 0.2]); q_i = np.array([0.15, 0.18])
+    assert np.allclose(dom.close(p_i, q_i), [0.15, 0.18])     # unchanged
+    # vectorized
+    out = dom.close(np.array([p_b, p_i]), np.array([q_b, q_i]))
+    assert np.allclose(out, [[0.98, 0.17], [0.15, 0.18]])
+
+    surf = SurfaceParams("u", "v", "u*u + v*v", "u v", dom, perturb=False)
+    m = build_mesh(dom, surf, resolution=16, jitter=True, seed=1)
+
+    # ℝP²: χ = V − E + F = 1; no boundary; some orientation-reversing seam edges.
+    V = len(m.uv)
+    chi = V - len(m.edges) + len(m.faces)
+    assert chi == 1, f"antipodal disk: χ={chi}, expected 1 (ℝP²)"
+    assert len(m.boundary_edge_idx) == 0, "antipodal disk: boundary must be glued"
+    assert (m.edges["flip"] == -1).any(), "antipodal seam edges must carry flip=-1"
+    # Every edge is interior (shared by 2 faces) on a closed surface.
+    assert (m.edges["g"] >= 0).all()
+    assert np.isfinite(m.xyz).all()
+
+    # Determinism.
+    m2 = build_mesh(dom, surf, resolution=16, jitter=True, seed=1)
+    assert np.array_equal(m.uv, m2.uv) and np.array_equal(m.tris, m2.tris)

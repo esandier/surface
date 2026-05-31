@@ -253,11 +253,11 @@ def _needs_close(domain) -> bool:
     with at least one identified axis. For unidentified rect (and disk/annulus)
     `close` is a no-op, so callers skip the call entirely (it dominated the
     resample profile at ~100k no-op invocations on non-periodic surfaces)."""
-    return (
-        domain is not None
-        and getattr(domain, "type", None) == "rect"
-        and (domain.u_identify != "no" or domain.v_identify != "no")
-    )
+    if domain is None:
+        return False
+    if getattr(domain, "type", None) == "rect":
+        return domain.u_identify != "no" or domain.v_identify != "no"
+    return bool(getattr(domain, "is_antipodal", False))
 
 
 def _close_aware_lerp(a_uv: np.ndarray, b_uv: np.ndarray, t: float, domain) -> np.ndarray:

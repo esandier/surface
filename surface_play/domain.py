@@ -12,6 +12,35 @@ class Domain:
     u_identify: Literal["no", "cy", "mo"] = "no"
     v_identify: Literal["no", "cy", "mo"] = "no"
     coord_type: Literal["ca", "po"] = "ca"
+    # Boundary identification for disk domains: "antipodal" glues the boundary
+    # circle (u, v) ~ (-u, -v), turning the disk into ℝP² (orientation-
+    # reversing, like Möbius). "no" leaves the disk boundary a real edge.
+    boundary_identify: Literal["no", "antipodal"] = "no"
+
+    def __post_init__(self) -> None:
+        if self.boundary_identify == "antipodal":
+            # Antipodal gluing (u,v)~(-u,-v) closes the FULL unit disk into ℝP².
+            # It requires r_min = 0 (an annulus would leave an inner boundary —
+            # a Möbius band, not ℝP²) and r_max = 1 (the simple point-reflection
+            # coincides with a surface's antipodal involution only on the unit
+            # circle |z| = 1; e.g. Bryant–Kustner Boy uses z ↦ -1/z̄ = -z there).
+            r_min, r_max = self.bounds[0], self.bounds[1]
+            if self.type != "disk":
+                raise ValueError(
+                    f"antipodal identification is only valid on a disk, "
+                    f"not type={self.type!r}."
+                )
+            if abs(r_min) > 1e-9 or abs(r_max - 1.0) > 1e-9:
+                raise ValueError(
+                    f"antipodal identification requires the full unit disk "
+                    f"(r_min=0, r_max=1); got r_min={r_min}, r_max={r_max}. "
+                    f"An annulus glued on one boundary is a Möbius band, not "
+                    f"ℝP², and the gluing is only geometrically valid at |z|=1."
+                )
+
+    @property
+    def is_antipodal(self) -> bool:
+        return self.type in ("disk", "annulus") and self.boundary_identify == "antipodal"
 
     @property
     def period_u(self) -> float:
@@ -38,6 +67,19 @@ class Domain:
         """
         p = np.asarray(p, dtype=float)
         q = np.asarray(q, dtype=float).copy()
+
+        if self.is_antipodal:
+            # Boundary glued (u, v) ~ (-u, -v): the only alias of q is its
+            # point-reflection -q. Choose whichever is closer to p — for
+            # interior points q wins, only seam-spanning pairs flip to -q.
+            if q.ndim == 1:
+                if np.sum((-q - p) ** 2) < np.sum((q - p) ** 2):
+                    return -q
+                return q
+            qr = -q
+            flip = np.sum((qr - p) ** 2, axis=-1) < np.sum((q - p) ** 2, axis=-1)
+            q[flip] = qr[flip]
+            return q
 
         if self.type != "rect":
             return q

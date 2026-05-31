@@ -12,6 +12,10 @@ class SurfaceRecord(models.Model):
         CYLINDRE = 'cy'
         NONE = 'no'
 
+    class BoundaryIdentify(models.TextChoices):
+        ANTIPODAL = 'an'
+        NONE = 'no'
+
     class DomainType(models.TextChoices):
         RECTANGLE = 'rect'
         DISK = 'disk'
@@ -49,6 +53,13 @@ class SurfaceRecord(models.Model):
         max_length=4,
         choices=DomainType.choices,
         default=DomainType.RECTANGLE,
+    )
+    # Disk-only: 'an' glues the boundary circle antipodally ((u,v)~(-u,-v)),
+    # making the disk an ℝP² immersion (e.g. Boy surface). Ignored for rect.
+    boundary_identify = models.CharField(
+        max_length=2,
+        choices=BoundaryIdentify.choices,
+        default=BoundaryIdentify.NONE,
     )
     coord_type = models.CharField(
         max_length=2,

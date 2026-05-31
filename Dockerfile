@@ -17,4 +17,6 @@ RUN chown -R 1001:0 /opt/app-root/src
 USER 1001
 RUN python manage.py collectstatic --noinput
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "surfaces_project.wsgi:application"]
+# Apply DB migrations on every boot (idempotent) so schema changes ship with
+# the image without a manual `oc rsh ... migrate` step — matches the Procfile.
+CMD python manage.py migrate --noinput && gunicorn --bind 0.0.0.0:8080 --workers 2 surfaces_project.wsgi:application

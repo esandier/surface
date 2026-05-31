@@ -130,6 +130,7 @@ def _record_signature(record) -> tuple:
         str(record.domain_type), str(record.coord_type),
         float(record.r_min), float(record.r_max),
         str(record.output_type),
+        str(getattr(record, "boundary_identify", "no")),
     )
 
 
@@ -145,7 +146,7 @@ def _build_domain_and_surface(sig: tuple) -> tuple[Domain, SurfaceParams]:
      u_identify, v_identify,
      domain_type, coord_type,
      r_min, r_max,
-     output_type) = sig
+     output_type, boundary_identify) = sig
 
     if domain_type == "rect":
         bounds = (u_min, u_max, v_min, v_max)
@@ -159,6 +160,7 @@ def _build_domain_and_surface(sig: tuple) -> tuple[Domain, SurfaceParams]:
         bounds = (r_min, r_max, 0.0, 2.0 * np.pi)
         domain = Domain(
             type="disk", bounds=bounds, coord_type=coord_type,
+            boundary_identify=("antipodal" if boundary_identify == "an" else "no"),
         )
 
     surface = SurfaceParams(

@@ -117,6 +117,7 @@ def _build_edges_faces(
 
     u_is_mo = domain.type == "rect" and domain.u_identify == "mo"
     v_is_mo = domain.type == "rect" and domain.v_identify == "mo"
+    is_antip = domain.is_antipodal
     if domain.type == "rect":
         _u_min_d, _u_max_d, _v_min_d, _v_max_d = domain.bounds
         _u_range_half = 0.5 * (_u_max_d - _u_min_d)
@@ -198,7 +199,12 @@ def _build_edges_faces(
     third0 = third[fi]
     f0 = fid[fi]
 
-    P = uv[p_idx]                          # (n_edges, 2)
+    # Edge anchor. Normally the canonical (compacted) position, which aliases
+    # the physical point under rect cy/mo periodicity. Antipodal gluing is NOT
+    # a translation periodicity (S(x) ≠ S(-x) for interior x), so a seam edge's
+    # canonical endpoint may sit on the far side of the disk — anchor at the
+    # pre-id (physical) position instead so `p + s·pq` stays on the true edge.
+    P = uv_pre[pre_p] if is_antip else uv[p_idx]   # (n_edges, 2)
     PQ = uv_pre[pre_q] - uv_pre[pre_p]      # pre-id subtraction (G15-compliant)
 
     # mo-seam axis-flip correction for `p + s·pq` interpolation. When canonical
@@ -238,6 +244,13 @@ def _build_edges_faces(
         crosses_mo |= np.abs(uv[q_idx, 0] - uv[p_idx, 0]) > _u_range_half
     if v_is_mo:
         crosses_mo |= np.abs(uv[q_idx, 1] - uv[p_idx, 1]) > _v_range_half
+    if is_antip:
+        # Antipodal seam edge: its canonical endpoints straddle the gluing, so
+        # the point-reflection of q lands closer to p than q itself. Such edges
+        # are orientation-reversing (ℝP² is non-orientable) → flip = -1.
+        d_q = np.sum((uv[q_idx] - uv[p_idx]) ** 2, axis=1)
+        d_qr = np.sum((-uv[q_idx] - uv[p_idx]) ** 2, axis=1)
+        crosses_mo |= d_qr < d_q
 
     edges_uq = np.zeros(n_edges, dtype=edge_dtype)
     edges_uq["p_idx"] = p_idx
@@ -256,7 +269,10 @@ def _build_edges_faces(
     faces = np.zeros(M, dtype=face_dtype)
     faces["verts"] = tris
     faces["edges"] = face_edge_idx
-    faces["p"] = uv[i]
+    # Antipodal: anchor at the pre-id (physical) position — see the edge anchor
+    # note above (S is not translation-periodic, so the canonical vertex of a
+    # seam face may sit on the opposite side of the disk).
+    faces["p"] = uv_pre[ip] if is_antip else uv[i]
     faces["pq"] = uv_pre[jp] - uv_pre[ip]   # pre-id subtraction
     faces["pr"] = uv_pre[kp] - uv_pre[ip]   # pre-id subtraction
 
@@ -310,6 +326,85 @@ def _jitter(
     return uv_new
 
 
+def _apply_antipodal(
+    uv_jittered: np.ndarray,
+    tris: np.ndarray,
+    domain: Domain,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Glue the disk boundary antipodally: (u, v) ~ (-u, -v) on r = r_max.
+
+    Pairs each outer-ring vertex with the one at angle θ + π (sorted by angle;
+    requires an even ring count — enforced in `_generate_disk_mesh`), union-finds
+    the pairs, compacts `uv`, and rewrites `tris`. The merged ring edges become
+    interior (no boundary), turning the disk into ℝP² (orientation-reversing —
+    `_build_edges_faces` marks the seam edges `flip = -1`).
+
+    Returns (uv_compacted, tris_canonical, on_seam, zeros, empty_corners) where
+    `on_seam[k]` is True for the (merged) boundary classes.
+    """
+    N = len(uv_jittered)
+    r_max = domain.bounds[1]
+    r = np.hypot(uv_jittered[:, 0], uv_jittered[:, 1])
+    bnd = np.flatnonzero(np.abs(r - r_max) < 1e-9)
+    n_b = len(bnd)
+    if n_b % 2 != 0:
+        raise ValueError(
+            f"antipodal disk: boundary ring has odd vertex count {n_b}; "
+            f"_generate_disk_mesh should have forced it even."
+        )
+    half = n_b // 2
+    ang = np.arctan2(uv_jittered[bnd, 1], uv_jittered[bnd, 0])
+    order = bnd[np.argsort(ang)]
+
+    # Verify the geometric pairing really is antipodal (θ_i + π); jitter is
+    # tiny so the sum of paired positions must be ~0.
+    a_pts = uv_jittered[order[:half]]
+    b_pts = uv_jittered[order[half:]]
+    mismatch = float(np.abs(a_pts + b_pts).max())
+    if mismatch > 1e-3 * r_max:
+        raise ValueError(
+            f"antipodal disk: ring pairing is not antipodal (max |P_i + P_(i+n/2)| "
+            f"= {mismatch:.3e} > {1e-3 * r_max:.3e}); ring is non-uniform?"
+        )
+
+    parent = np.arange(N, dtype=np.int32)
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(half):
+        a, b = int(order[i]), int(order[i + half])
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            if ra > rb:
+                ra, rb = rb, ra
+            parent[rb] = ra
+
+    canonical_old = np.array([find(i) for i in range(N)], dtype=np.int32)
+    canonical_indices = np.unique(canonical_old)
+    K = len(canonical_indices)
+    old_to_new = np.full(N, -1, dtype=np.int32)
+    old_to_new[canonical_indices] = np.arange(K, dtype=np.int32)
+    new_idx = old_to_new[canonical_old]
+
+    uv_compacted = uv_jittered[canonical_indices]
+    tris_canonical = new_idx[tris].astype(np.int32)
+
+    on_seam = np.zeros(K, dtype=bool)
+    on_seam[new_idx[bnd]] = True
+
+    return (
+        uv_compacted,
+        tris_canonical,
+        on_seam,
+        np.zeros(K, dtype=bool),
+        np.array([], dtype=np.int32),
+    )
+
+
 def _apply_identifications(
     uv_jittered: np.ndarray,
     tris: np.ndarray,
@@ -334,6 +429,9 @@ def _apply_identifications(
         deduplicated via identification. Empty for non-rect.
     """
     N = len(uv_jittered)
+
+    if domain.is_antipodal:
+        return _apply_antipodal(uv_jittered, tris, domain)
 
     if domain.type != "rect":
         return (
@@ -508,6 +606,10 @@ def _generate_disk_mesh(domain: Domain, resolution: int) -> tuple[np.ndarray, np
     bbox_diag = domain.bbox_diag()  # = 2 * r_max
 
     n_outer = max(3, round(2 * math.pi * r_max * resolution / bbox_diag))
+    if domain.is_antipodal:
+        # Antipodal gluing pairs ring vertex i with the one at angle θ_i + π,
+        # which is a sampled vertex iff n_outer is even.
+        n_outer = max(4, n_outer + (n_outer % 2))
     theta_outer = np.linspace(0, 2 * math.pi, n_outer, endpoint=False)
     outer_verts = np.column_stack(
         [r_max * np.cos(theta_outer), r_max * np.sin(theta_outer)]
