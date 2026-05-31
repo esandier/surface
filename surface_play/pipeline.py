@@ -133,7 +133,13 @@ def _record_signature(record) -> tuple:
     )
 
 
+@functools.lru_cache(maxsize=_settings.SURFACE_CACHE_SIZE)
 def _build_domain_and_surface(sig: tuple) -> tuple[Domain, SurfaceParams]:
+    # Memoized on `sig` (hashable) so `_cached_mesh` and `_cached_surface_init`
+    # share ONE lambdified Surface instead of each building (and lambdifying)
+    # its own — halves the cold-build cost, which is dominated by lambdify for
+    # heavy formulas (e.g. the Boy surface). The Surface is read-only after
+    # construction, so sharing one instance across callers is safe.
     (X, Y, Z, param_names,
      u_min, u_max, v_min, v_max,
      u_identify, v_identify,

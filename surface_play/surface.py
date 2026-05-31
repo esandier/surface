@@ -109,15 +109,31 @@ class SurfaceParams:
             (u_sym, v_sym), joined, modules="numpy", cse=True
         )
 
-        # Naive per-function lambdified callables (no cse, separate calls). Used
-        # only for the cse-speedup benchmark in test 5.
-        self._naive_S = sp.lambdify((u_sym, v_sym), list(S_sym), modules="numpy")
-        self._naive_Su = sp.lambdify((u_sym, v_sym), list(Su_sym), modules="numpy")
-        self._naive_Sv = sp.lambdify((u_sym, v_sym), list(Sv_sym), modules="numpy")
-        self._naive_Suu = sp.lambdify((u_sym, v_sym), list(Suu_sym), modules="numpy")
-        self._naive_Suv = sp.lambdify((u_sym, v_sym), list(Suv_sym), modules="numpy")
-        self._naive_Svv = sp.lambdify((u_sym, v_sym), list(Svv_sym), modules="numpy")
-        self._naive_SN = sp.lambdify((u_sym, v_sym), list(SN_sym), modules="numpy")
+        # Naive per-function lambdified callables (no cse, separate calls) are
+        # used ONLY by the cse-speedup benchmark in test_surface. Building them
+        # eagerly here lambdifies 7 large expressions with no CSE — very
+        # expensive for heavy formulas (e.g. the Boy surface). Defer them: store
+        # the symbolic lists and lambdify on first access via __getattr__ so the
+        # production path (which only uses the cse'd `_eval_fn`) never pays.
+        self._naive_syms = {
+            "_naive_S": list(S_sym),    "_naive_Su": list(Su_sym),
+            "_naive_Sv": list(Sv_sym),  "_naive_Suu": list(Suu_sym),
+            "_naive_Suv": list(Suv_sym), "_naive_Svv": list(Svv_sym),
+            "_naive_SN": list(SN_sym),
+        }
+        self._naive_args = (u_sym, v_sym)
+
+    def __getattr__(self, name):
+        # Lazily build the test-only naive (no-cse) callables on first access.
+        # __getattr__ runs only for attributes missing from __dict__, so this
+        # never interferes with the eagerly-set production attributes.
+        if name.startswith("_naive_"):
+            syms = self.__dict__.get("_naive_syms")
+            if syms is not None and name in syms:
+                fn = sp.lambdify(self._naive_args, syms[name], modules="numpy")
+                setattr(self, name, fn)  # cache for subsequent accesses
+                return fn
+        raise AttributeError(name)
 
     # ── Public callables ──────────────────────────────────────────────────────
     def _eval_all(self, u, v):
