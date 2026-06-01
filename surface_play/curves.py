@@ -253,16 +253,13 @@ def _needs_close(domain) -> bool:
     with at least one identified axis. For unidentified rect (and disk/annulus)
     `close` is a no-op, so callers skip the call entirely (it dominated the
     resample profile at ~100k no-op invocations on non-periodic surfaces)."""
-    if domain is None:
-        return False
-    if getattr(domain, "type", None) == "rect":
-        return domain.u_identify != "no" or domain.v_identify != "no"
-    return bool(getattr(domain, "is_antipodal", False))
+    return domain is not None and bool(getattr(domain, "needs_close", False))
 
 
 def _close_aware_lerp(a_uv: np.ndarray, b_uv: np.ndarray, t: float, domain) -> np.ndarray:
-    b_loc = domain.close(a_uv, b_uv) if _needs_close(domain) else b_uv
-    return a_uv + float(t) * (b_loc - a_uv)
+    if domain is None:
+        return np.asarray(a_uv, dtype=float) + float(t) * (np.asarray(b_uv, dtype=float) - np.asarray(a_uv, dtype=float))
+    return domain.interpolate(a_uv, b_uv, t)
 
 
 def _build_polyline(
@@ -301,10 +298,17 @@ def _build_polyline(
         uvs.append(np.asarray(splits.sps[sub.end][0], dtype=float))
 
     # Close-aware adjust consecutive vertices, then lift to xyz/xy.
+    # Only for GLOBAL periodicities (rect cy/mo), where S is periodic so the
+    # aliased vertex is the same surface point. NOT for antipodal: there close()
+    # is a boundary-only identification (S(x) ≠ S(-x) in the interior), so
+    # reflecting an interior arc would relocate it onto different surface points
+    # (e.g. a CC tail near a cusp jumping to the antipodal preimage). A
+    # seam-crossing polyline keeps its true uv; its two boundary endpoints P and
+    # -P already lift to one xy via S(P) = S(-P), so no long chord appears.
     domain = getattr(mesh, "domain", None)
-    if _needs_close(domain):
+    if _needs_close(domain) and not getattr(domain, "is_antipodal", False):
         for i in range(1, len(uvs)):
-            uvs[i] = domain.close(uvs[i - 1], uvs[i])
+            uvs[i] = domain.interpolate(uvs[i - 1], uvs[i], 1.0)
 
     uv_arr = np.asarray(uvs, dtype=float) if uvs else np.zeros((0, 2), dtype=float)
     if len(uv_arr):
@@ -416,7 +420,7 @@ def _uv_for_bc_lift(edge, mesh, uv_sample: np.ndarray) -> np.ndarray:
     domain = getattr(mesh, "domain", None)
     if _needs_close(domain):
         p_canonical = mesh.uv[int(edge["p_idx"])]
-        return domain.close(p_canonical, uv_sample)
+        return domain.interpolate(p_canonical, uv_sample, 1.0)
     return uv_sample
 
 
@@ -1069,8 +1073,12 @@ def _sic_build(sub, sis_pairs, dps, splits, dp_pair_to_sis, sp_to_sis, domain):
         A0, B0 = _sic_preAB_at(s, b_k, sis_pairs, dps, domain)
         A1, B1 = _sic_preAB_at(s, b_k1, sis_pairs, dps, domain)
         if _needs_close(domain):
-            A1 = domain.close(A0, A1)
-            B1 = domain.close(B0, B1)
+            # localize (NOT interpolate): a seam-spanning SIS segment must keep
+            # its endpoint as the inside→outside σ-rep, so the lerp renders the
+            # short on-surface arc (S(σ(A1)) = S(A1)); interpolate's map-back
+            # would return the far A1 and re-create a disk-spanning spike.
+            A1 = domain.localize(A0, A1)
+            B1 = domain.localize(B0, B1)
         seg_A.append((A0, A1))
         seg_B.append((B0, B1))
         node_xyz.append(_sic_vert_xyz(vk, splits, dps))

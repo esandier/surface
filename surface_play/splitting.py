@@ -959,7 +959,10 @@ def split_at_cdps(
         other_uv1 = other_uv1[sis_seg_valid]
         sis_idx_of_seg = sis_idx_of_seg[sis_seg_valid]
 
-    # Step 3: cross-mode close-aware sweep.
+    # Step 3: cross-mode seam-aware sweep. `sweep_segments` localizes each
+    # segment via `domain.interpolate` (the seam-aware primitive), so a seam
+    # face's CS / seam-spanning SIS preimage is brought into its own local frame
+    # rather than appearing as a spurious diameter-long chord.
     hits = sweep_segments(cs_uv0, cs_uv1, sis_uv0, sis_uv1, domain)
     if len(hits) == 0:
         return
@@ -986,26 +989,25 @@ def split_at_cdps(
         # matching sheet at the chain endpoint.
         o_uv0 = np.asarray(other_uv0[sis_seg_idx], dtype=float).reshape(2)
         o_uv1 = np.asarray(other_uv1[sis_seg_idx], dtype=float).reshape(2)
-        # Close-aware lerp: shift o_uv1 toward o_uv0 if domain identifies axes.
-        if domain is not None and getattr(domain, "type", None) == "rect":
-            o_uv1 = domain.close(o_uv0, o_uv1)
-        other_uv = o_uv0 + t_b * (o_uv1 - o_uv0)
+        # Seam-aware lerp at t_b along the other preimage segment.
+        if domain is not None:
+            other_uv = domain.interpolate(o_uv0, o_uv1, t_b)
+        else:
+            other_uv = o_uv0 + t_b * (o_uv1 - o_uv0)
 
         sp_idx = splits.add_sp(uv=uv_hit, xyz=xyz_hit, xy=xy_hit, sp_type="cdp",
                                uv_alt=other_uv)
 
-        # Direction vectors (close-adjusted) for the vis_chge formulas.
+        # Direction vectors (seam-aware) for the vis_chge formulas.
         cs_p = np.asarray(cs_uv0[cs_idx], dtype=float).reshape(2)
         cs_q = np.asarray(cs_uv1[cs_idx], dtype=float).reshape(2)
-        if domain is not None and getattr(domain, "type", None) == "rect":
-            cs_q = domain.close(cs_p, cs_q)
-        cs_dir_uv = cs_q - cs_p
+        cs_q_loc = domain.localize(cs_p, cs_q) if domain is not None else cs_q
+        cs_dir_uv = cs_q_loc - cs_p
 
         sis_p = np.asarray(sis_uv0[sis_seg_idx], dtype=float).reshape(2)
         sis_q = np.asarray(sis_uv1[sis_seg_idx], dtype=float).reshape(2)
-        if domain is not None and getattr(domain, "type", None) == "rect":
-            sis_q = domain.close(sis_p, sis_q)
-        sis_dir_uv = sis_q - sis_p
+        sis_q_loc = domain.localize(sis_p, sis_q) if domain is not None else sis_q
+        sis_dir_uv = sis_q_loc - sis_p
 
         # CS-side SPT.
         vis_cs = _cs_vis_chge_at_cdp(

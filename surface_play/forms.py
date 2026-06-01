@@ -36,7 +36,8 @@ class SurfaceRecordForm(forms.ModelForm):
         model = SurfaceRecord
         fields = ['name', 'X', 'Y', 'Z', 'parameter_names',
                   'u_min', 'u_max', 'v_min', 'v_max', 'u_identify', 'v_identify',
-                  'domain_type', 'coord_type', 'r_min', 'r_max', 'output_type']
+                  'domain_type', 'coord_type', 'r_min', 'r_max',
+                  'boundary_identify', 'output_type']
         # X/Y/Z are TextField on the model → render as expandable monospace
         # textareas. Defined here (not hardcoded in the template) so the form
         # owns presentation and there is no length cap to keep in sync.
@@ -60,6 +61,9 @@ class SurfaceRecordForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Rendered as a checkbox (absent = "no"); not required so an unchecked
+        # box (which submits nothing) is fine — clean() normalizes it.
+        self.fields['boundary_identify'].required = False
         # Pre-fill bound fields with comma-decimal display values from instance
         if self.instance and self.instance.pk:
             for field in ('u_min', 'u_max', 'v_min', 'v_max', 'r_min', 'r_max'):
@@ -88,6 +92,9 @@ class SurfaceRecordForm(forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
+        # Checkbox semantics: value 'an' present = antipodal, absent = none.
+        cleaned['boundary_identify'] = (
+            'an' if self.data.get('boundary_identify') == 'an' else 'no')
         domain_type = cleaned.get('domain_type', 'rect')
         coord_type  = cleaned.get('coord_type', 'ca')
         param_str   = cleaned.get('parameter_names', '')
@@ -132,6 +139,8 @@ class SurfaceRecordForm(forms.ModelForm):
             if v_min is not None and v_max is not None and v_min >= v_max:
                 self.add_error('v_max', "Upper bound must be greater than lower bound (need v_min < v_max).")
 
+        boundary_identify = cleaned.get('boundary_identify', 'no')
+
         if domain_type == 'disk':
             r_min = cleaned.get('r_min', 0.0)
             r_max = cleaned.get('r_max', 1.0)
@@ -142,5 +151,12 @@ class SurfaceRecordForm(forms.ModelForm):
                     self.add_error('r_max', "Outer radius must be > 0.")
                 if r_min >= r_max:
                     self.add_error('r_max', "Outer radius must be greater than inner radius.")
+            # Antipodal glues the OUTER boundary (u,v)~(-u,-v) → ℝP² (Boy
+            # surface). It works at any outer radius R (the involution is
+            # σ_R(z) = -R²/z̄), so no r_max constraint; the inner radius is free.
+        elif boundary_identify == 'an':
+            self.add_error('boundary_identify',
+                           "Antipodal boundary identification is only valid for a "
+                           "disk domain.")
 
         return cleaned

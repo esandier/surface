@@ -97,16 +97,35 @@ def _half_period_adjust(diff: np.ndarray, period: float) -> np.ndarray:
 
 
 def _close_pair_array(p0: np.ndarray, p1: np.ndarray, domain) -> np.ndarray:
-    """Vectorized `domain.close(p0, p1)` for arrays of shape (..., 2)."""
-    p1c = np.array(p1, dtype=float, copy=True)
-    if domain is None or getattr(domain, "type", None) != "rect":
-        return p1c
-    d = p1c - p0
-    if domain.u_identify in ("cy", "mo"):
-        d[..., 0] = _half_period_adjust(d[..., 0], domain.period_u)
-    if domain.v_identify in ("cy", "mo"):
-        d[..., 1] = _half_period_adjust(d[..., 1], domain.period_v)
-    return p0 + d
+    """Localize `p1` toward `p0` under the domain identification (vectorized over
+    shape (..., 2)). Uses `domain.localize` (NO map-back) — the sweep needs the
+    honest inside→outside endpoint for antipodal disks."""
+    if domain is None:
+        return np.array(p1, dtype=float, copy=True)
+    return np.asarray(domain.localize(p0, p1), dtype=float)
+
+
+def _augment_antipodal(uv0: np.ndarray, uv1: np.ndarray, domain):
+    """Append the σ-copy of every inside→outside segment (one endpoint outside
+    the unit disk), for the antipodal sweep.
+
+    Returns `(uv0_aug, uv1_aug, orig_idx)` where the first `n` rows are the
+    originals and any appended rows are σ-images (`σ(z) = -z/|z|²`) of the
+    inside→outside segments; `orig_idx` maps every row back to its original
+    segment index so hit indices can be de-aliased.
+    """
+    uv0 = np.ascontiguousarray(uv0, dtype=np.float64)
+    uv1 = np.ascontiguousarray(uv1, dtype=np.float64)
+    n = len(uv0)
+    r2 = float(domain.bounds[1]) ** 2
+    out = ((uv1 * uv1).sum(axis=1) > r2) | ((uv0 * uv0).sum(axis=1) > r2)
+    io = np.flatnonzero(out)
+    if len(io) == 0:
+        return uv0, uv1, np.arange(n)
+    uv0_aug = np.vstack([uv0, domain._sigma(uv0[io])])
+    uv1_aug = np.vstack([uv1, domain._sigma(uv1[io])])
+    orig = np.concatenate([np.arange(n), io])
+    return uv0_aug, uv1_aug, orig
 
 
 @njit(cache=True)
@@ -279,6 +298,24 @@ def sweep_segments(
 
     seg_a_uv1_loc = _close_pair_array(seg_a_uv0, seg_a_uv1, domain)
     seg_b_uv1_loc = _close_pair_array(seg_b_uv0, seg_b_uv1, domain)
+
+    # Antipodal disk: `interpolate` localizes a boundary-spanning segment to an
+    # honest inside→outside one (one endpoint pushed outside the unit disk via
+    # σ). The plane is then NOT a faithful model of the surface, so we duplicate
+    # each inside→outside segment with its σ-copy (which carries the crossing on
+    # the disk's OTHER side back inside), sweep both, and keep only intersections
+    # that land inside the disk (the exterior twin is a duplicate).
+    antipodal = domain is not None and getattr(domain, "is_antipodal", False)
+    a_orig = b_orig = None
+    if antipodal:
+        seg_a_uv0, seg_a_uv1_loc, a_orig = _augment_antipodal(
+            seg_a_uv0, seg_a_uv1_loc, domain)
+        if self_sweep:
+            seg_b_uv0, seg_b_uv1_loc, b_orig = seg_a_uv0, seg_a_uv1_loc, a_orig
+        else:
+            seg_b_uv0, seg_b_uv1_loc, b_orig = _augment_antipodal(
+                seg_b_uv0, seg_b_uv1_loc, domain)
+
     a_d = np.ascontiguousarray(seg_a_uv1_loc - seg_a_uv0)
     b_d = np.ascontiguousarray(seg_b_uv1_loc - seg_b_uv0)
     a_uv0_c = np.ascontiguousarray(seg_a_uv0, dtype=np.float64)
@@ -300,6 +337,29 @@ def sweep_segments(
 
     if uv_all.shape[0] == 0:
         return np.empty(0, dtype=intersect_dtype)
+
+    if antipodal:
+        # Keep only inside-disk hits; map augmented indices back to originals;
+        # drop a segment crossing its own σ-copy; dedup the rest.
+        r2_in = float(domain.bounds[1]) ** 2
+        keep = (uv_all * uv_all).sum(axis=1) <= r2_in + tol
+        a_o = a_orig[a_all]
+        b_o = b_orig[b_all]
+        if self_sweep:
+            keep &= a_o != b_o
+        a_all = a_o[keep]; b_all = b_o[keep]
+        uv_all = uv_all[keep]; ta_all = ta_all[keep]; tb_all = tb_all[keep]
+        if len(uv_all) > 1:
+            if self_sweep:
+                lo = np.minimum(a_all, b_all); hi = np.maximum(a_all, b_all)
+            else:
+                lo, hi = a_all, b_all
+            key = np.column_stack([lo, hi,
+                                   np.round(uv_all * 1e6).astype(np.int64)])
+            _, uniq = np.unique(key, axis=0, return_index=True)
+            uniq = np.sort(uniq)
+            a_all = a_all[uniq]; b_all = b_all[uniq]
+            uv_all = uv_all[uniq]; ta_all = ta_all[uniq]; tb_all = tb_all[uniq]
 
     res = np.empty(uv_all.shape[0], dtype=intersect_dtype)
     res["uv"] = uv_all

@@ -561,7 +561,7 @@ def find_vps(
             cs_idx = abs(int(cc.cs_indices[j])) - 1
 
             p_uv = cps[i_cp]["uv"].copy()
-            q_uv = surface.domain.close(p_uv, cps[k_cp]["uv"])  # wrap-adjusted
+            q_uv = surface.domain.interpolate(p_uv, cps[k_cp]["uv"], 1.0)  # wrap-adjusted
 
             if refine:
                 uv_vp = _refine_cusp(p_uv, q_uv, surface, projection)
@@ -576,7 +576,7 @@ def find_vps(
             p_nat = int(cs["p_cp"])
             q_nat = int(cs["q_cp"])
             p_uv_nat = cps[p_nat]["uv"].copy()
-            q_uv_nat = surface.domain.close(p_uv_nat, cps[q_nat]["uv"])
+            q_uv_nat = surface.domain.interpolate(p_uv_nat, cps[q_nat]["uv"], 1.0)
             dir_uv_nat = q_uv_nat - p_uv_nat
             up_, vp_ = float(p_uv_nat[0]), float(p_uv_nat[1])
             Su_p = np.asarray(surface.Su(up_, vp_), dtype=float).reshape(3)

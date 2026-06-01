@@ -544,29 +544,40 @@ def test_antipodal_disk():
     """Antipodal boundary gluing closes the unit disk into ℝP²."""
     TWO_PI = 2 * math.pi
 
-    # Domain validation: antipodal requires the full unit disk.
-    with pytest.raises(ValueError, match="unit disk"):
-        Domain(type="disk", bounds=(0.1, 0.95, 0.0, TWO_PI),
-               boundary_identify="antipodal")           # annulus
-    with pytest.raises(ValueError, match="unit disk"):
-        Domain(type="disk", bounds=(0.0, 2.0, 0.0, TWO_PI),
-               boundary_identify="antipodal")           # r_max != 1
+    # Domain validation: antipodal is disk/annulus only — but ANY outer radius
+    # (no r_max=1 requirement; the involution is σ_R(z) = -R²/z̄).
     with pytest.raises(ValueError, match="only valid on a disk"):
         Domain(type="rect", bounds=(0.0, 1.0, 0.0, 1.0),
                boundary_identify="antipodal")
+    # Annulus is allowed: outer glued, inner boundary kept (Möbius band, χ=0).
+    dom_ann = Domain(type="annulus", bounds=(0.3, 1.0, 0.0, TWO_PI),
+                     boundary_identify="antipodal")
+    surf_ann = SurfaceParams("u", "v", "u*u + v*v", "u v", dom_ann, perturb=False)
+    m_ann = build_mesh(dom_ann, surf_ann, resolution=16, jitter=True, seed=1)
+    chi_ann = len(m_ann.uv) - len(m_ann.edges) + len(m_ann.faces)
+    assert chi_ann == 0, f"antipodal annulus (Möbius band): χ={chi_ann}, expected 0"
+    assert len(m_ann.boundary_edge_idx) > 0, "antipodal annulus keeps inner boundary"
+    assert (m_ann.edges["flip"] == -1).any()
+    # Non-unit outer radius closes to ℝP² just the same.
+    dom_r2 = Domain(type="disk", bounds=(0.0, 2.0, 0.0, TWO_PI),
+                    boundary_identify="antipodal")
+    m_r2 = build_mesh(dom_r2, SurfaceParams("u", "v", "u+v", "u v", dom_r2,
+                                            perturb=False), resolution=16, seed=1)
+    assert len(m_r2.uv) - len(m_r2.edges) + len(m_r2.faces) == 1
+    assert len(m_r2.boundary_edge_idx) == 0
 
     dom = Domain(type="disk", bounds=(0.0, 1.0, 0.0, TWO_PI),
                  boundary_identify="antipodal")
     assert dom.is_antipodal
 
-    # close(): point-reflection only near the boundary; interior unchanged.
-    p_b = np.array([0.98, 0.17]); q_b = np.array([-0.98, -0.17])
-    assert np.allclose(dom.close(p_b, q_b), [0.98, 0.17])     # reflected
+    # σ_R involution (R=1): σ(z) = -z/|z|²; localize picks the closer of {q, σ(q)}.
+    assert np.allclose(dom._sigma(np.array([[0.5, 0.0]])), [[-2.0, 0.0]])  # interior→exterior
+    # A near-boundary point: localize keeps the SAME-side rep (q here), not σ(q).
     p_i = np.array([0.1, 0.2]); q_i = np.array([0.15, 0.18])
-    assert np.allclose(dom.close(p_i, q_i), [0.15, 0.18])     # unchanged
-    # vectorized
-    out = dom.close(np.array([p_b, p_i]), np.array([q_b, q_i]))
-    assert np.allclose(out, [[0.98, 0.17], [0.15, 0.18]])
+    assert np.allclose(dom.localize(p_i, q_i), [0.15, 0.18])
+    # interpolate maps an outside result back inside the disk.
+    res = dom.interpolate(np.array([0.9, 0.0]), np.array([-0.9, 0.0]), 1.0)
+    assert np.hypot(*res) <= 1.0 + 1e-9
 
     surf = SurfaceParams("u", "v", "u*u + v*v", "u v", dom, perturb=False)
     m = build_mesh(dom, surf, resolution=16, jitter=True, seed=1)
