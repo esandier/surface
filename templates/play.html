@@ -251,7 +251,7 @@
     let controls = new TrackballControls(camera, renderer.domElement);
     controls.target.set(...center);
     controls.enablePan = false;
-    controls.enableZoom = false;
+    controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
     controls.staticMoving = true;
     controls.addEventListener("start", mouseDown);
     controls.addEventListener("end", () => mouseUp(false));
@@ -648,17 +648,28 @@
         updateSVGTransform();
     }
 
-    zoomSlider.addEventListener("input", () => { mouseDown(); applyZoom(zoomSlider.value / 100); });
-    zoomSlider.addEventListener("change", () => mouseUp(true));
+    // In orthographic mode zooming is a pure uniform scale: the silhouette
+    // shape is zoom-invariant, and `applyZoom` → `updateSVGTransform` already
+    // rescales the existing overlay (drawn in world coords). So skip the
+    // outline pipeline entirely — and skip `mouseDown`, which would wipe the
+    // SVG. Only perspective mode changes the projection (foreshortening), so
+    // only there does a zoom need a recompute.
+    zoomSlider.addEventListener("input", () => {
+        if (perspectiveMode) mouseDown();
+        applyZoom(zoomSlider.value / 100);
+    });
+    zoomSlider.addEventListener("change", () => { if (perspectiveMode) mouseUp(true); });
 
     let wheelTimer = null;
     canvas.addEventListener("wheel", e => {
         e.preventDefault();
-        mouseDown();
+        if (perspectiveMode) mouseDown();
         const currentZoom = perspectiveMode ? perspCamera.zoom : orthoCamera.zoom;
         applyZoom(currentZoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
-        clearTimeout(wheelTimer);
-        wheelTimer = setTimeout(() => mouseUp(true), 400);
+        if (perspectiveMode) {
+            clearTimeout(wheelTimer);
+            wheelTimer = setTimeout(() => mouseUp(true), 400);
+        }
     }, { passive: false });
 
     /* ---------------- PERSPECTIVE TOGGLE ---------------- */
@@ -676,7 +687,7 @@
         controls = new TrackballControls(camera, renderer.domElement);
         controls.target.set(...center);
         controls.enablePan = false;
-        controls.enableZoom = false;
+        controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
         controls.staticMoving = true;
         controls.addEventListener("start", mouseDown);
         controls.addEventListener("end", () => mouseUp(false));
@@ -767,7 +778,7 @@
         controls = new TrackballControls(camera, renderer.domElement);
         controls.target.set(...center);
         controls.enablePan = false;
-        controls.enableZoom = false;
+        controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
         controls.staticMoving = true;
         controls.addEventListener("start", mouseDown);
         controls.addEventListener("end", () => mouseUp(false));
