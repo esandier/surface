@@ -866,17 +866,26 @@ def _bc_s_targets(
     tangent-pick the CC ending at the BCP whose outgoing image tangent aligns
     with the BC's outgoing tangent, and adopt that CC's vertex arclengths-from-
     the-SP as the BC's samples (REPLACING — not unioning — the BC's own raw
-    vertices) out to `min(L_BC/2, L_CC/2)`, whichever half comes first. Beyond
-    that matched extent (the un-matched middle) the BC reverts to its own raw
-    vertices (`own_cum`).
+    vertices). Beyond that matched extent (the un-matched middle) the BC reverts
+    to its own raw vertices (`own_cum`).
+
+    Matched extent:
+    - **Both ends match** a CC: each end takes its own half, capped at
+      `min(L_BC/2, L_CC/2)`, so the two ladders meet at the midpoint without
+      colliding. (For a lune — both endpoints share the same CC, near-equal
+      lengths — the halves meet and the BC becomes a vertex-exact copy of the
+      CC.)
+    - **Only one end matches** (the other is a corner / BDP / CDP / non-BCP, or
+      has no tangent-aligned CC): there is no competing rule at the far end, so
+      the single match extends over the WHOLE BC, capped only by the CC's own
+      length `min(L_BC, L_CC)`. Beyond `L_CC` (CC shorter than BC) the BC
+      reverts to its own vertices.
 
     Rationale: at a BCP the BC and the tangent CC are near-coincident in the
     image; sampling them at *identical* arclengths-from-the-shared-origin makes
     their polylines coincide, so they cannot weave (the old UNION kept the BC's
     own vertices in the matched region, which bulged off the CC's chord and
     produced spurious grazing crossings — the Onde fold-tip "lune" ±4 defect).
-    For a lune (both endpoints share the same CC, near-equal lengths) the two
-    matched halves meet → the BC becomes a vertex-exact copy of the CC.
 
     The rule does NOT apply at corners, BDPs, CDPs, or other non-BCP SPs.
     See [[resume-hc-match-cc]].
@@ -893,32 +902,47 @@ def _bc_s_targets(
             return False
         return t == "bcp"
 
-    # Matched region from each BCP end: CC vertex arclengths-from-SP, capped at
-    # min(BC half, CC half). `ext_*` is the matched extent (0 = no match).
-    ext_start = 0.0
-    ext_end = 0.0
-    matched: list[float] = []  # arclengths-from-the-BC-start of matched samples
-
+    # Probe both endpoints for a tangent-aligned CC. Cap the picker at the full
+    # BC length (L_total) so a single-end match can extend over the whole BC;
+    # the per-end extent is applied below once we know whether the OTHER end
+    # also has a rule.
+    start_arcs = end_arcs = None
+    L_cc_start = L_cc_end = 0.0
     if _sp_is_bcp(sub_bc.start):
         T_start = _sub_outgoing_xy_tangent(sub_bc, sub_bc.start, xy_p)
-        start_arcs, L_cc = _pick_neighbour_arclengths(
-            sub_bc.start, T_start, subcurves, polys, half_L,
+        start_arcs, L_cc_start = _pick_neighbour_arclengths(
+            sub_bc.start, T_start, subcurves, polys, L_total,
             exclude_kinds=("BC", "HC", "SIC"), self_idx=i_bc,
             return_length=True,
         )
-        if start_arcs is not None:
-            ext_start = min(half_L, L_cc / 2.0)
-            matched.extend(float(a) for a in start_arcs if a <= ext_start)
     if _sp_is_bcp(sub_bc.end):
         T_end = _sub_outgoing_xy_tangent(sub_bc, sub_bc.end, xy_p)
-        end_arcs, L_cc = _pick_neighbour_arclengths(
-            sub_bc.end, T_end, subcurves, polys, half_L,
+        end_arcs, L_cc_end = _pick_neighbour_arclengths(
+            sub_bc.end, T_end, subcurves, polys, L_total,
             exclude_kinds=("BC", "HC", "SIC"), self_idx=i_bc,
             return_length=True,
         )
-        if end_arcs is not None:
-            ext_end = min(half_L, L_cc / 2.0)
-            matched.extend(float(L_total - a) for a in end_arcs if a <= ext_end)
+
+    has_start = start_arcs is not None
+    has_end = end_arcs is not None
+
+    # Decide the matched extent from each end. Both ends matching is the only
+    # "conflict": split the BC at the midpoint (each half-capped at its CC's
+    # own half). A lone match owns the whole BC, capped by its CC's length.
+    ext_start = ext_end = 0.0
+    if has_start and has_end:
+        ext_start = min(half_L, L_cc_start / 2.0)
+        ext_end = min(half_L, L_cc_end / 2.0)
+    elif has_start:
+        ext_start = min(L_total, L_cc_start)
+    elif has_end:
+        ext_end = min(L_total, L_cc_end)
+
+    matched: list[float] = []  # arclengths-from-the-BC-start of matched samples
+    if has_start:
+        matched.extend(float(a) for a in start_arcs if a <= ext_start)
+    if has_end:
+        matched.extend(float(L_total - a) for a in end_arcs if a <= ext_end)
 
     s_set = {0.0, float(L_total)}
     s_set.update(matched)
@@ -1284,10 +1308,20 @@ def resample_all(
         # target arclengths just like BC. Step 3: interpolate back to uv.
         if sub.kind == "HC":
             uv_q0 = uv_p[0]; uv_q1 = uv_p[1]
-            N_dense = _settings.HC_DENSIFY_N
+            # Unified densification (spec 2026-06-03): N points =
+            # resolution·10·L/M — samples per unit image-arclength, unit = M
+            # (mesh-xy bbox diagonal), so spacing ≈ ell/10 and BC/HC share one
+            # density. The HC is a straight uv line but curved in the image, so
+            # bootstrap L from a coarse pass before choosing N.
+            t_boot = np.linspace(0.0, 1.0, 33)
+            uv_boot = uv_q0[None, :] + t_boot[:, None] * (uv_q1 - uv_q0)[None, :]
+            xy_boot = projection.XY(np.ascontiguousarray(
+                np.asarray(surface.S(uv_boot[:, 0], uv_boot[:, 1]), dtype=float).T))
+            L_boot = float(_arclengths(xy_boot)[-1])
+            N_dense = max(2, int(round(resolution * 10.0 * L_boot / M)))
             t_dense = np.linspace(0.0, 1.0, N_dense)
             uv_dense = uv_q0[None, :] + t_dense[:, None] * (uv_q1 - uv_q0)[None, :]
-            # Batched dense xyz/xy: one `surface.S` call for all 200 uv pairs.
+            # Batched dense xyz/xy: one `surface.S` call for all N_dense uv pairs.
             S_dense = np.asarray(
                 surface.S(uv_dense[:, 0], uv_dense[:, 1]), dtype=float,
             )  # (3, N_dense)
@@ -1376,7 +1410,13 @@ def resample_all(
             # See [[resume-hc-match-cc]].
             s_targets = cum.copy()
         elif sub.kind == "BC":
-            interp_nsub = _settings.BC_DENSIFY_NSUB
+            # Unified densification (spec 2026-06-03): total dense points ≈
+            # resolution·10·L/M (samples per unit image-arclength, unit = M),
+            # matching HC. `_densify_bc_polyline` subdivides each of the n_seg
+            # mesh-edge segments uniformly, so map the target total to a
+            # per-segment subdivision count (≥ 1).
+            n_seg = max(1, len(uv_p) - 1)
+            interp_nsub = max(1, int(round(resolution * 10.0 * L_total / M / n_seg)))
             interp_uv, interp_xy, interp_cum = _densify_bc_polyline(
                 uv_p, surface, projection, domain, interp_nsub)
             # Native-vertex arclengths in the ACCURATE metric (dense vertex k
@@ -1406,32 +1446,44 @@ def resample_all(
         # sub.internal[k] (if k < len(sub.internal)); the last poly-segment ends at end SP,
         # which sits on sub.internal[-1]'s segment (if any) or directly the start segment.
 
-        # Phase 1 — per-sample uv resolution (polyline walk + snap + Newton).
-        # No surface evals here so Phase 2 can do a single batched _eval_all.
+        # Phase 1 (vectorized) — resolve all sample uv in one batched polyline
+        # walk. The former per-sample `_interp_along_polyline` (clip /
+        # searchsorted / close-aware lerp) is array-friendly, and
+        # `domain.interpolate` already accepts (N,2)/(N,) inputs, so the whole
+        # `s_targets` ladder resolves in a handful of numpy ops instead of N
+        # Python-level calls. No surface evals here so Phase 2 can do a single
+        # batched _eval_all.
         chain_segs = np.full(N, -1, dtype=np.int64)
-        seg_ps = np.zeros(N, dtype=np.int64)
-        alphas = np.zeros(N, dtype=float)
-        for j, s in enumerate(s_targets):
-            uv_s, dseg, alpha = _interp_along_polyline(
-                interp_uv, interp_xy, interp_cum, s, domain)
-            # Map dense segment back to the original build-polyline segment.
-            seg_p = dseg // interp_nsub
-            if (sub.kind == "BC" and domain is not None
-                    and getattr(domain, "type", None) in ("disk", "annulus")):
-                uv_s = _snap_annular_bc(uv_s, mesh)
-            if sub.kind == "CC" and project_resampled:
-                uv_s = _newton_cc_refine(uv_s, surface, projection)
-            sample_uv[j] = uv_s
-            seg_ps[j] = seg_p
-            alphas[j] = alpha
-            if sample_dir is not None:
-                int_idx = seg_p
-                if int_idx >= len(sub.internal):
-                    int_idx = len(sub.internal) - 1
-                if int_idx < 0:
-                    int_idx = 0
-                chain_segs[j] = (int(sub.internal[int_idx][0])
-                                  if sub.internal else -1)
+        if N > 0 and len(interp_cum) >= 2:
+            st = np.clip(np.asarray(s_targets, dtype=float), 0.0, interp_cum[-1])
+            dseg = np.searchsorted(interp_cum, st, side="right") - 1
+            dseg = np.clip(dseg, 0, len(interp_cum) - 2)
+            span = interp_cum[dseg + 1] - interp_cum[dseg]
+            alphas = np.where(span > 0, (st - interp_cum[dseg]) / span, 0.0)
+            uv_a = interp_uv[dseg]
+            uv_b = interp_uv[dseg + 1]
+            if domain is None:
+                sample_uv = uv_a + alphas[:, None] * (uv_b - uv_a)
+            else:
+                sample_uv = np.asarray(
+                    domain.interpolate(uv_a, uv_b, alphas), dtype=float)
+            seg_ps = (dseg // interp_nsub).astype(np.int64)
+        else:
+            alphas = np.zeros(N, dtype=float)
+            seg_ps = np.zeros(N, dtype=np.int64)
+        # Per-sample geometric corrections (rare paths; absent for plain rect /
+        # non-projected resampling — kept looped to preserve exact behaviour).
+        if (sub.kind == "BC" and domain is not None
+                and getattr(domain, "type", None) in ("disk", "annulus")):
+            for j in range(N):
+                sample_uv[j] = _snap_annular_bc(sample_uv[j], mesh)
+        if sub.kind == "CC" and project_resampled:
+            for j in range(N):
+                sample_uv[j] = _newton_cc_refine(sample_uv[j], surface, projection)
+        # Map each sample's original build-polyline segment to its mesh/CS index.
+        if sample_dir is not None and sub.internal:
+            internal0 = np.array([int(e[0]) for e in sub.internal], dtype=np.int64)
+            chain_segs = internal0[np.clip(seg_ps, 0, len(sub.internal) - 1)]
 
         # Phase 2 — single batched `_eval_all` over all samples. The cse'd
         # lambdified callable computes S, Su, Sv, Suu, Suv, Svv, SN for
