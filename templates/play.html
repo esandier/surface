@@ -254,6 +254,7 @@
     controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
     controls.staticMoving = true;
     controls.addEventListener("start", mouseDown);
+    controls.addEventListener("change", syncDialsLive);
     controls.addEventListener("end", () => mouseUp(false));
 
     /* ---------------- RESIZE ---------------- */
@@ -529,12 +530,23 @@
         updateAllDialDisplays();
     }
 
+    // Live-sync the panel dials to the camera while the canvas is dragged.
+    // Fired on every TrackballControls "change". Guarded so a dial-driven
+    // camera move (setCameraFromAngles → controls.update) doesn't overwrite
+    // and fight the dial the user is currently dragging.
+    let dialDragging = false;
+    function syncDialsLive() {
+        if (dialDragging) return;
+        updateDialsFromAngles(readAnglesFromCamera());
+    }
+
     /* Generic dial drag setup */
     function makeDial(svgId, getAngle, setAngle, onDragEnd, wrapDeg = false) {
         const el = document.getElementById(svgId);
         let dragging = false;
         el.addEventListener("mousedown", e => {
             dragging = true;
+            dialDragging = true;
             el.style.cursor = "grabbing";
             mouseDown();
             e.preventDefault();
@@ -556,6 +568,7 @@
         window.addEventListener("mouseup", () => {
             if (!dragging) return;
             dragging = false;
+            dialDragging = false;
             el.style.cursor = "grab";
             mouseUp(true);
         });
@@ -690,6 +703,7 @@
         controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
         controls.staticMoving = true;
         controls.addEventListener("start", mouseDown);
+        controls.addEventListener("change", syncDialsLive);
         controls.addEventListener("end", () => mouseUp(false));
 
         setCameraFromAngles(angles.elev, angles.azim, angles.inPlane);
@@ -781,6 +795,7 @@
         controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
         controls.staticMoving = true;
         controls.addEventListener("start", mouseDown);
+        controls.addEventListener("change", syncDialsLive);
         controls.addEventListener("end", () => mouseUp(false));
     }
     setCameraFromAngles(SAVED_ANGLES.elev, SAVED_ANGLES.azim, SAVED_ANGLES.inPlane);
