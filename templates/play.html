@@ -119,7 +119,7 @@
                 </div>
                 <!-- Single resolution knob — drives mesh density AND outline sampling
                      (surface_play/settings.py RESOLUTION = 200 is the production default). -->
-                <input type="range" id="dbg-resolution" min="20" max="400" step="10" value="200" style="width:100%; cursor:pointer;">
+                <input type="range" id="dbg-resolution" min="20" max="400" step="10" value="200" autocomplete="off" style="width:100%; cursor:pointer;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-jitter" style="font-size:12px; color:#333; margin:0;">Jitter mesh</label>
@@ -127,19 +127,15 @@
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-seed" style="font-size:12px; color:#333; margin:0;">Seed <span style="color:#999; font-size:10px;">(blank=random)</span></label>
-                <input type="number" id="dbg-seed" placeholder="random" style="width:72px; font-size:11px;">
+                <input type="number" id="dbg-seed" placeholder="random" autocomplete="off" style="width:72px; font-size:11px;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <label for="dbg-bc-densify" style="font-size:12px; color:#333; margin:0;" title="BC build-polyline subdivisions per boundary mesh-edge segment">BC densify /seg</label>
-                <input type="number" id="dbg-bc-densify" value="24" min="1" max="200" style="width:72px; font-size:11px;">
-            </div>
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <label for="dbg-hc-densify" style="font-size:12px; color:#333; margin:0;" title="HC straight-line total dense samples (arclength table)">HC densify total</label>
-                <input type="number" id="dbg-hc-densify" value="200" min="2" max="2000" style="width:72px; font-size:11px;">
+                <label for="dbg-densify" style="font-size:12px; color:#333; margin:0;" title="BC & HC densification: dense polyline spacing = ell / this (dense pts ≈ resolution·this·L/M)">Densify subdiv</label>
+                <input type="number" id="dbg-densify" value="10" min="1" max="50" autocomplete="off" style="width:72px; font-size:11px;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
                 <label for="dbg-ha-trim" style="font-size:12px; color:#333; margin:0;" title="Trim HA samples within this many chain steps of a cusp/VP/TP">HA cusp trim</label>
-                <input type="number" id="dbg-ha-trim" value="5" min="0" max="50" style="width:72px; font-size:11px;">
+                <input type="number" id="dbg-ha-trim" value="5" min="0" max="50" autocomplete="off" style="width:72px; font-size:11px;">
             </div>
             <div style="display:flex; justify-content:flex-end;">
                 <button id="dbg-apply-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Apply</button>
@@ -349,13 +345,12 @@
         const resolution = parseInt(document.getElementById('dbg-resolution').value);
         const jitter     = document.getElementById('dbg-jitter').checked;
         const seedRaw    = document.getElementById('dbg-seed').value;
-        const bcDensify  = parseInt(document.getElementById('dbg-bc-densify').value);
-        const hcDensify  = parseInt(document.getElementById('dbg-hc-densify').value);
+        const densify    = parseInt(document.getElementById('dbg-densify').value);
         const haTrim     = parseInt(document.getElementById('dbg-ha-trim').value);
         // Backend (views._debug_kwargs) routes: PROPAGATION/NEWTON_CUSP/
         // PROJECT_RESAMPLED → build_outline kwargs; RESOLUTION/JITTER/SEED →
-        // build_surface_init; BC_DENSIFY_NSUB/HC_DENSIFY_N/HA_CUSP_TRIM →
-        // scoped surface_play.settings override for the outline build.
+        // build_surface_init; DENSIFY_SUBDIV/HA_CUSP_TRIM → scoped
+        // surface_play.settings override for the outline build.
         return {
             PROPAGATION: use_lp ? "LP4" : "BFS",
             NEWTON_CUSP: use_newton,
@@ -363,8 +358,7 @@
             RESOLUTION: resolution,
             JITTER: jitter,
             SEED: seedRaw === "" ? null : parseInt(seedRaw),
-            BC_DENSIFY_NSUB: bcDensify,
-            HC_DENSIFY_N: hcDensify,
+            DENSIFY_SUBDIV: densify,
             HA_CUSP_TRIM: haTrim,
         };
     }
@@ -553,6 +547,11 @@
     const LW_CONTOUR = 0.9, LW_SIC = 1.5;           // pt; TikZ widths (SIC thicker)
     const LW_CONTOUR_PDF = 0.7, LW_SIC_PDF = 1.2;   // pt; PDF widths (slightly thinner)
     const DASH = [3, 3];                             // pt on/off for hidden segments
+    // TikZ Bézier-fit tolerance (pt): max distance between the fitted cubic
+    // and the original polyline. Sub-perceptible at a 10 cm figure (~0.1 mm).
+    // Each emitted curve is a smooth arc (cusps are split endpoints), so the
+    // fit never has to round a corner.
+    const TIKZ_FIT_PT = 0.3;
 
     // Flatten lastOutline into [{pts, visible, sic}], skipping degenerate polys.
     function _exportPolys() {
@@ -601,20 +600,127 @@
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
+    // ── Cubic-Bézier curve fitting (Schneider, "Graphics Gems" 1990) ─────────
+    // Fits a chain of cubic Béziers to a smooth polyline within `tol` (pt):
+    // chord-length parameterize → least-squares fit two control points →
+    // Newton reparameterize a few times → split at the worst point and recurse.
+    // 2D points are [x, y] arrays.
+    const _vsub = (a, b) => [a[0] - b[0], a[1] - b[1]];
+    const _vadd = (a, b) => [a[0] + b[0], a[1] + b[1]];
+    const _vmul = (a, s) => [a[0] * s, a[1] * s];
+    const _vdot = (a, b) => a[0] * b[0] + a[1] * b[1];
+    const _vlen = a => Math.hypot(a[0], a[1]);
+    const _vnorm = a => { const n = Math.hypot(a[0], a[1]); return n ? [a[0] / n, a[1] / n] : [0, 0]; };
+
+    function _bezPt(b, t) {                       // cubic Bézier point at t
+        const u = 1 - t, w0 = u*u*u, w1 = 3*u*u*t, w2 = 3*u*t*t, w3 = t*t*t;
+        return [w0*b[0][0] + w1*b[1][0] + w2*b[2][0] + w3*b[3][0],
+                w0*b[0][1] + w1*b[1][1] + w2*b[2][1] + w3*b[3][1]];
+    }
+    function _bezDerivs(b) {                       // control pts of q' (deg2) and q'' (deg1)
+        const d = [_vmul(_vsub(b[1], b[0]), 3), _vmul(_vsub(b[2], b[1]), 3), _vmul(_vsub(b[3], b[2]), 3)];
+        const dd = [_vmul(_vsub(d[1], d[0]), 2), _vmul(_vsub(d[2], d[1]), 2)];
+        return [d, dd];
+    }
+    function _chordParam(pts) {
+        const u = [0];
+        for (let i = 1; i < pts.length; i++) u[i] = u[i - 1] + _vlen(_vsub(pts[i], pts[i - 1]));
+        const last = u[u.length - 1] || 1;
+        return u.map(x => x / last);
+    }
+    function _genBezier(pts, u, lT, rT) {
+        const n = pts.length, first = pts[0], last = pts[n - 1];
+        let c00 = 0, c01 = 0, c11 = 0, x0 = 0, x1 = 0;
+        for (let i = 0; i < n; i++) {
+            const t = u[i], ut = 1 - t;
+            const a0 = _vmul(lT, 3 * t * ut * ut), a1 = _vmul(rT, 3 * t * t * ut);
+            c00 += _vdot(a0, a0); c01 += _vdot(a0, a1); c11 += _vdot(a1, a1);
+            const b0 = ut*ut*ut, b1 = 3*ut*ut*t, b2 = 3*ut*t*t, b3 = t*t*t;
+            const tmp = _vsub(pts[i], _vadd(_vmul(first, b0 + b1), _vmul(last, b2 + b3)));
+            x0 += _vdot(a0, tmp); x1 += _vdot(a1, tmp);
+        }
+        const det = c00 * c11 - c01 * c01;
+        let aL = det === 0 ? 0 : (x0 * c11 - c01 * x1) / det;
+        let aR = det === 0 ? 0 : (c00 * x1 - c01 * x0) / det;
+        const segLen = _vlen(_vsub(first, last)), eps = 1e-6 * segLen;
+        if (aL < eps || aR < eps) { aL = aR = segLen / 3; }   // Wu/Barsky fallback
+        return [first, _vadd(first, _vmul(lT, aL)), _vadd(last, _vmul(rT, aR)), last];
+    }
+    function _reparam(b, pts, u) {
+        const [d, dd] = _bezDerivs(b);
+        const q1 = t => { const ut = 1 - t; return _vadd(_vadd(_vmul(d[0], ut*ut), _vmul(d[1], 2*ut*t)), _vmul(d[2], t*t)); };
+        const q2 = t => _vadd(_vmul(dd[0], 1 - t), _vmul(dd[1], t));
+        return u.map((t, i) => {
+            const diff = _vsub(_bezPt(b, t), pts[i]);
+            const num = _vdot(diff, q1(t));
+            const den = _vdot(q1(t), q1(t)) + _vdot(diff, q2(t));
+            return den === 0 ? t : t - num / den;
+        });
+    }
+    function _maxErrSq(pts, b, u) {                 // squared max distance + its index
+        let mx = 0, idx = Math.floor(pts.length / 2);
+        for (let i = 1; i < pts.length - 1; i++) {
+            const v = _vsub(_bezPt(b, u[i]), pts[i]), d = v[0]*v[0] + v[1]*v[1];
+            if (d > mx) { mx = d; idx = i; }
+        }
+        return [mx, idx];
+    }
+    function _fitCubic(pts, lT, rT, tol) {
+        if (pts.length === 2) {
+            const d = _vlen(_vsub(pts[0], pts[1])) / 3;
+            return [[pts[0], _vadd(pts[0], _vmul(lT, d)), _vadd(pts[1], _vmul(rT, d)), pts[1]]];
+        }
+        let u = _chordParam(pts);
+        let bez = _genBezier(pts, u, lT, rT);
+        let [errSq, split] = _maxErrSq(pts, bez, u);
+        const tolSq = tol * tol;
+        if (errSq < tolSq) return [bez];
+        if (errSq < tolSq * 16) {                   // close enough → try reparameterizing
+            for (let k = 0; k < 4; k++) {
+                u = _reparam(bez, pts, u);
+                bez = _genBezier(pts, u, lT, rT);
+                [errSq, split] = _maxErrSq(pts, bez, u);
+                if (errSq < tolSq) return [bez];
+            }
+        }
+        if (split <= 0) split = 1;
+        if (split >= pts.length - 1) split = pts.length - 2;
+        const cT = _vnorm(_vsub(pts[split - 1], pts[split + 1]));
+        return _fitCubic(pts.slice(0, split + 1), lT, cT, tol)
+            .concat(_fitCubic(pts.slice(split), _vmul(cT, -1), rT, tol));
+    }
+    function _fitCurve(pts, tol) {
+        if (pts.length < 2) return [];
+        const lT = _vnorm(_vsub(pts[1], pts[0]));
+        const rT = _vnorm(_vsub(pts[pts.length - 2], pts[pts.length - 1]));
+        return _fitCubic(pts, lT, rT, tol);
+    }
+    function _dedupe(pts) {                          // drop consecutive coincident points
+        const out = [pts[0]];
+        for (let i = 1; i < pts.length; i++)
+            if (_vlen(_vsub(pts[i], out[out.length - 1])) > 1e-6) out.push(pts[i]);
+        return out;
+    }
+
     function buildTikZ() {
         const polys = _exportPolys();
         if (!polys) return null;
         const fit = _exportFit(polys, EXPORT_PT);
         const r = v => v.toFixed(2);
+        const P = q => `(${r(q[0])},${r(q[1])})`;
         const body = _exportOrder(polys).map(o => {
-            const coords = o.pts.map(p => { const q = fit.map(p);
-                return `(${r(q[0])},${r(q[1])})`; }).join(" -- ");
+            const pts = _dedupe(o.pts.map(p => fit.map(p)));
+            if (pts.length < 2) return null;
+            const bez = _fitCurve(pts, TIKZ_FIT_PT);
+            // Connected path: start point, then a cubic per segment.
+            let path = P(bez[0][0]);
+            for (const b of bez) path += ` .. controls ${P(b[1])} and ${P(b[2])} .. ${P(b[3])}`;
             const lw = o.sic ? LW_SIC : LW_CONTOUR;
             const style = o.visible
                 ? `black, line width=${lw}pt`
                 : `gray, line width=${lw}pt, dash pattern=on ${DASH[0]}pt off ${DASH[1]}pt`;
-            return `  \\draw[${style}] ${coords};`;
-        }).join("\n");
+            return `  \\draw[${style}] ${path};`;
+        }).filter(Boolean).join("\n");
         return `% Apparent contour of "{{ surface.name }}" — coordinates in pt.\n`
              + `\\begin{tikzpicture}[x=1pt,y=1pt]\n${body}\n\\end{tikzpicture}\n`;
     }
