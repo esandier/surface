@@ -73,8 +73,8 @@
                                     <td class="pl-3">
                                         <select name="u_identify" id="id_u_identify" class="form-control form-control-sm" style="font-family:monospace;">
                                             <option value="no" {% if form.u_identify.value == 'no' %}selected{% endif %}>none</option>
-                                            <option value="cy" {% if form.u_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
-                                            <option value="mo" {% if form.u_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
+                                            <option value="cy" {% if form.u_identify.value == 'cy' %}selected{% endif %}>straight: (xmin,y)~(xmax,y)</option>
+                                            <option value="mo" {% if form.u_identify.value == 'mo' %}selected{% endif %}>flipped: (xmin,y)~(xmax,−y)</option>
                                         </select>
                                     </td>
                                 </tr>
@@ -94,8 +94,8 @@
                                     <td class="pl-3">
                                         <select name="v_identify" id="id_v_identify" class="form-control form-control-sm" style="font-family:monospace;">
                                             <option value="no" {% if form.v_identify.value == 'no' %}selected{% endif %}>none</option>
-                                            <option value="cy" {% if form.v_identify.value == 'cy' %}selected{% endif %}>cylinder</option>
-                                            <option value="mo" {% if form.v_identify.value == 'mo' %}selected{% endif %}>Möbius</option>
+                                            <option value="cy" {% if form.v_identify.value == 'cy' %}selected{% endif %}>straight: (x,ymin)~(x,ymax)</option>
+                                            <option value="mo" {% if form.v_identify.value == 'mo' %}selected{% endif %}>flipped: (x,ymin)~(−x,ymax)</option>
                                         </select>
                                     </td>
                                 </tr>
@@ -106,6 +106,7 @@
                         {% for e in form.v_min.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
                         {% for e in form.v_max.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
                         <small class="form-text text-muted">Bounds accept expressions like <code>2*pi</code>, <code>pi/3</code></small>
+                        <small class="form-text text-muted" style="margin-top:2px;">Edge gluing — <code>straight</code>+<code>straight</code> = torus · <code>flipped</code>+<code>none</code> = Möbius · <code>flipped</code>+<code>straight</code> = Klein bottle</small>
                     </div>
 
                     <!-- ── DISK domain ── -->
@@ -151,9 +152,9 @@
                                 <input class="form-check-input" type="checkbox" name="boundary_identify"
                                     id="id_boundary_identify" value="an"
                                     {% if form.boundary_identify.value == 'an' %}checked{% endif %}>
-                                <label class="form-check-label" for="id_boundary_identify">Antipodal identify</label>
+                                <label class="form-check-label" for="id_boundary_identify">antipodal identification: (x,y)~(−x,−y) on outer circle</label>
                             </div>
-                            <small class="form-text text-muted">Identify antipodal point on the outer boundary.</small>
+                            <small class="form-text text-muted">Glue each outer-boundary point to its antipode → ℝP² (e.g. Boy surface).</small>
                             {% for e in form.boundary_identify.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
                         </div>
                     </div>

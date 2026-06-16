@@ -4,13 +4,13 @@
 {% block content %}
 <div class="container-fluid d-flex flex-column vh-100">
 
-    <div class="row justify-content-between p-3 titre">
-        <h1>{{ surface.name }}</h1>
-        <h1>
-            <div id="spinner" class="spinner-border" style="visibility:hidden"></div>
-            <a id="download-button" class="glyph" style="visibility:hidden; cursor:pointer; font-size:0.62em; font-weight:700; letter-spacing:0.02em;" title="Download .svg file">SVG</a>
-            <a id="download-pdf" class="glyph" style="visibility:hidden; cursor:pointer; font-size:0.62em; font-weight:700; letter-spacing:0.02em;" title="Download .pdf file">PDF</a>
-            <a id="download-tikz" class="glyph" style="visibility:hidden; cursor:pointer; font-size:0.62em; font-weight:700; letter-spacing:0.02em;" title="Copy TikZ snippet to clipboard">TikZ</a>
+    <div class="row p-3 titre" style="align-items:center; flex-wrap:wrap;">
+        <h1 style="margin:0; min-width:8em; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ surface.name }}</h1>
+        <h1 style="margin:0; margin-left:auto; white-space:nowrap;">
+            <div id="spinner" class="spinner-border" title="Computing the apparent contour…"></div>
+            <a id="download-button" class="glyph export-btn export-disabled icon-badge" style="cursor:pointer;" title="Download .svg file"><span class="fa-solid fa-file"></span><span class="icon-badge-text">SVG</span></a>
+            <a id="download-pdf" class="glyph export-btn export-disabled" style="cursor:pointer;" title="Download .pdf file"><span class="fa-solid fa-file-pdf"></span></a>
+            <a id="download-tikz" class="glyph export-btn export-disabled icon-badge" style="cursor:pointer;" title="Copy TikZ snippet to clipboard (LaTeX/TikZ code)"><span class="fa-solid fa-clipboard"></span><span class="icon-badge-text tikz">TikZ</span></a>
             <a id="thumbnail-btn" class="glyph" style="cursor:pointer;" title="Make this the default view">
                 <span class="fa-solid fa-camera"></span>
             </a>
@@ -133,9 +133,13 @@
                 <label for="dbg-densify" style="font-size:12px; color:#333; margin:0;" title="BC & HC densification: dense polyline spacing = ell / this (dense pts ≈ resolution·this·L/M)">Densify subdiv</label>
                 <input type="number" id="dbg-densify" value="10" min="1" max="50" autocomplete="off" style="width:72px; font-size:11px;">
             </div>
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-ha-trim" style="font-size:12px; color:#333; margin:0;" title="Trim HA samples within this many chain steps of a cusp/VP/TP">HA cusp trim</label>
                 <input type="number" id="dbg-ha-trim" value="5" min="0" max="50" autocomplete="off" style="width:72px; font-size:11px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                <label for="dbg-vp-trim" style="font-size:12px; color:#333; margin:0;" title="At each cusp (VP), drop this many innermost equal-distance points from both contour branches">VP trim</label>
+                <input type="number" id="dbg-vp-trim" value="3" min="0" max="20" autocomplete="off" style="width:72px; font-size:11px;">
             </div>
             <div style="display:flex; justify-content:flex-end;">
                 <button id="dbg-apply-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Apply</button>
@@ -148,13 +152,37 @@
 </div>
 
 <style>
+/* Export glyphs (SVG/PDF/TikZ) stay visible on desktop but are greyed and
+   non-clickable until an outline exists (and again while one is recomputing). */
+.export-disabled { opacity: 0.4; pointer-events: none; cursor: default !important; }
+
+/* Composite export glyphs: a SOLID Font Awesome file/clipboard icon with the
+   format name overlaid in the title-bar colour, so it reads as knocked-out text
+   exactly like fa-file-pdf's baked-in "PDF". The webfont build has no fa-layers,
+   so the label is positioned by CSS. */
+.icon-badge { position: relative; display: inline-block; }
+.icon-badge-text {
+    position: absolute; top: 62%; left: 50%; transform: translate(-50%, -50%);
+    font-family: Arial, Helvetica, sans-serif; font-weight: 700; line-height: 1;
+    font-size: 0.36em; letter-spacing: -0.03em; white-space: nowrap;
+    color: #ff9400;   /* = div.titre background → looks knocked out, like "PDF" */
+    pointer-events: none;
+}
+.icon-badge-text.tikz { font-size: 0.34em; letter-spacing: -0.07em; top: 56%; font-weight: 800; }
+
+/* The "in progress" spinner is hidden entirely when idle and shown (Bootstrap
+   animation) only while a recompute is running. Sized in em so it matches the
+   surrounding header icon glyphs. */
+#spinner { display: none; width: 0.9em; height: 0.9em; border-width: 0.12em; vertical-align: middle; }
+#spinner.spinner-running { display: inline-block; }
+
 @media (pointer: coarse) {
     /* The visual-controls and debug panels are disabled on touch devices, so
        their toggle buttons would do nothing — hide the buttons too. */
     #controls-panel,  #debug-panel  { display: none !important; }
     #controls-toggle, #debug-toggle { display: none !important; }
     /* File exports (SVG/PDF/TikZ) aren't useful on a phone — hide them.
-       display:none overrides the JS-driven `visibility` toggling on these. */
+       display:none overrides the greyed-but-present desktop state. */
     #download-button, #download-pdf, #download-tikz { display: none !important; }
 }
 </style>
@@ -187,6 +215,16 @@
     const downloadButton = document.getElementById("download-button");
     const pdfButton  = document.getElementById("download-pdf");
     const tikzButton = document.getElementById("download-tikz");
+
+    // Export glyphs and the spinner are always in the DOM; we only toggle their
+    // enabled/active state (greyed vs live) rather than show/hide or swap them.
+    function setExportsEnabled(on) {
+        [downloadButton, pdfButton, tikzButton].forEach(
+            b => b.classList.toggle("export-disabled", !on));
+    }
+    function setSpinnerActive(on) {
+        spinner.classList.toggle("spinner-running", on);
+    }
 
     /* ---------------- SCENE & LIGHTING ---------------- */
     const scene = new THREE.Scene();
@@ -320,9 +358,7 @@
     /* ---------------- INTERACTION ---------------- */
     function mouseDown() {
         svg.innerHTML = "";
-        downloadButton.style.visibility = "hidden";
-        pdfButton.style.visibility = "hidden";
-        tikzButton.style.visibility = "hidden";
+        setExportsEnabled(false);   // outline now stale → grey the exports
         material.emissive.setHex(0x000000);
         material.emissiveIntensity = 0;
         material.shininess = 80;
@@ -347,9 +383,10 @@
         const seedRaw    = document.getElementById('dbg-seed').value;
         const densify    = parseInt(document.getElementById('dbg-densify').value);
         const haTrim     = parseInt(document.getElementById('dbg-ha-trim').value);
+        const vpTrim     = parseInt(document.getElementById('dbg-vp-trim').value);
         // Backend (views._debug_kwargs) routes: PROPAGATION/NEWTON_CUSP/
         // PROJECT_RESAMPLED → build_outline kwargs; RESOLUTION/JITTER/SEED →
-        // build_surface_init; DENSIFY_SUBDIV/HA_CUSP_TRIM → scoped
+        // build_surface_init; DENSIFY_SUBDIV/HA_CUSP_TRIM/VP_TRIM → scoped
         // surface_play.settings override for the outline build.
         return {
             PROPAGATION: use_lp ? "LP4" : "BFS",
@@ -360,6 +397,7 @@
             SEED: seedRaw === "" ? null : parseInt(seedRaw),
             DENSIFY_SUBDIV: densify,
             HA_CUSP_TRIM: haTrim,
+            VP_TRIM: vpTrim,
         };
     }
 
@@ -380,8 +418,8 @@
         if (!fromControls) updateDialsFromAngles(readAnglesFromCamera());
 
         isRequesting = true;
-        spinner.style.visibility = "visible";
-        downloadButton.replaceWith(spinner);
+        setSpinnerActive(true);
+        setExportsEnabled(false);
         // NB: do NOT disable `controls` here. TrackballControls' onPointerUp
         // bails early when controls are disabled, BEFORE it removes the pointer
         // from its internal list / releases pointer capture. If a second finger
@@ -422,7 +460,7 @@
             clearTimeout(timeoutId);
             console.error(err);
             isRequesting = false;
-            spinner.replaceWith(downloadButton);
+            setSpinnerActive(false);   // exports stay greyed: no valid outline
         });
     }
 
@@ -515,10 +553,8 @@
         material.specular.setHex(0x000000);
         ambientLight.intensity = 0.4;
 
-        spinner.replaceWith(downloadButton);
-        downloadButton.style.visibility = "visible";
-        pdfButton.style.visibility = "visible";
-        tikzButton.style.visibility = "visible";
+        setSpinnerActive(false);
+        setExportsEnabled(true);
         prepareDownload();
     }
 
@@ -730,9 +766,10 @@
         if (!tex) return;
         try {
             await navigator.clipboard.writeText(tex);
-            const prev = tikzButton.textContent;   // brief "copied" confirmation
-            tikzButton.textContent = "copied";
-            setTimeout(() => { tikzButton.textContent = prev; }, 1000);
+            // Brief confirmation: flash a check glyph, then restore the icon.
+            const prev = tikzButton.innerHTML;
+            tikzButton.innerHTML = '<span class="fa-solid fa-check"></span>';
+            setTimeout(() => { tikzButton.innerHTML = prev; }, 1000);
         } catch (e) {
             // Clipboard API blocked (insecure context / permission) → fall back.
             console.error("clipboard write failed; downloading .tex instead:", e);
