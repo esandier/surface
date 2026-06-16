@@ -153,8 +153,10 @@
 
 <style>
 @media (pointer: coarse) {
-    #controls-panel { display: none !important; }
-    #debug-panel    { display: none !important; }
+    /* The visual-controls and debug panels are disabled on touch devices, so
+       their toggle buttons would do nothing — hide the buttons too. */
+    #controls-panel,  #debug-panel  { display: none !important; }
+    #controls-toggle, #debug-toggle { display: none !important; }
 }
 </style>
 
@@ -248,14 +250,31 @@
     scene.add(surface);
 
     /* ---------------- CONTROLS ---------------- */
-    let controls = new TrackballControls(camera, renderer.domElement);
-    controls.target.set(...center);
-    controls.enablePan = false;
-    controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
-    controls.staticMoving = true;
-    controls.addEventListener("start", mouseDown);
-    controls.addEventListener("change", syncDialsLive);
-    controls.addEventListener("end", () => mouseUp(false));
+    // Pinch state — shared by the touch handler and the controls "end" hook so
+    // that the per-finger "end" events TrackballControls fires DURING a pinch
+    // (every 2→1 finger transition) don't each kick off an outline recompute.
+    let touchPinch = false;
+
+    // One place to configure a freshly-built TrackballControls. Called on first
+    // build and again whenever the camera (ortho↔persp) is swapped.
+    function configureControls(c) {
+        c.target.set(...center);
+        // TrackballControls' property is `noPan` (NOT `enablePan` — that name is
+        // silently ignored, which used to leave panning ON). Pan is unwanted here.
+        c.noPan = true;
+        // Pinch-zoom is handled by our own touch listener (→ applyZoom), and the
+        // wheel by our canvas handler, so TrackballControls' own zoom stays off.
+        c.noZoom = true;
+        c.staticMoving = true;
+        c.addEventListener("start", mouseDown);
+        c.addEventListener("change", syncDialsLive);
+        // Suppress the spurious per-finger "end" while a pinch is in progress;
+        // the pinch handler issues its own single recompute when it finishes.
+        c.addEventListener("end", () => { if (!touchPinch) mouseUp(false); });
+        return c;
+    }
+
+    let controls = configureControls(new TrackballControls(camera, renderer.domElement));
 
     /* ---------------- RESIZE ---------------- */
     function resizeRenderer() {
@@ -265,6 +284,12 @@
         if (canvas.width !== width || canvas.height !== height) {
             renderer.setSize(width, height, false);
             renderer.setViewport(0, 0, width, height);
+            // TrackballControls caches the element's screen rect (set once in its
+            // constructor) and maps mouse-to-trackball through it. If the canvas
+            // resizes afterwards — window resize, devicePixelRatio change, or a
+            // phone hiding/showing browser chrome / rotating — that cache goes
+            // stale and rotation feels jumpy. Resync on every real size change.
+            controls.handleResize();
             if (perspectiveMode) {
                 perspCamera.aspect = width / height;
             } else {
@@ -356,7 +381,15 @@
         isRequesting = true;
         spinner.style.visibility = "visible";
         downloadButton.replaceWith(spinner);
-        controls.enabled = false;
+        // NB: do NOT disable `controls` here. TrackballControls' onPointerUp
+        // bails early when controls are disabled, BEFORE it removes the pointer
+        // from its internal list / releases pointer capture. If a second finger
+        // (pinch) lifts while a recompute is in flight, its pointer-up is
+        // swallowed → a phantom pointer is left forever → every later touch
+        // looks like a 2-finger gesture and 1-finger rotation is dead until a
+        // page reload. The `isRequesting` guard above already prevents
+        // overlapping requests, so disabling input is both unnecessary and
+        // harmful on touch.
 
         let data;
         if (perspectiveMode) {
@@ -388,7 +421,6 @@
             clearTimeout(timeoutId);
             console.error(err);
             isRequesting = false;
-            controls.enabled = true;
             spinner.replaceWith(downloadButton);
         });
     }
@@ -416,6 +448,16 @@
         let scale;
         if (perspectiveMode) {
             scale = perspCamera.zoom / Math.tan(FOV * Math.PI / 360);
+            // The overlay SVG is a square viewBox fitted with preserveAspectRatio
+            // "meet", so its world-per-pixel scale is governed by the SMALLER
+            // canvas dimension. three.js perspective instead fixes the VERTICAL
+            // FOV and widens horizontally with aspect, so its pixel scale is tied
+            // to canvas HEIGHT. On a portrait (phone) canvas the two disagree by
+            // exactly height/width — divide by aspect to realign overlay & canvas.
+            // (Ortho already stays aligned because resizeRenderer compensates the
+            // frustum, so it needs no correction here.)
+            const aspect = canvas.clientWidth / canvas.clientHeight;
+            if (aspect < 1) scale /= aspect;
         } else {
             scale = orthoCamera.zoom / radius;
         }
@@ -470,7 +512,6 @@
         material.specular.setHex(0x000000);
         ambientLight.intensity = 0.4;
 
-        controls.enabled = true;
         spinner.replaceWith(downloadButton);
         downloadButton.style.visibility = "visible";
         prepareDownload();
@@ -616,6 +657,19 @@
             camera.lookAt(...center);
         }
 
+        // TrackballControls derives its horizontal tumble axis from
+        // cross(camera.up, viewDir). The dial path above leaves camera.up
+        // pinned to world-Z, which goes NEARLY PARALLEL to the view direction
+        // at near-pole elevations (e.g. Boy's saved elev=-87°) — there the
+        // cross product collapses and vertical mouse drags produce almost no
+        // rotation (the horizontal axis "freezes"). Re-derive up from the
+        // camera's own orientation so it is EXACTLY perpendicular to the view:
+        // the rendered image is unchanged (orientation lives in the quaternion,
+        // which lookAt already set), but the trackball is well-conditioned at
+        // every orientation. TrackballControls' per-frame lookAt then stays
+        // stable too, since object.up is consistent with the quaternion.
+        camera.up.copy(new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion));
+
         camera.updateProjectionMatrix();
         controls.update();
     }
@@ -685,6 +739,45 @@
         }
     }, { passive: false });
 
+    /* ---------------- PINCH-ZOOM (touch) ---------------- */
+    // TrackballControls' own zoom is off (noZoom) and the wheel/zoom-slider are
+    // desktop-only (the controls panel is CSS-hidden on coarse pointers), so on
+    // a phone a two-finger pinch is the ONLY way to zoom. Drive it through the
+    // same applyZoom path the slider/wheel use. `touchPinch` keeps the controls
+    // "end" hook quiet across the per-finger transitions of the gesture; one
+    // recompute is issued when the last finger lifts (and `isRequesting` guards
+    // any trailing stray "end", so it can't double-fire).
+    let pinchStartDist = 0, pinchStartZoom = 1;
+    const pinchDist = (t) => Math.hypot(t[0].clientX - t[1].clientX,
+                                        t[0].clientY - t[1].clientY);
+
+    canvas.addEventListener("touchstart", e => {
+        if (e.touches.length === 2) {
+            touchPinch = true;
+            pinchStartDist = pinchDist(e.touches);
+            pinchStartZoom = perspectiveMode ? perspCamera.zoom : orthoCamera.zoom;
+            mouseDown();   // hide the (now-stale) overlay for the duration
+        }
+    }, { passive: true });
+
+    canvas.addEventListener("touchmove", e => {
+        if (touchPinch && e.touches.length >= 2 && pinchStartDist > 0) {
+            e.preventDefault();
+            applyZoom(pinchStartZoom * pinchDist(e.touches) / pinchStartDist);
+        }
+    }, { passive: false });
+
+    function endPinch(e) {
+        // Only when the LAST finger lifts: a 2→1 transition keeps the pinch
+        // alive so the remaining finger can still rotate before release.
+        if (touchPinch && e.touches.length === 0) {
+            touchPinch = false;
+            mouseUp(true);   // single recompute for the whole gesture
+        }
+    }
+    canvas.addEventListener("touchend", endPinch, { passive: true });
+    canvas.addEventListener("touchcancel", endPinch, { passive: true });
+
     /* ---------------- PERSPECTIVE TOGGLE ---------------- */
     const perspToggle = document.getElementById("persp-toggle");
 
@@ -697,14 +790,7 @@
 
         camera = perspectiveMode ? perspCamera : orthoCamera;
         controls.dispose();
-        controls = new TrackballControls(camera, renderer.domElement);
-        controls.target.set(...center);
-        controls.enablePan = false;
-        controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
-        controls.staticMoving = true;
-        controls.addEventListener("start", mouseDown);
-        controls.addEventListener("change", syncDialsLive);
-        controls.addEventListener("end", () => mouseUp(false));
+        controls = configureControls(new TrackballControls(camera, renderer.domElement));
 
         setCameraFromAngles(angles.elev, angles.azim, angles.inPlane);
         applyZoom(zoom);
@@ -789,14 +875,7 @@
         camera = perspCamera;
         perspToggle.style.opacity = '1';
         controls.dispose();
-        controls = new TrackballControls(camera, renderer.domElement);
-        controls.target.set(...center);
-        controls.enablePan = false;
-        controls.noZoom = true;   // TrackballControls uses `noZoom`, not `enableZoom`; otherwise its wheel handler fires start/end → mouseUp → outline pipeline
-        controls.staticMoving = true;
-        controls.addEventListener("start", mouseDown);
-        controls.addEventListener("change", syncDialsLive);
-        controls.addEventListener("end", () => mouseUp(false));
+        controls = configureControls(new TrackballControls(camera, renderer.domElement));
     }
     setCameraFromAngles(SAVED_ANGLES.elev, SAVED_ANGLES.azim, SAVED_ANGLES.inPlane);
     applyZoom(SAVED_ANGLES.zoom);
