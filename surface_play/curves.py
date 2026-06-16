@@ -414,123 +414,14 @@ def _snap_annular_bc(uv: np.ndarray, mesh) -> np.ndarray:
 def _uv_for_bc_lift(edge, mesh, uv_sample: np.ndarray) -> np.ndarray:
     """Bring `uv_sample` into the canonical p-copy of `edge` for Su/Sv lift.
 
-    Extracted so `_dir_for_bc_sample` and `_tan_for_bc_sample` share the
-    same seam-canonical uv (cf. [[bc_lift_patch_match_2026_05_26]]).
+    Used in resample_all Phase 2 to build `uv_eval`, so the batched BC dir/tan
+    share one seam-canonical uv (cf. [[bc_lift_patch_match_2026_05_26]]).
     """
     domain = getattr(mesh, "domain", None)
     if _needs_close(domain):
         p_canonical = mesh.uv[int(edge["p_idx"])]
         return domain.interpolate(p_canonical, uv_sample, 1.0)
     return uv_sample
-
-
-def _dir_for_bc_sample(seg_idx: int, mesh, surface, projection,
-                       uv_sample: np.ndarray, *,
-                       Su=None, Sv=None) -> np.ndarray:
-    """Projected inward 2D normal of a BC sample (from edge['dir'] at uv_sample).
-
-    `edge["dir"]` is expressed in the canonical p's identification copy (fixed
-    at mesh-build). `uv_sample` may sit in a different copy if the chain's
-    polyline was close()-extended across a seam. Lifting via Su, Sv at the
-    extended uv yields the wrong 3D vector (e.g. for Möbius, Su(v+2π) = -Su(v)).
-    Bring uv_sample into canonical p's copy before evaluating Su, Sv so the
-    lift agrees with edge["dir"]'s frame.
-
-    `Su`, `Sv` may be supplied pre-computed at the seam-canonical lift uv
-    (one `_eval_all` per sample, shared with `_tan_for_bc_sample` and the
-    outer sample_xyz fill).
-    """
-    edge = mesh.edges[int(seg_idx)]
-    dir_uv = np.asarray(edge["dir"], dtype=float)
-    uv_for_lift = _uv_for_bc_lift(edge, mesh, uv_sample)
-    if Su is None or Sv is None:
-        u, v = float(uv_for_lift[0]), float(uv_for_lift[1])
-        Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
-        Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
-    inward_3d = dir_uv[0] * Su + dir_uv[1] * Sv
-    return projection.proj_vec(uv_for_lift, inward_3d)
-
-
-def _dir_for_cc_sample(seg_idx_poly: int, alpha: float,
-                       sub_internal_seg_idx: int, css: np.ndarray, cps: np.ndarray
-                       ) -> np.ndarray:
-    """Interpolated CP d-field at a CC sample."""
-    cs = css[int(sub_internal_seg_idx)]
-    d_p = np.asarray(cps[int(cs["p_cp"])]["d"], dtype=float)
-    d_q = np.asarray(cps[int(cs["q_cp"])]["d"], dtype=float)
-    return (1.0 - float(alpha)) * d_p + float(alpha) * d_q
-
-
-def _tan_for_bc_sample(seg_idx: int, mesh, surface, projection, domain,
-                       uv_sample: np.ndarray, *,
-                       Su=None, Sv=None) -> np.ndarray:
-    """Analytic 2D image-space TANGENT of BC at uv, sign-matched to edge chord.
-
-    Replaces the chord `xy[si+1] - xy[si]` used previously: that chord direction
-    is sample-jitter-noisy at fine resolutions, which can flip the sign of the
-    projection-break discriminator. The analytic tangent is resolution-stable.
-
-    `edge["pq"]` is in canonical p's identification copy; bring `uv_sample`
-    into the same copy before evaluating Su, Sv so the lift is frame-consistent
-    (matters at the mo seam).
-
-    `Su`, `Sv` may be supplied pre-computed at the seam-canonical lift uv
-    (one `_eval_all` per sample, shared with `_dir_for_bc_sample`).
-    """
-    edge = mesh.edges[int(seg_idx)]
-    edge_dp = np.asarray(edge["pq"], dtype=float)
-    uv_for_lift = _uv_for_bc_lift(edge, mesh, uv_sample)
-    Tb_uv = domain.boundary_tangent(uv_for_lift, edge_dp)
-    if Su is None or Sv is None:
-        u, v = float(uv_for_lift[0]), float(uv_for_lift[1])
-        Su = np.asarray(surface.Su(u, v), dtype=float).reshape(3)
-        Sv = np.asarray(surface.Sv(u, v), dtype=float).reshape(3)
-    Tb_3d = Tb_uv[0] * Su + Tb_uv[1] * Sv
-    return projection.proj_vec(uv_for_lift, Tb_3d)
-
-
-def _tan_for_cc_sample(uv_sample: np.ndarray, css: np.ndarray, cps: np.ndarray,
-                       chain_seg: int, surface, projection, *,
-                       S_p=None, Su=None, Sv=None,
-                       Suu=None, Suv=None, Svv=None) -> np.ndarray:
-    """Analytic 2D image-space TANGENT of CC silhouette at uv, sign-matched to
-    the chain direction (from p_cp to q_cp of the cs).
-
-    Silhouette curve in uv: `axis · SN = 0`. Its tangent is perpendicular to
-    `Np = ∇_uv(axis · SN) = ((Suu×Sv + Su×Suv)·axis, (Suv×Sv + Su×Svv)·axis)`.
-    Lifted via dS and projected to image.
-
-    Persp (2026-05-27): `axis = viewer_direction(S(uv_sample))`. The
-    extra gradient terms `−Su·SN` / `−Sv·SN` vanish identically (triple
-    product with repeated vector), so the Np formula is unchanged.
-
-    `S_p`, `Su`, `Sv`, `Suu`, `Suv`, `Svv` may be supplied pre-computed
-    (one `_eval_all` per sample, shared with the outer sample_xyz fill).
-    """
-    if S_p is None:
-        u, v = float(uv_sample[0]), float(uv_sample[1])
-        S_p, Su, Sv, Suu, Suv, Svv, _SN = surface._eval_all(u, v)
-        S_p = np.asarray(S_p, dtype=float).reshape(3)
-        Su = np.asarray(Su, dtype=float).reshape(3)
-        Sv = np.asarray(Sv, dtype=float).reshape(3)
-        Suu = np.asarray(Suu, dtype=float).reshape(3)
-        Suv = np.asarray(Suv, dtype=float).reshape(3)
-        Svv = np.asarray(Svv, dtype=float).reshape(3)
-    axis = projection.viewer_direction(S_p).reshape(3)
-    Np = np.array([
-        float(np.cross(Suu, Sv) @ axis + np.cross(Su, Suv) @ axis),
-        float(np.cross(Suv, Sv) @ axis + np.cross(Su, Svv) @ axis),
-    ])
-    Tp_uv = np.array([-Np[1], Np[0]])
-    # Sign-match against the cs chain direction in uv (p_cp → q_cp).
-    cs = css[int(chain_seg)]
-    p_uv = np.asarray(cps[int(cs["p_cp"])]["uv"], dtype=float)
-    q_uv = np.asarray(cps[int(cs["q_cp"])]["uv"], dtype=float)
-    chain_dir = q_uv - p_uv
-    if float(Tp_uv @ chain_dir) < 0.0:
-        Tp_uv = -Tp_uv
-    Tp_3d = Tp_uv[0] * Su + Tp_uv[1] * Sv
-    return projection.proj_vec(uv_sample, Tp_3d)
 
 
 def _tan_for_cc_samples_batched(
@@ -545,11 +436,23 @@ def _tan_for_cc_samples_batched(
     css: np.ndarray, cps: np.ndarray,
     projection,
 ) -> np.ndarray:
-    """Batched _tan_for_cc_sample. See its docstring for the math.
+    """Analytic image-space TANGENT of the CC silhouette at each uv, sign-matched
+    to the cs chain direction (p_cp → q_cp).
 
-    Uses the scalar-triple-product identity `(a × b) · c = det([a, b, c])` to
-    avoid the per-sample `np.cross + @` overhead, and inlines `proj_vec` so
-    every sample is processed in one numpy pass.
+    Math: the silhouette curve in uv is `axis · SN = 0`, so its uv-tangent is
+    perpendicular to the gradient
+        Np = ∇_uv(axis · SN)
+           = ((Suu×Sv + Su×Suv)·axis, (Suv×Sv + Su×Svv)·axis),
+    giving Tp_uv = (-Np_y, Np_x). Lifted via dS (Tp_uv[0]·Su + Tp_uv[1]·Sv) and
+    projected to the image; the sign is flipped if Tp_uv·(q_uv - p_uv) < 0.
+    In persp `axis = viewer_direction(S(uv))`; the extra gradient terms
+    −Su·SN / −Sv·SN vanish identically (triple product with a repeated vector),
+    so the Np formula is unchanged.
+
+    Implementation: uses the scalar-triple-product identity
+    `(a × b) · c = det([a, b, c])` to avoid the per-sample `np.cross + @`
+    overhead, and inlines `proj_vec` so every sample is processed in one
+    numpy pass.
     """
     N = uv_samples.shape[0]
     if N == 0:
@@ -604,6 +507,73 @@ def _tan_for_cc_samples_batched(
     out[:, 0] = ((Tp_3d @ I) + (a / z) * nv) / z
     out[:, 1] = ((Tp_3d @ J) + (b / z) * nv) / z
     return out
+
+
+def _boundary_tangent_batched(domain, uv: np.ndarray, edge_dp: np.ndarray) -> np.ndarray:
+    """Batched `domain.boundary_tangent` over (M, 2) uv / edge_dp.
+
+    Byte-identical to the per-sample scalar version (same formulas, numpy
+    elementwise): rect → normalized edge_dp; disk/annulus → boundary-circle
+    tangent (-v, u)/r sign-matched to edge_dp (r == 0 falls back to edge_dp).
+    """
+    M = uv.shape[0]
+    if domain is None or getattr(domain, "type", None) == "rect":
+        n = np.linalg.norm(edge_dp, axis=1, keepdims=True)
+        return np.where(n > 0.0, edge_dp / np.where(n > 0.0, n, 1.0), 0.0)
+    u = uv[:, 0]
+    v = uv[:, 1]
+    r = np.sqrt(u * u + v * v)
+    Tan = np.empty((M, 2), dtype=float)
+    nz = r != 0.0
+    Tan[nz, 0] = -v[nz] / r[nz]
+    Tan[nz, 1] = u[nz] / r[nz]
+    if (~nz).any():
+        edp = edge_dp[~nz]
+        n = np.linalg.norm(edp, axis=1, keepdims=True)
+        Tan[~nz] = np.where(n > 0.0, edp / np.where(n > 0.0, n, 1.0), 0.0)
+    dots = Tan[:, 0] * edge_dp[:, 0] + Tan[:, 1] * edge_dp[:, 1]
+    flip = dots < 0.0
+    Tan[flip] = -Tan[flip]
+    return Tan
+
+
+def _proj_vec2_batched(projection, S: np.ndarray, v1: np.ndarray, v2: np.ndarray):
+    """Batched `projection.proj_vec` for two vector fields v1, v2 (M, 3) at the
+    same surface points S (M, 3). Returns (proj_v1, proj_v2), each (M, 2).
+
+    `S` is the precomputed surface position (== surface.S(uv), which is
+    _eval_all(uv)[0]); reusing it keeps the persp depth byte-identical to the
+    per-sample scalar proj_vec without a second eval. Inlines the same formula
+    as `_tan_for_cc_samples_batched`'s proj step.
+    """
+    I, J = projection.I, projection.J
+    M = S.shape[0]
+    if projection.mode == "ortho":
+        o1 = np.empty((M, 2), dtype=float)
+        o2 = np.empty((M, 2), dtype=float)
+        o1[:, 0] = v1 @ I; o1[:, 1] = v1 @ J
+        o2[:, 0] = v2 @ I; o2[:, 1] = v2 @ J
+        return o1, o2
+    eye = projection.eye
+    n_axis = projection._axis
+    d = S - eye
+    z = -(d @ n_axis)
+    if np.any(z == 0.0):
+        bad = int(np.argmax(z == 0.0))
+        raise ValueError(
+            f"proj_vec undefined: S(uv)={S[bad]} lies on the image plane through eye"
+        )
+    a = d @ I
+    b = d @ J
+
+    def _pv(v):
+        nv = v @ n_axis
+        o = np.empty((M, 2), dtype=float)
+        o[:, 0] = ((v @ I) + (a / z) * nv) / z
+        o[:, 1] = ((v @ J) + (b / z) * nv) / z
+        return o
+
+    return _pv(v1), _pv(v2)
 
 
 def _newton_cc_refine(uv: np.ndarray, surface, projection, *, max_iter: int = 50
@@ -1185,6 +1155,8 @@ def resample_all(
     # interior. Local-per-SP delta avoids a globally tiny sub from
     # contaminating distant subs' near-SP resolution.
     ell = M / float(resolution)
+    # Shared BC/HC densification oversampling factor (dense spacing = ell/this).
+    densify_subdiv = float(_settings.DENSIFY_SUBDIV)
     # Collapsed-SubCurve guard (2026-05-27). A SubCurve whose xy polyline
     # is shorter than `1e-4 * ell` has both SPs at essentially the same
     # image-space point — typically a non-generic axis-aligned view that
@@ -1309,16 +1281,16 @@ def resample_all(
         if sub.kind == "HC":
             uv_q0 = uv_p[0]; uv_q1 = uv_p[1]
             # Unified densification (spec 2026-06-03): N points =
-            # resolution·10·L/M — samples per unit image-arclength, unit = M
-            # (mesh-xy bbox diagonal), so spacing ≈ ell/10 and BC/HC share one
-            # density. The HC is a straight uv line but curved in the image, so
-            # bootstrap L from a coarse pass before choosing N.
+            # resolution·DENSIFY_SUBDIV·L/M — samples per unit image-arclength,
+            # unit = M (mesh-xy bbox diagonal), so spacing ≈ ell/DENSIFY_SUBDIV
+            # and BC/HC share one density knob. The HC is a straight uv line but
+            # curved in the image, so bootstrap L from a coarse pass before N.
             t_boot = np.linspace(0.0, 1.0, 33)
             uv_boot = uv_q0[None, :] + t_boot[:, None] * (uv_q1 - uv_q0)[None, :]
             xy_boot = projection.XY(np.ascontiguousarray(
                 np.asarray(surface.S(uv_boot[:, 0], uv_boot[:, 1]), dtype=float).T))
             L_boot = float(_arclengths(xy_boot)[-1])
-            N_dense = max(2, int(round(resolution * 10.0 * L_boot / M)))
+            N_dense = max(2, int(round(resolution * densify_subdiv * L_boot / M)))
             t_dense = np.linspace(0.0, 1.0, N_dense)
             uv_dense = uv_q0[None, :] + t_dense[:, None] * (uv_q1 - uv_q0)[None, :]
             # Batched dense xyz/xy: one `surface.S` call for all N_dense uv pairs.
@@ -1411,12 +1383,12 @@ def resample_all(
             s_targets = cum.copy()
         elif sub.kind == "BC":
             # Unified densification (spec 2026-06-03): total dense points ≈
-            # resolution·10·L/M (samples per unit image-arclength, unit = M),
-            # matching HC. `_densify_bc_polyline` subdivides each of the n_seg
-            # mesh-edge segments uniformly, so map the target total to a
-            # per-segment subdivision count (≥ 1).
+            # resolution·DENSIFY_SUBDIV·L/M (samples per unit image-arclength,
+            # unit = M), matching HC. `_densify_bc_polyline` subdivides each of
+            # the n_seg mesh-edge segments uniformly, so map the target total to
+            # a per-segment subdivision count (≥ 1).
             n_seg = max(1, len(uv_p) - 1)
-            interp_nsub = max(1, int(round(resolution * 10.0 * L_total / M / n_seg)))
+            interp_nsub = max(1, int(round(resolution * densify_subdiv * L_total / M / n_seg)))
             interp_uv, interp_xy, interp_cum = _densify_bc_polyline(
                 uv_p, surface, projection, domain, interp_nsub)
             # Native-vertex arclengths in the ACCURATE metric (dense vertex k
@@ -1511,40 +1483,54 @@ def resample_all(
             sample_xyz[:] = S_all
             sample_xy[:] = projection.XY(S_all)
 
-        # Phase 3 — per-sample dir/tan helpers (using precomputed derivs).
-        # CC tangents are batched (see _tan_for_cc_samples_batched); BC and
-        # CC dirs still loop per-sample (the BC formulas need per-sample
-        # edge lookups; CC dir is a simple per-segment interp).
+        # Phase 3 — dir/tan. CC tangents AND CC dirs are batched; BC still
+        # loops per-sample (per-edge lookups + domain.interpolate / boundary
+        # tangent that aren't vectorized here).
         if sample_dir is not None and sub.kind == "CC" and N > 0:
             cc_mask = chain_segs >= 0
             if cc_mask.any():
                 idx = np.flatnonzero(cc_mask)
-                cc_tans = _tan_for_cc_samples_batched(
+                sample_tan[idx] = _tan_for_cc_samples_batched(
                     sample_uv[idx], chain_segs[idx],
                     S_all[idx], Su_all[idx], Sv_all[idx],
                     Suu_all[idx], Suv_all[idx], Svv_all[idx],
                     css, cps, projection,
                 )
-                sample_tan[idx] = cc_tans
-        if sample_dir is not None:
-            for j in range(N):
-                cs = int(chain_segs[j])
-                if cs < 0:
-                    continue
-                if sub.kind == "BC":
-                    sample_dir[j] = _dir_for_bc_sample(
-                        cs, mesh, surface, projection, sample_uv[j],
-                        Su=Su_all[j], Sv=Sv_all[j],
-                    )
-                    sample_tan[j] = _tan_for_bc_sample(
-                        cs, mesh, surface, projection, domain, sample_uv[j],
-                        Su=Su_all[j], Sv=Sv_all[j],
-                    )
-                elif sub.kind == "CC":
-                    sample_dir[j] = _dir_for_cc_sample(
-                        int(seg_ps[j]), float(alphas[j]), cs, css, cps,
-                    )
-                    # sample_tan[j] computed via batched call above.
+                # CC dir = CP d-field linearly interpolated along the cs:
+                # (1-α)·d_p + α·d_q, where d_p/d_q are the CPs' d vectors and α
+                # is the Phase-1 along-segment fraction. Batched (same float ops
+                # per element as the former per-sample loop).
+                cs_rows = css[chain_segs[idx]]
+                d_p = np.asarray(cps[cs_rows["p_cp"]]["d"], dtype=float)
+                d_q = np.asarray(cps[cs_rows["q_cp"]]["d"], dtype=float)
+                a = np.asarray(alphas[idx], dtype=float).reshape(-1, 1)
+                sample_dir[idx] = (1.0 - a) * d_p + a * d_q
+        if sample_dir is not None and sub.kind == "BC" and N > 0:
+            # BC dir = projected inward 2D normal: edge["dir"] lifted via Su, Sv
+            #          then proj_vec.
+            # BC tan = projected analytic boundary tangent: domain.boundary_tangent
+            #          (edge["pq"]-signed) lifted via Su, Sv then proj_vec. The
+            #          analytic tangent replaces the sample chord, which is
+            #          jitter-noisy at fine res and can flip the projection-break
+            #          discriminator's sign.
+            # Both edge["dir"] / edge["pq"] live in the canonical p's
+            # identification copy; `uv_eval` (Phase 2) already holds the
+            # seam-canonical lift uv (_uv_for_bc_lift), so Su/Sv/S there match
+            # that frame (e.g. Möbius Su(v+2π) = -Su(v) would otherwise corrupt
+            # the lift). See [[bc_lift_patch_match_2026_05_26]].
+            bc_mask = chain_segs >= 0
+            if bc_mask.any():
+                idx = np.flatnonzero(bc_mask)
+                edge_rows = mesh.edges[chain_segs[idx]]
+                dir_uv = np.asarray(edge_rows["dir"], dtype=float).reshape(-1, 2)
+                edge_pq = np.asarray(edge_rows["pq"], dtype=float).reshape(-1, 2)
+                Su_i, Sv_i = Su_all[idx], Sv_all[idx]
+                uv_lift = uv_eval[idx]
+                inward_3d = dir_uv[:, 0:1] * Su_i + dir_uv[:, 1:2] * Sv_i
+                Tb_uv = _boundary_tangent_batched(domain, uv_lift, edge_pq)
+                Tb_3d = Tb_uv[:, 0:1] * Su_i + Tb_uv[:, 1:2] * Sv_i
+                sample_dir[idx], sample_tan[idx] = _proj_vec2_batched(
+                    projection, S_all[idx], inward_3d, Tb_3d)
 
         # Endpoint pinning (G5 / G21) — first/last sample anchored to SP positions.
         if N >= 1 and sub.start >= 0:

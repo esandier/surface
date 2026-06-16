@@ -158,26 +158,33 @@ def _cc_samples(
                 return True
         return False
 
+    # Batch the per-CS gathers (uvs, cp indices) so the per-endpoint loop only
+    # constructs objects — byte-identical to the per-sample asarray/reshape.
+    cs_idx_arr = np.abs(np.asarray(cc.cs_indices)).astype(np.int64) - 1
+    cs_rows = css[cs_idx_arr]
+    p_cp_arr = cs_rows["p_cp"].astype(np.int64)
+    q_cp_arr = cs_rows["q_cp"].astype(np.int64)
+    p_uv_arr = np.asarray(cps[p_cp_arr]["uv"], dtype=float).reshape(-1, 2)
+    q_uv_arr = np.asarray(cps[q_cp_arr]["uv"], dtype=float).reshape(-1, 2)
+    chord_arr = q_uv_arr - p_uv_arr
+
     out: list[_Sample] = []
-    for k, signed in enumerate(cc.cs_indices):
+    for k in range(n_chain):
         if cusp_positions and _near_cusp(k):
             continue
-        cs_idx = abs(int(signed)) - 1
-        cs = css[cs_idx]
-        p_cp = int(cs["p_cp"])
-        q_cp = int(cs["q_cp"])
-        p_uv = np.asarray(cps[p_cp]["uv"], dtype=float).reshape(2)
-        q_uv = np.asarray(cps[q_cp]["uv"], dtype=float).reshape(2)
-        chord = q_uv - p_uv
+        cs_idx = int(cs_idx_arr[k])
+        p_cp = int(p_cp_arr[k])
+        q_cp = int(q_cp_arr[k])
+        chord = chord_arr[k].copy()   # one array shared by both endpoint samples
         out.append(_Sample(
-            uv=p_uv.copy(),
+            uv=p_uv_arr[k].copy(),
             parent_kind="CC", parent_idx=cc_idx,
             seg_global=cs_idx, end=0,
             dedup_key=("CC", cc_idx, p_cp),
             cs_dir_uv=chord,
         ))
         out.append(_Sample(
-            uv=q_uv.copy(),
+            uv=q_uv_arr[k].copy(),
             parent_kind="CC", parent_idx=cc_idx,
             seg_global=cs_idx, end=1,
             dedup_key=("CC", cc_idx, q_cp),
