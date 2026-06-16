@@ -55,7 +55,7 @@ _OUTLINE_DEBUG_KEY_MAP = {
 # tweak them via a scoped, per-request override of the module attribute (see
 # `_override_app_settings`). Safe because all are read in the OUTLINE phase
 # (not the LRU-cached construction), so no stale-cache risk.
-_SETTINGS_OVERRIDE_KEYS = {"DENSIFY_SUBDIV", "HA_CUSP_TRIM"}
+_SETTINGS_OVERRIDE_KEYS = {"DENSIFY_SUBDIV", "HA_CUSP_TRIM", "VP_TRIM"}
 
 
 @contextlib.contextmanager
@@ -94,7 +94,7 @@ def _debug_kwargs(
       (mesh jitter on/off + deterministic seed). Empty/None SEED → omit (random).
     - Outline-only keys (PROPAGATION, NEWTON_CUSP, PROJECT_RESAMPLED) routed
       via `_OUTLINE_DEBUG_KEY_MAP`.
-    - `_SETTINGS_OVERRIDE_KEYS` (DENSIFY_SUBDIV, HA_CUSP_TRIM) → scoped
+    - `_SETTINGS_OVERRIDE_KEYS` (DENSIFY_SUBDIV, HA_CUSP_TRIM, VP_TRIM) → scoped
       per-request override of the matching settings constant.
     - Unknown keys logged at WARNING and ignored (preserve client compat).
     """

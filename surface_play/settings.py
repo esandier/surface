@@ -39,3 +39,11 @@ HA_CUSP_TRIM: int = 5
 DENSIFY_SUBDIV: int = 10
 # (CC Newton refinement runs to convergence — see curves._newton_cc_refine —
 # so there is no iteration-count setting.)
+
+# Equal-distance VP matching (curves._cc_vp_match_targets): at a cusp (VP) the
+# two contour branches are resampled at equal distances to the VP, then the
+# innermost VP_TRIM points are dropped from BOTH branches. Near the cusp the
+# projected contour velocity → 0, so sampling there is hypersensitive and the
+# two near-tip points straddle the VP (→ a phantom inter-branch occlusion
+# crossing); trimming them removes the straddle. 0 disables trimming.
+VP_TRIM: int = 3

@@ -1106,6 +1106,179 @@ def _sic_node_polyline(sub, sis_pairs, dps, splits, projection):
     return uv_arr, xyz_arr, xy_arr
 
 
+def _invert_distance_to_arclength(
+    poly, which_end, targets, vp_xy, surface, projection, domain,
+):
+    """Arclength positions on a CC half-curve at given Euclidean distances to a VP.
+
+    Walks the branch's CP polyline from its VP end; for each target distance
+    `d` finds the point at Euclidean (image) distance `d` from `vp_xy` by
+    bisecting on the uv-interpolation parameter and REPROJECTING through the
+    surface (`S(uv) → XY`) — never a straight image-space lerp. Returns the
+    matching arclengths (in the polyline's start→end `cum` frame) so the caller
+    can feed them straight into the CC resampler's `s_targets` ladder.
+
+    Returns None if a target can't be bracketed monotonically from the VP
+    (the branch curves back within the master's reach) → caller falls back to
+    native sampling for that VP.
+    """
+    uv_p, xyz_p, xy_p = poly
+    N = len(xy_p)
+    if N < 2:
+        return None
+    tgt = np.asarray(targets, dtype=float)
+    if not len(tgt):
+        return []
+    cum = _arclengths(xy_p)
+    dist_v = np.linalg.norm(xy_p - vp_xy, axis=1)
+    order = np.arange(N) if which_end == "start" else np.arange(N - 1, -1, -1)
+    d_ord = dist_v[order]                          # distances from the VP, in VP order
+
+    # First bracketing segment (in VP order) per target — the segment whose
+    # endpoint distances straddle the target. Vectorized over targets; no
+    # surface evals here. Bail to native sampling if any target is unbracketable
+    # (matches the old per-target scan's `return None`).
+    seg_lo = np.minimum(d_ord[:-1], d_ord[1:])
+    seg_hi = np.maximum(d_ord[:-1], d_ord[1:])
+    inb = (seg_lo[None, :] - 1e-12 <= tgt[:, None]) & (tgt[:, None] <= seg_hi[None, :] + 1e-12)
+    if not inb.any(axis=1).all():
+        return None
+    oi = inb.argmax(axis=1)                         # first bracketing segment
+    va = order[oi]
+    vb = order[oi + 1]
+    lo = np.minimum(va, vb)
+    hi = np.maximum(va, vb)
+    uva = uv_p[lo]
+    uvb = uv_p[hi]
+
+    def dist_at(alpha):                             # alpha (M,) → distances (M,)
+        if domain is None:
+            uv = uva + alpha[:, None] * (uvb - uva)
+        else:
+            uv = np.asarray(domain.interpolate(uva, uvb, alpha), dtype=float)
+        S = np.asarray(surface.S(uv[:, 0], uv[:, 1]), dtype=float)
+        xy = projection.XY(np.ascontiguousarray(S.T))
+        return np.linalg.norm(xy - vp_xy, axis=1)
+
+    # Vectorized bisection within each bracket (distance is monotone in alpha
+    # over the small segment, either direction).
+    a0 = np.zeros(len(tgt)); a1 = np.ones(len(tgt))
+    inc = dist_at(a1) >= dist_at(a0)
+    for _ in range(30):
+        am = 0.5 * (a0 + a1)
+        below = (dist_at(am) < tgt) == inc
+        a0 = np.where(below, am, a0)
+        a1 = np.where(below, a1, am)
+    alpha = 0.5 * (a0 + a1)
+    s = cum[lo] + alpha * (cum[hi] - cum[lo])
+    return s.tolist()
+
+
+def _cc_vp_match_targets(subcurves, polys, L_per_sub, splits, surface,
+                         projection, domain, vp_trim):
+    """Equal-distance VP matching + cusp trim (spec 2026-06-16).
+
+    For each VP shared by exactly two CC half-curves, the SHORTER one (by
+    projected length) is the *master*; the longer branch is resampled so its
+    points sit at the SAME Euclidean distances to the VP (in image space) as
+    the master's, up to the master's far end (beyond that the longer branch
+    keeps its native CP arclengths). The two near-cusp branches are then
+    mirror-matched.
+
+    The innermost `vp_trim` points are then dropped from BOTH branches: at a
+    cusp the projected contour velocity → 0, so the near-tip points are
+    hypersensitive and straddle the VP (a phantom inter-branch occlusion
+    crossing — the Klein bottle bug). Dropping them removes the straddle while
+    keeping the two branches matched (they drop the same distance band).
+
+    Returns `{sub_index: s_targets ndarray}` overriding the CC `s_targets = cum`
+    default. Each VP end is handled independently, so a branch that is master
+    at one end and longer at the other is modified near both ends with its
+    native vertices kept in between.
+    """
+    # VP-SP → CC half-curves touching it.
+    vp_eps: dict[int, list[tuple[int, str]]] = {}
+    for i, sub in enumerate(subcurves):
+        if sub.kind != "CC":
+            continue
+        for end, sp in (("start", sub.start), ("end", sub.end)):
+            if sp >= 0 and splits.sps[int(sp)][3] == "vp":
+                vp_eps.setdefault(int(sp), []).append((i, end))
+
+    # Per sub, accumulate modifications (role at each shared VP end).
+    mods: dict[int, list[dict]] = {}
+    for sp, eps in vp_eps.items():
+        if len(eps) != 2:
+            continue
+        (ia, ea), (ib, eb) = eps
+        if ia == ib:
+            continue  # closed CC through a single VP — skip
+        if L_per_sub[ia] <= L_per_sub[ib]:
+            im, em, io, eo = ia, ea, ib, eb
+        else:
+            im, em, io, eo = ib, eb, ia, ea
+        vp_xy = np.asarray(splits.sps[int(sp)][2], dtype=float)
+        # Master target distances: its CP vertices from the VP outward.
+        m_xy = polys[im][2]
+        m_d = np.linalg.norm(m_xy - vp_xy, axis=1)
+        if em == "end":
+            m_d = m_d[::-1]
+        targets = []
+        for d in m_d[1:]:
+            if d > 1e-12 and (not targets or d > targets[-1] + 1e-12):
+                targets.append(float(d))
+        if not targets:
+            continue
+        reach = targets[-1]
+        s_list = _invert_distance_to_arclength(
+            polys[io], eo, targets, vp_xy, surface, projection, domain)
+        if s_list is None:
+            continue
+        mods.setdefault(im, []).append(dict(role="master", end=em, vp_xy=vp_xy, reach=reach))
+        mods.setdefault(io, []).append(dict(role="longer", end=eo, vp_xy=vp_xy,
+                                             reach=reach, s_list=s_list))
+
+    out: dict[int, np.ndarray] = {}
+    for i, items in mods.items():
+        uv_p, xyz_p, xy_p = polys[i]
+        N = len(xy_p)
+        cum = _arclengths(xy_p)
+        L = float(cum[-1]) if N else 0.0
+        drop: set[int] = set()
+        add_s: list[float] = []
+        for m in items:
+            if m["role"] == "master":
+                # Drop the vp_trim native vertices nearest the VP (the VP
+                # endpoint vertex itself is kept / pinned).
+                order = range(1, N) if m["end"] == "start" else range(N - 2, -1, -1)
+                for cnt, v in enumerate(order):
+                    if cnt >= vp_trim:
+                        break
+                    drop.add(int(v))
+            else:  # longer
+                # Replace the CONTIGUOUS near-VP run (from the VP outward, in
+                # arclength, until the distance first exceeds the master's
+                # reach) with the matched points. Walking the run — rather than
+                # dropping every vertex within Euclidean `reach` — is essential:
+                # a long contour can loop back near the VP at a distant
+                # arclength, and dropping those would leave a gap (a spurious
+                # long skip segment). Drop the innermost vp_trim matched points.
+                order = range(N) if m["end"] == "start" else range(N - 1, -1, -1)
+                for v in order:
+                    if float(np.linalg.norm(xy_p[v] - m["vp_xy"])) <= m["reach"]:
+                        drop.add(int(v))
+                    else:
+                        break
+                add_s.extend(m["s_list"][vp_trim:])
+        drop.discard(0)
+        drop.discard(N - 1)  # never drop the SP endpoints
+        s_all = [0.0, L]
+        s_all.extend(float(cum[v]) for v in range(N) if v not in drop)
+        s_all.extend(add_s)
+        out[i] = np.unique(np.round(np.clip(s_all, 0.0, L), 9))
+    return out
+
+
 def resample_all(
     subcurves: "list[SubCurve]",
     surface: "SurfaceParams",
@@ -1187,6 +1360,15 @@ def resample_all(
             if sp >= 0:
                 L_per_sp[sp] = min(L_per_sp.get(sp, float("inf")), L)
     delta_per_sp = {sp: L / 10.0 for sp, L in L_per_sp.items()}
+
+    # Equal-distance VP matching (spec 2026-06-16): for each VP shared by two
+    # CC half-curves, override the longer branch's CC arclength ladder so its
+    # near-cusp points mirror the shorter (master) branch's distances to the
+    # VP — preventing the two overlapping near-cusp polylines from spuriously
+    # crossing (which injects a phantom occlusion break). See _cc_vp_match_targets.
+    cc_match = _cc_vp_match_targets(
+        subcurves, polys, L_per_sub, splits, surface, projection, domain,
+        int(_settings.VP_TRIM))
 
     # SIC interpolation maps (built once): DP-pair → SIS, and SP → [(SIS, bary)].
     # Used to resolve each SIC polyline segment's owning SIS (and SP barys)
@@ -1380,7 +1562,10 @@ def resample_all(
             # defines the authoritative arclength ladder at each shared SP;
             # BCs and HCs inherit it via tangent-pick at BCPs / HAs.
             # See [[resume-hc-match-cc]].
-            s_targets = cum.copy()
+            # Exception: a longer branch at a shared VP uses the equal-distance
+            # matched ladder (Phase-1 interpolates uv at these arclengths and
+            # Phase-2 reprojects, so the matched points lie on the contour).
+            s_targets = cc_match[i] if i in cc_match else cum.copy()
         elif sub.kind == "BC":
             # Unified densification (spec 2026-06-03): total dense points ≈
             # resolution·DENSIFY_SUBDIV·L/M (samples per unit image-arclength,

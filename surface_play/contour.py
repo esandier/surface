@@ -506,7 +506,7 @@ def find_vps(
     surface: SurfaceParams,
     projection: Projection,
     *,
-    refine: bool = False,
+    refine: bool = True,
 ) -> np.ndarray:
     """Find cusp points (VPs) on contour curves.
 
@@ -568,6 +568,18 @@ def find_vps(
             else:
                 uv_vp = 0.5 * (p_uv + q_uv)
 
+            # Parametric position of the (possibly refined) VP along the host
+            # CS. Computed in the chain frame [p_uv, q_uv] (both wrap-adjusted),
+            # then oriented to the CS's NATIVE direction (p_cp → q_cp). For the
+            # unrefined midpoint this reduces to 0.5. Kept consistent with
+            # `uv_vp` so split_ccs_at_vps' SPT bary matches the SP geometry.
+            chord_chain = q_uv - p_uv
+            denom_chain = float(chord_chain @ chord_chain)
+            t_chain = (float((uv_vp - p_uv) @ chord_chain) / denom_chain
+                       if denom_chain > 0.0 else 0.5)
+            s_vp = t_chain if int(css[cs_idx]["p_cp"]) == int(i_cp) else 1.0 - t_chain
+            s_vp = min(max(s_vp, 1e-6), 1.0 - 1e-6)
+
             u_, v_ = float(uv_vp[0]), float(uv_vp[1])
             xyz_vp = np.asarray(surface.S(u_, v_), dtype=float).reshape(3)
 
@@ -585,7 +597,7 @@ def find_vps(
             axis_at_vp = projection.viewer_direction(xyz_vp).reshape(3)
             vis = np.int8(1) if float(dS_3d @ axis_at_vp) > 0.0 else np.int8(-1)
 
-            rows.append((cs_idx, 0.5, uv_vp, xyz_vp, vis))
+            rows.append((cs_idx, s_vp, uv_vp, xyz_vp, vis))
 
     if not rows:
         return np.zeros(0, dtype=vp_dtype)
