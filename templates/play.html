@@ -8,9 +8,9 @@
         <h1>{{ surface.name }}</h1>
         <h1>
             <div id="spinner" class="spinner-border" style="visibility:hidden"></div>
-            <a id="download-button" class="glyph" style="visibility:hidden" title="Download .svg file">
-                <span class="fa-regular fa-circle-down"></span>
-            </a>
+            <a id="download-button" class="glyph" style="visibility:hidden; cursor:pointer; font-size:0.62em; font-weight:700; letter-spacing:0.02em;" title="Download .svg file">SVG</a>
+            <a id="download-pdf" class="glyph" style="visibility:hidden; cursor:pointer; font-size:0.62em; font-weight:700; letter-spacing:0.02em;" title="Download .pdf file">PDF</a>
+            <a id="download-tikz" class="glyph" style="visibility:hidden; cursor:pointer; font-size:0.62em; font-weight:700; letter-spacing:0.02em;" title="Copy TikZ snippet to clipboard">TikZ</a>
             <a id="thumbnail-btn" class="glyph" style="cursor:pointer;" title="Make this the default view">
                 <span class="fa-solid fa-camera"></span>
             </a>
@@ -157,6 +157,9 @@
        their toggle buttons would do nothing — hide the buttons too. */
     #controls-panel,  #debug-panel  { display: none !important; }
     #controls-toggle, #debug-toggle { display: none !important; }
+    /* File exports (SVG/PDF/TikZ) aren't useful on a phone — hide them.
+       display:none overrides the JS-driven `visibility` toggling on these. */
+    #download-button, #download-pdf, #download-tikz { display: none !important; }
 }
 </style>
 
@@ -186,6 +189,8 @@
     const svg = document.getElementById("svg");
     const spinner = document.getElementById("spinner");
     const downloadButton = document.getElementById("download-button");
+    const pdfButton  = document.getElementById("download-pdf");
+    const tikzButton = document.getElementById("download-tikz");
 
     /* ---------------- SCENE & LIGHTING ---------------- */
     const scene = new THREE.Scene();
@@ -320,6 +325,8 @@
     function mouseDown() {
         svg.innerHTML = "";
         downloadButton.style.visibility = "hidden";
+        pdfButton.style.visibility = "hidden";
+        tikzButton.style.visibility = "hidden";
         material.emissive.setHex(0x000000);
         material.emissiveIntensity = 0;
         material.shininess = 80;
@@ -443,6 +450,7 @@
 
     /* ---------------- SVG DRAWING ---------------- */
     let lastOrigin = [0, 0];
+    let lastOutline = null;   // last server outline payload, kept for TikZ/PDF export
 
     function updateSVGTransform() {
         let scale;
@@ -468,6 +476,7 @@
     function drawSVG(data) {
         isRequesting = false;
         lastOrigin = data.origin;
+        lastOutline = data;   // keep for TikZ/PDF export
         // New pipeline shape: {"<visKey>": [[[x,y], [x,y], ...], ...], ...}
         // Vis keys are string-encoded ints (≤ 0). Sort ascending so the
         // largest (== 0 == front sheet) is drawn last, on top.
@@ -514,6 +523,8 @@
 
         spinner.replaceWith(downloadButton);
         downloadButton.style.visibility = "visible";
+        pdfButton.style.visibility = "visible";
+        tikzButton.style.visibility = "visible";
         prepareDownload();
     }
 
@@ -528,6 +539,148 @@
         downloadButton.href = href;
         downloadButton.download = "{{ surface.name }}.svg";
     }
+
+    /* ---------------- TikZ / PDF EXPORT ---------------- */
+    // Both reuse the last server outline (`lastOutline`) — no recompute, no
+    // server round-trip. The backend polyline coords are in image-plane units
+    // with a mathematical (y-up) orientation, same as the on-screen overlay
+    // (its <g> uses scale(s,-s)). We fit-to-bbox into a clean figure box so the
+    // export is framed nicely regardless of the interactive zoom/crop.
+    const EXPORT_PT = 283.4646;   // 10 cm in PostScript points → figure long side
+    // Widths chosen to read like the on-screen overlay (1.5 vs 2.5 px) at a
+    // ~10 cm figure: same SIC/contour ratio, heavier than hairlines. PDF and
+    // TikZ are tuned independently (PDF slightly thinner per request).
+    const LW_CONTOUR = 0.9, LW_SIC = 1.5;           // pt; TikZ widths (SIC thicker)
+    const LW_CONTOUR_PDF = 0.7, LW_SIC_PDF = 1.2;   // pt; PDF widths (slightly thinner)
+    const DASH = [3, 3];                             // pt on/off for hidden segments
+
+    // Flatten lastOutline into [{pts, visible, sic}], skipping degenerate polys.
+    function _exportPolys() {
+        if (!lastOutline) return null;
+        const out = [];
+        const push = (bucket, sic) => {
+            Object.keys(bucket || {}).forEach(k => {
+                const visible = Number(k) === 0;   // 0 = front sheet; <0 = hidden
+                (bucket[k] || []).forEach(poly => {
+                    if (poly && poly.length >= 2) out.push({ pts: poly, visible, sic });
+                });
+            });
+        };
+        push(lastOutline.lines_by_visibility, false);
+        push(lastOutline.si_lines_by_visibility, true);
+        return out.length ? out : null;
+    }
+
+    // Uniform fit of all polys into a `maxPt`-long box (aspect preserved).
+    // Returns { w, h, map(p)->[X,Y] } with Y still UP (TikZ-native; PDF flips).
+    function _exportFit(polys, maxPt) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        polys.forEach(o => o.pts.forEach(p => {
+            if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
+            if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+        }));
+        const w0 = (maxX - minX) || 1, h0 = (maxY - minY) || 1;
+        const s = maxPt / Math.max(w0, h0);
+        return { w: w0 * s, h: h0 * s,
+                 map: p => [ (p[0] - minX) * s, (p[1] - minY) * s ] };
+    }
+
+    // Draw hidden first, then visible, then SIC last → solid/thick lines on top.
+    function _exportOrder(polys) {
+        return [...polys].sort((a, b) =>
+            (a.visible ? 1 : 0) - (b.visible ? 1 : 0) ||
+            (a.sic ? 1 : 0)     - (b.sic ? 1 : 0));
+    }
+
+    function _saveText(text, filename, mime) {
+        // Blob URL (not a data: URI) — no length cap for dense outlines.
+        const url = URL.createObjectURL(new Blob([text], { type: mime }));
+        const a = document.createElement("a");
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function buildTikZ() {
+        const polys = _exportPolys();
+        if (!polys) return null;
+        const fit = _exportFit(polys, EXPORT_PT);
+        const r = v => v.toFixed(2);
+        const body = _exportOrder(polys).map(o => {
+            const coords = o.pts.map(p => { const q = fit.map(p);
+                return `(${r(q[0])},${r(q[1])})`; }).join(" -- ");
+            const lw = o.sic ? LW_SIC : LW_CONTOUR;
+            const style = o.visible
+                ? `black, line width=${lw}pt`
+                : `gray, line width=${lw}pt, dash pattern=on ${DASH[0]}pt off ${DASH[1]}pt`;
+            return `  \\draw[${style}] ${coords};`;
+        }).join("\n");
+        return `% Apparent contour of "{{ surface.name }}" — coordinates in pt.\n`
+             + `\\begin{tikzpicture}[x=1pt,y=1pt]\n${body}\n\\end{tikzpicture}\n`;
+    }
+
+    async function copyTikZ() {
+        const tex = buildTikZ();
+        if (!tex) return;
+        try {
+            await navigator.clipboard.writeText(tex);
+            const prev = tikzButton.textContent;   // brief "copied" confirmation
+            tikzButton.textContent = "copied";
+            setTimeout(() => { tikzButton.textContent = prev; }, 1000);
+        } catch (e) {
+            // Clipboard API blocked (insecure context / permission) → fall back.
+            console.error("clipboard write failed; downloading .tex instead:", e);
+            _saveText(tex, "{{ surface.name }}.tex", "text/plain");
+        }
+    }
+
+    async function downloadPDF() {
+        const polys = _exportPolys();
+        if (!polys) return;
+        let mod;
+        try {
+            mod = await import("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/+esm");
+        } catch (e) {
+            console.error("PDF library failed to load:", e);
+            alert("Could not load the PDF library (offline?). SVG/TikZ still work.");
+            return;
+        }
+        const jsPDF = mod.jsPDF ?? mod.default;   // tolerate either ESM export shape
+        const PAD = 6;   // pt margin around the drawing
+        const fit = _exportFit(polys, EXPORT_PT);
+        const W = fit.w + 2 * PAD, H = fit.h + 2 * PAD;
+        // jsPDF re-orders a custom `format` to match its orientation, so a wide
+        // (landscape) figure on a default-portrait page gets CLIPPED. Pass the
+        // matching orientation, then draw against the page's ACTUAL dimensions
+        // (centered) so it's correct whatever jsPDF decides.
+        const doc = new jsPDF({ unit: "pt", format: [W, H],
+                                orientation: W >= H ? "landscape" : "portrait" });
+        const PW = doc.internal.pageSize.getWidth();
+        const PH = doc.internal.pageSize.getHeight();
+        const ox = (PW - fit.w) / 2, oy = (PH - fit.h) / 2;   // center on the page
+        doc.setLineCap("round"); doc.setLineJoin("round");
+        _exportOrder(polys).forEach(o => {
+            doc.setLineWidth(o.sic ? LW_SIC_PDF : LW_CONTOUR_PDF);
+            if (o.visible) { doc.setDrawColor(0, 0, 0);       doc.setLineDashPattern([], 0); }
+            else           { doc.setDrawColor(128, 128, 128); doc.setLineDashPattern(DASH, 0); }
+            // Draw the polyline as ONE connected, stroked path (relative deltas)
+            // so the dash phase runs continuously along the whole curve. Drawing
+            // it segment-by-segment instead resets the dash on every short edge
+            // → hidden lines look solid-grey and long edges get spurious gaps.
+            // fit is y-up; PDF is y-down from the top-left → flip Y within the
+            // real page height.
+            const P = o.pts.map(p => { const q = fit.map(p);
+                return [ox + q[0], PH - (oy + q[1])]; });
+            const deltas = [];
+            for (let i = 1; i < P.length; i++)
+                deltas.push([P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]]);
+            if (deltas.length) doc.lines(deltas, P[0][0], P[0][1], [1, 1], "S");
+        });
+        doc.save("{{ surface.name }}.pdf");
+    }
+
+    pdfButton.addEventListener("click", downloadPDF);
+    tikzButton.addEventListener("click", copyTikZ);
 
     /* ============================================================
        ROTATION DIALS
