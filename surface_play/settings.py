@@ -28,15 +28,14 @@ HA_CUSP_TRIM: int = 5
 
 # ── Resampling densification / Newton refinement ─────────────────────────────
 # Centralized here as the single source of truth (e.g. for the debug panel);
-# all are consumed in curves.resample_all.
+# consumed in curves.resample_all.
 
-# BC build-polyline: subdivisions per boundary mesh-edge segment, so cumulative
-# xy-arclength tracks the true projected curve through a projection fold
-# (curves._densify_bc_polyline). One batched surface eval over the dense uv.
-BC_DENSIFY_NSUB: int = 24
-# HC (helper-curve) straight uv-line: number of dense pre-samples used to build
-# an accurate arclength table before picking sample positions (resample_all HC
-# branch).
-HC_DENSIFY_N: int = 200
+# Densification oversampling factor, shared by the BC build-polyline and the HC
+# arclength table. Both build a dense polyline at spacing `ell / DENSIFY_SUBDIV`
+# (ell = M / resolution is the global coarse sample spacing, M = mesh xy-bbox
+# diagonal) so cumulative image-arclength stays accurate through projection
+# folds. Equivalently the dense point count is `resolution · DENSIFY_SUBDIV ·
+# L / M` for a curve of image-length L. Higher = finer arclength tables (slower).
+DENSIFY_SUBDIV: int = 10
 # (CC Newton refinement runs to convergence — see curves._newton_cc_refine —
 # so there is no iteration-count setting.)
