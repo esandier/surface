@@ -8,7 +8,7 @@ PROJECT_RESAMPLED: bool = False
 # Resolution knob driving the construction mesh density (build_construction)
 # and outline sampling density (resample_all). Per-call overrides via the
 # `resolution=` kwarg on build_surface_init / resample_all.
-RESOLUTION: int = 200
+RESOLUTION: int = 210
 # Separate, coarser resolution for the 3D *display* mesh served to the canvas
 # (build_mesh_init). The colored surface the user rotates does not need the
 # full construction density — a coarser mesh ships a much smaller payload so
@@ -46,7 +46,7 @@ DENSIFY_SUBDIV: int = 10
 # projected contour velocity → 0, so sampling there is hypersensitive and the
 # two near-tip points straddle the VP (→ a phantom inter-branch occlusion
 # crossing); trimming them removes the straddle. 0 disables trimming.
-VP_TRIM: int = 3
+VP_TRIM: int = 1
 
 # VP cusp-matching algorithm — dispatched in curves._cc_vp_match_targets:
 #   "match" — equal-distance resampling of both branches near the cusp

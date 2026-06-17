@@ -119,11 +119,11 @@
             <div style="margin-bottom:10px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:2px;">
                     <span style="font-size:12px; color:#333;">Resolution</span>
-                    <span id="dbg-resolution-val" style="font-size:11px; font-family:monospace; color:#555;">200</span>
+                    <span id="dbg-resolution-val" style="font-size:11px; font-family:monospace; color:#555;">210</span>
                 </div>
                 <!-- Single resolution knob — drives mesh density AND outline sampling
                      (surface_play/settings.py RESOLUTION = 200 is the production default). -->
-                <input type="range" id="dbg-resolution" min="20" max="400" step="10" value="200" autocomplete="off" style="width:100%; cursor:pointer;">
+                <input type="range" id="dbg-resolution" min="20" max="400" step="10" value="210" autocomplete="off" style="width:100%; cursor:pointer;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-jitter" style="font-size:12px; color:#333; margin:0;">Jitter mesh</label>
@@ -143,7 +143,7 @@
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-vp-trim" style="font-size:12px; color:#333; margin:0;" title="At each cusp (VP), drop this many innermost points from the contour branches">VP trim</label>
-                <input type="number" id="dbg-vp-trim" value="3" min="0" max="20" autocomplete="off" style="width:72px; font-size:11px;">
+                <input type="number" id="dbg-vp-trim" value="1" min="0" max="20" autocomplete="off" style="width:72px; font-size:11px;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
                 <label for="dbg-vp-mode" style="font-size:12px; color:#333; margin:0;" title="Cusp-matching algorithm: 'match' = equal-distance resampling of both branches (committed default); 'trim' = asymmetric near-cusp trim, no resampling (experimental)">VP match mode</label>
