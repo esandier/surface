@@ -416,7 +416,7 @@ for i in indices:
 + Detect which of the 2 segments has a sign change.
 + Iterate until VP is found with high precision. 
 
-This refinement may or may not prove useful, we'll see. It is used, or not, according to the value of the variables "NEWTON_CONTOUR_POINTS" of settings.py, which can be true or false.
+This refinement is optional, controlled by the `refine_cusps` argument of `build_outline` (debug-panel **Refine cusps**), distinct from `NEWTON_CONTOUR_POINTS` (which refines *contour points*, not cusps). The production default is `refine_cusps=False`: the VP is taken as the CS midpoint, and the cusp straddle is instead removed by the asymmetric near-cusp trim at resampling time (`VP_MATCH_MODE="trim"`, the default — see "Curve resampling"). Refinement is only needed by the alternative `VP_MATCH_MODE="match"` (equal-distance matching), which measures distances from the exact cusp. A VP is a Whitney cusp, so the two arms cannot cross regardless of refinement (see "No special resampling at VPs"); refinement only sharpens the VP location.
 
 Once the cusp is determined, it is recorded as a SP, and then a SPT is assigned to the original CS, before bisection. 
 
@@ -591,6 +591,11 @@ For every E1 and F2 that intersect at P:
   plus internal density-based samples, which oversamples short SCs.
   Revisit `curves.py:_sample_arclengths` so that short SCs degrade
   gracefully to a 2-point line.
+  (Partially handled 2026-06-17: the *extreme* case — projected length
+  `< 1e-4·ell`, a curve collapsed to a point — is now DELETED outright in
+  `resample_all` rather than resampled, since such curves carry no visible
+  line and their near-coincident points spike the client Bézier fit. The
+  intermediate "small but not degenerate" case above is still open.)
 
 # Appendix : Debug panel
 The debug panel of the front-end allows to redefined the settings.py variables mentionned above. When a change is made, the construction pipeline and the outline pipeline are triggered. The changes survive when another surface is chosen.
