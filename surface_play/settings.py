@@ -54,6 +54,8 @@ VP_TRIM: int = 3
 #             construction").
 #   "trim"  — asymmetric near-cusp trim, no resampling (_cc_vp_match_asym):
 #             fixed VP_TRIM on the farther branch, the nearer branch trimmed
-#             to leave the cusp at the same image radius. Experimental; toggled
-#             from the debug panel ("VP match mode") for A/B comparison.
-VP_MATCH_MODE: str = "match"
+#             to leave the cusp at the same image radius. Default since
+#             2026-06-17 (perf: pairs with build_outline refine_cusps=False to
+#             skip the dominant VP-refinement cost; full suite green either way).
+#             "match" remains selectable via the debug panel / kwarg.
+VP_MATCH_MODE: str = "trim"

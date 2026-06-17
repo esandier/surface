@@ -110,7 +110,7 @@
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-refine" style="font-size:12px; color:#333; margin:0;" title="Newton-bisection refine cusps (VPs) to machine precision; off = d-field sign-change segment midpoint (much faster, auto-off in trim mode)">Refine cusps</label>
-                <input type="checkbox" id="dbg-refine" checked style="cursor:pointer; width:16px; height:16px;">
+                <input type="checkbox" id="dbg-refine" style="cursor:pointer; width:16px; height:16px;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-project-resampled" style="font-size:12px; color:#333; margin:0;">Project resampled</label>
@@ -148,8 +148,8 @@
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
                 <label for="dbg-vp-mode" style="font-size:12px; color:#333; margin:0;" title="Cusp-matching algorithm: 'match' = equal-distance resampling of both branches (committed default); 'trim' = asymmetric near-cusp trim, no resampling (experimental)">VP match mode</label>
                 <select id="dbg-vp-mode" style="width:90px; font-size:11px;">
-                    <option value="match" selected>match</option>
-                    <option value="trim">trim</option>
+                    <option value="match">match</option>
+                    <option value="trim" selected>trim</option>
                 </select>
             </div>
             <div style="display:flex; justify-content:flex-end;">

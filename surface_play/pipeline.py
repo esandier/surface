@@ -421,7 +421,7 @@ def build_outline(
     eye,
     *,
     newton_contour_points: bool = True,
-    refine_cusps: bool = True,
+    refine_cusps: bool = False,
     canvas_resolution: int | None = None,
     project_resampled: bool = False,
     propagation: Literal["BFS", "LP1", "LP4"] = "LP4",
