@@ -1174,8 +1174,8 @@ def _invert_distance_to_arclength(
     return s.tolist()
 
 
-def _cc_vp_match_targets(subcurves, polys, L_per_sub, splits, surface,
-                         projection, domain, vp_trim):
+def _cc_vp_match_equidist(subcurves, polys, L_per_sub, splits, surface,
+                          projection, domain, vp_trim):
     """Equal-distance VP matching + cusp trim (spec 2026-06-16).
 
     For each VP shared by exactly two CC half-curves, the SHORTER one (by
@@ -1279,6 +1279,124 @@ def _cc_vp_match_targets(subcurves, polys, L_per_sub, splits, surface,
     return out
 
 
+def _cc_vp_match_asym(subcurves, polys, splits, vp_trim):
+    """Asymmetric cusp trim at VPs (spec 2026-06-17, experimental).
+
+    At a cusp (VP) the two CC half-curves are tangent and overlap in the image
+    near the tip; sampled independently, their near-tip polylines straddle the
+    VP and inject a phantom inter-branch occlusion break (the Klein-bottle bug).
+    Like `_cc_vp_match_equidist` this kills the straddle, but by DROPPING
+    near-cusp vertices only — no resampling, no reprojection:
+
+      * `reference` branch — the one whose `vp_trim`-th vertex from the VP is
+        FARTHER from the VP in the image — drops exactly `vp_trim` vertices
+        nearest the VP. Call the image distance of its first surviving vertex
+        `d_ref`.
+      * `matched` branch drops as many near-VP vertices as makes its first
+        surviving vertex's image distance to the VP closest to `d_ref`, so both
+        branches leave the cusp at the same radius (symmetric — no straddle).
+        It always drops at least `vp_trim` (choosing the farther branch as the
+        reference guarantees the matched branch only ever drops MORE, never
+        fewer, to reach `d_ref`).
+
+    The VP endpoint vertex (index 0 from the VP) and the far SP endpoint are
+    always kept. Returns `{sub_index: s_targets ndarray}` overriding the CC
+    `s_targets = cum` default. Each VP end is handled independently, so a branch
+    sharing a VP at each end is trimmed near both, keeping its mid vertices.
+    """
+    # VP-SP → CC half-curves touching it.
+    vp_eps: dict[int, list[tuple[int, str]]] = {}
+    for i, sub in enumerate(subcurves):
+        if sub.kind != "CC":
+            continue
+        for end, sp in (("start", sub.start), ("end", sub.end)):
+            if sp >= 0 and splits.sps[int(sp)][3] == "vp":
+                vp_eps.setdefault(int(sp), []).append((i, end))
+
+    def _vp_order(i, end):
+        """Original vertex indices ordered from the VP outward, + their
+        image distances to the VP (index 0 = the VP endpoint)."""
+        xy = polys[i][2]
+        N = len(xy)
+        order = list(range(N)) if end == "start" else list(range(N - 1, -1, -1))
+        vp_xy = xy[order[0]]
+        d = np.linalg.norm(xy[order] - vp_xy, axis=1)
+        return order, d
+
+    # Per sub, accumulate the near-VP vertex drops from each shared VP end.
+    mods: dict[int, set[int]] = {}
+    for sp, eps in vp_eps.items():
+        if len(eps) != 2:
+            continue
+        (ia, ea), (ib, eb) = eps
+        if ia == ib:
+            continue  # closed CC through a single VP — skip
+        oa, da = _vp_order(ia, ea)
+        ob, db = _vp_order(ib, eb)
+        if min(len(da), len(db)) < 2:
+            continue
+        # First-surviving-vertex distance when each branch trims exactly
+        # vp_trim (clamped to keep the far endpoint).
+        ka = min(vp_trim, len(da) - 1)
+        kb = min(vp_trim, len(db) - 1)
+        # Reference = farther first-survivor (fixed trim); matched grows toward it.
+        if da[ka] >= db[kb]:
+            ref_i, ref_o, ref_k, d_ref = ia, oa, ka, float(da[ka])
+            mat_i, mat_o, d_m = ib, ob, db
+        else:
+            ref_i, ref_o, ref_k, d_ref = ib, ob, kb, float(db[kb])
+            mat_i, mat_o, d_m = ia, oa, da
+        # Matched branch: grow its trim from vp_trim until its first survivor's
+        # distance is closest to d_ref, stopping once it passes d_ref along the
+        # increasing near-cusp run (so a far loop-back can't masquerade as the
+        # match).
+        k0 = min(vp_trim, len(d_m) - 1)
+        mat_k, best_err = k0, abs(float(d_m[k0]) - d_ref)
+        for k in range(k0 + 1, len(d_m)):
+            err = abs(float(d_m[k]) - d_ref)
+            if err < best_err:
+                mat_k, best_err = k, err
+            if d_m[k] >= d_ref:
+                break
+        # Drop the innermost trim vertices on each branch (keep the VP endpoint).
+        mods.setdefault(ref_i, set()).update(int(v) for v in ref_o[1:ref_k + 1])
+        mods.setdefault(mat_i, set()).update(int(v) for v in mat_o[1:mat_k + 1])
+
+    out: dict[int, np.ndarray] = {}
+    for i, drop in mods.items():
+        xy_p = polys[i][2]
+        N = len(xy_p)
+        cum = _arclengths(xy_p)
+        L = float(cum[-1]) if N else 0.0
+        drop = set(drop)
+        drop.discard(0)
+        drop.discard(N - 1)  # never drop the SP endpoints
+        s_all = [0.0, L]
+        s_all.extend(float(cum[v]) for v in range(N) if v not in drop)
+        out[i] = np.unique(np.round(np.clip(s_all, 0.0, L), 9))
+    return out
+
+
+def _cc_vp_match_targets(subcurves, polys, L_per_sub, splits, surface,
+                         projection, domain, vp_trim):
+    """Dispatch VP cusp-matching by `settings.VP_MATCH_MODE`.
+
+    "match" (default, committed) → `_cc_vp_match_equidist` (equal-distance
+    resampling of both branches). "trim" (experimental) → `_cc_vp_match_asym`
+    (asymmetric near-cusp trim, no resampling). Selectable per-request from the
+    debug panel ("VP match mode") for A/B comparison on the fixture zoo.
+    """
+    from surface_play import settings as _settings
+    mode = getattr(_settings, "VP_MATCH_MODE", "match")
+    if mode == "trim":
+        return _cc_vp_match_asym(subcurves, polys, splits, vp_trim)
+    if mode != "match":
+        raise ValueError(
+            f"VP_MATCH_MODE must be 'match' or 'trim', got {mode!r}")
+    return _cc_vp_match_equidist(
+        subcurves, polys, L_per_sub, splits, surface, projection, domain, vp_trim)
+
+
 def resample_all(
     subcurves: "list[SubCurve]",
     surface: "SurfaceParams",
@@ -1330,42 +1448,40 @@ def resample_all(
     ell = M / float(resolution)
     # Shared BC/HC densification oversampling factor (dense spacing = ell/this).
     densify_subdiv = float(_settings.DENSIFY_SUBDIV)
-    # Collapsed-SubCurve guard (2026-05-27). A SubCurve whose xy polyline
-    # is shorter than `1e-4 * ell` has both SPs at essentially the same
-    # image-space point — typically a non-generic axis-aligned view that
-    # projects an entire curve to a single point (e.g., the helicoid CC
-    # at u=0 under the Z-axis view collapses to (0, 0)). Without this
-    # guard, delta_per_sp inherits the tiny L → `_sample_arclengths`
-    # spends 10⁷+ iterations climbing back to `ell` for every other sub
-    # sharing the SP. Surface the degenerate input loudly rather than
-    # hanging silently.
+    # Degenerate-SubCurve handling (2026-06-17; was a hard raise — see history
+    # below). A SubCurve whose xy polyline is shorter than `1e-4 * ell` has both
+    # SPs at essentially the same image-space point: a curve collapsed to a
+    # point — e.g. a tiny CC loop at a bump tip under some jitter+view, or a
+    # non-generic axis-aligned view (the helicoid CC at u=0 under the Z-axis
+    # view collapses to (0, 0)). Dense-resampling it makes `delta_per_sp`
+    # inherit the tiny L, so `_sample_arclengths` spends 10⁷+ iterations
+    # climbing back to `ell` for every sub sharing the SP. The earlier guard
+    # raised loudly here, which aborted the WHOLE outline → an intermittent
+    # HTTP 400 on bumpy surfaces (e.g. Bosses fortes). Instead we SKIP its
+    # resampling: such subs are collected in `degenerate`, passed through
+    # verbatim in the sampling loop, and their tiny L is excluded from the
+    # per-SP delta (so they don't contaminate neighbours sharing their SPs).
     _L_FLOOR = 1e-4 * ell
-    for i, sub in enumerate(subcurves):
-        L = L_per_sub[i]
-        if 0 < L < _L_FLOOR and not (sub.start == -1 and sub.end == -1):
-            raise ValueError(
-                f"resample_all: SubCurve {i} (kind={sub.kind}, "
-                f"start={sub.start}, end={sub.end}) has xy-length "
-                f"{L:.3e} < 1e-4·ell={_L_FLOOR:.3e}. Both SPs project to "
-                f"essentially the same image point — likely a non-generic "
-                f"axis-aligned view collapsing a curve to a single point. "
-                f"Use a generic random view, or skip this fixture."
-            )
+    degenerate = {
+        i for i, sub in enumerate(subcurves)
+        if 0 < L_per_sub[i] < _L_FLOOR and not (sub.start == -1 and sub.end == -1)
+    }
     L_per_sp: dict[int, float] = {}
     for i, sub in enumerate(subcurves):
         L = L_per_sub[i]
-        if L <= 0:
+        if L <= 0 or i in degenerate:
             continue
         for sp in (sub.start, sub.end):
             if sp >= 0:
                 L_per_sp[sp] = min(L_per_sp.get(sp, float("inf")), L)
     delta_per_sp = {sp: L / 10.0 for sp, L in L_per_sp.items()}
 
-    # Equal-distance VP matching (spec 2026-06-16): for each VP shared by two
-    # CC half-curves, override the longer branch's CC arclength ladder so its
-    # near-cusp points mirror the shorter (master) branch's distances to the
-    # VP — preventing the two overlapping near-cusp polylines from spuriously
-    # crossing (which injects a phantom occlusion break). See _cc_vp_match_targets.
+    # VP cusp matching: for each VP shared by two CC half-curves, override the
+    # CC arclength ladder near the cusp so the two overlapping near-cusp
+    # polylines can't spuriously cross (which injects a phantom occlusion
+    # break). Algorithm selected by settings.VP_MATCH_MODE ("match" equal-
+    # distance resample, default / "trim" asymmetric trim). See
+    # _cc_vp_match_targets dispatcher.
     cc_match = _cc_vp_match_targets(
         subcurves, polys, L_per_sub, splits, surface, projection, domain,
         int(_settings.VP_TRIM))
@@ -1399,6 +1515,22 @@ def resample_all(
             out.append(ResampledCurve(
                 kind=sub.kind, start=-1, end=-1,
                 depth=depth, xy=xy_p.copy(), dir=None,
+                vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
+                uv=uv_p.copy() if len(uv_p) else uv_p,
+            ))
+            continue
+
+        # Degenerate SubCurve (collapsed to ~a point) → verbatim pass-through.
+        # Keeps its SPs in the visibility graph (so neighbours sharing them
+        # still resolve) but skips dense resampling, which would hang on the
+        # tiny L. `dir`/`tan` are None — a collapsed curve is never a
+        # meaningful occluder (visibility.py guards on `ocer_rc.dir is None`).
+        if i in degenerate:
+            depth = (np.asarray(projection.Z(xyz_p), dtype=float)
+                     if len(xyz_p) else np.zeros(0, dtype=float))
+            out.append(ResampledCurve(
+                kind=sub.kind, start=int(sub.start), end=int(sub.end),
+                depth=depth, xy=xy_p.copy(), dir=None, tan=None,
                 vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
                 uv=uv_p.copy() if len(uv_p) else uv_p,
             ))

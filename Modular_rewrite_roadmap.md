@@ -68,7 +68,7 @@ surface_play/
 - The frontend sends `I`, `J`, `O`, `eye`, and `debug` exactly as today.
 
 ### Settings knobs (from spec §"Debug panel")
-`GRID_RESOLUTION`, `CANVAS_RESOLUTION`, `NEWTON_CUSP`, `PROJECT_RESAMPLED`, `PROPAGATION ∈ {BFS, LP1, LP4}`. All pass through the `debug` POST dict to `build_outline(...)` kwargs. No module reads `settings.py` directly except the Django app config.
+`GRID_RESOLUTION`, `CANVAS_RESOLUTION`, `NEWTON_CONTOUR_POINTS`, `PROJECT_RESAMPLED`, `PROPAGATION ∈ {BFS, LP1, LP4}`. All pass through the `debug` POST dict to `build_outline(...)` kwargs. No module reads `settings.py` directly except the Django app config.
 
 ---
 
@@ -857,19 +857,19 @@ Note: SICs are NOT a parameter. SIS-level data (`sis_pairs` with its `flip` flag
    For each preimage segment, also record its `f_here` (the face it lies on, found as a shared element of the two endpoints' relevant `A` sets) and `f_other` (the other sheet's face).
 2. Run `sweep_segments(...)` (P5) on the union of all preimage segments in self-mode with `domain` (G3 — close-aware).
 3. Filter hits to those where `segs["f_here"][a] == segs["f_here"][b]` (a hit must occur on a single shared face — that's how two preimages meet at the same domain point).
-4. Group hits by face-pair interlocking (legacy `find_triple_points` lines 425-441): three hits form a TP when their `f_other` values pair up as `(F3, F2), (F3, F1), (F2, F1)` for some `(F1, F2, F3)`.
-5. Verify in 3D: `S(P1) ≈ S(P2) ≈ S(P3)` within `xyz_tol`. Discard if not.
+4. Group hits by face-pair interlocking (legacy `find_triple_points` lines 425-441): three hits form a TP when their `f_other` values pair up as `(F3, F2), (F3, F1), (F2, F1)` for some `(F1, F2, F3)`. **This interlock is the SOLE detection criterion** — empirically perfectly discriminating (Boy → exactly 1 candidate; fig8 / Klein / embedded fixtures → 0).
+5. Emit the most-coincident hit combination per face-triple: among combinations with three distinct SIS indices, pick the one minimising the max pairwise `‖S(P_i) − S(P_j)‖` (the best discrete estimate of the TP). **No absolute 3D-coincidence gate** (the old `xyz_tol` discard): on a real mesh the discrete coincidence is O(edge length) — ~0.04 at res 20, ~0.002 at res 70 for Boy — so an absolute 1e-3 threshold masked every real TP. `xyz_tol` is retained on the signature for back-compat but no longer gates (changed 2026-06-17).
 6. Populate `sis_indices` from the SIS index of each of the three preimage segments contributing to the triple.
 
 **Test criterion:**
 1. Empty `sis_pairs` → empty TPs.
 2. Fig-8 cyl: 0 TPs (single SIC, but more importantly: no three preimage segments meet at one domain point on a shared face).
 3. Synthetic three-SIS fixture (handcrafted DPs + sis_pairs, no real surface needed): correct face-pair interlocking detected.
-4. **"Immersion with triple point"** surface (to be added to DB): produces ≥1 TP; `sis_indices` reference valid SISs; 3D verification passes.
-5. No spurious TPs on standard surfaces (helicoid, torus, paraboloid, Möbius).
-6. 3D consistency: for every emitted TP, `‖S(P1) − S(P2)‖, ‖S(P1) − S(P3)‖, ‖S(P2) − S(P3)‖ < xyz_tol`.
+4. **Boy surface** (`test_fixtures.boy` — Bryant–Kusner immersion of ℝP² over the antipodal unit disk): produces exactly 1 TP with three distinct `sis_indices`, resolution-robust (res 20/25/30/40). The canonical immersion-with-triple-point fixture (added 2026-06-17).
+5. No spurious TPs on standard surfaces (helicoid, torus, paraboloid, Möbius) or on TP-free immersions (fig8, Klein).
+6. 3D consistency: for the handcrafted synthetic fixture (exact coincidence) every emitted TP satisfies `‖S(Pi) − S(Pj)‖ < xyz_tol`. (Real-mesh TPs coincide only to O(edge length) — see step 5.)
 **Gotchas:** G3.
-**Stop & verify:** `pytest surface_play/test_intersections.py::test_find_triple_points` ⇒ 6 green (test 4 conditionally skipped if the fixture isn't in the DB yet).
+**Stop & verify:** `pytest surface_play/test_intersections.py -k triple_points` ⇒ all green (Boy fixture now passes, no xfail).
 
 ---
 
@@ -1575,7 +1575,7 @@ def build_surface_init(record: SurfaceRecord, *,
 def mesh_to_threejs(construction: ConstructionResult) -> dict: ...
 
 def build_outline(init: SurfaceInit, I, J, O, eye, *,
-                  newton_cusp:        bool = True,
+                  newton_contour_points:        bool = True,
                   canvas_resolution:  int | None = None,
                   project_resampled:  bool = False,
                   propagation:        Literal["BFS", "LP1", "LP4"] = "BFS",
@@ -1594,7 +1594,7 @@ def build_outline(init: SurfaceInit, I, J, O, eye, *,
    - **Vertex-class compaction (C4):** under the new C4 contract, `tris` carries pre-id labels and every row of `uv/xyz/SN` is live; paired vertices each have their own evaluation. For three.js, decide per `templates/play.html` whether to send all N pre-id vertices (paired vertices appear as duplicated geometry, harmless overdraw) or compact to one representative per `vertex_class` (rebuild a dense array via the `vertex_class` map). Document the choice in the docstring.
 3. `build_outline`:
    - Build `Projection(surface, I, J, O, eye)` (P3). `O` is the world-space view-plane anchor — see W2 for the full semantics. Pass through unmodified.
-   - Run Layer O end-to-end on `(init.construction, projection)` with the supplied debug knobs threaded through: `newton_cusp` → O1's `use_newton`; `canvas_resolution` → O14's `resolution` (defaults to `settings.CANVAS_RESOLUTION`); `project_resampled` → O14's `project_resampled`; `propagation` selects O16-only (BFS) vs. O17 LP1/LP4.
+   - Run Layer O end-to-end on `(init.construction, projection)` with the supplied debug knobs threaded through: `newton_contour_points` → O1's `use_newton`; `canvas_resolution` → O14's `resolution` (defaults to `settings.CANVAS_RESOLUTION`); `project_resampled` → O14's `project_resampled`; `propagation` selects O16-only (BFS) vs. O17 LP1/LP4.
    - Assemble `OutlineResult`:
      - `lines_by_visibility[v]`: list of polylines (each polyline = list of `(x, y)` view-plane points) for each ResampledCurve segment whose visibility integer equals `v`. Segment boundaries split at projection breaks (BKs).
      - `si_lines_by_visibility[v]`: same for SIC ResampledCurves.
@@ -1637,7 +1637,7 @@ def play_outline(request, pk: int) -> JsonResponse: ...
    - `record = get_object_or_404(SurfaceRecord, pk=pk)`.
    - Parse JSON body → `(I, J, O, eye, debug)`. All four geometry fields are required; `eye` may be `null` (ortho mode).
    - `init = pipeline.build_surface_init(record)` (cache-hit on subsequent calls per W1).
-   - `result = pipeline.build_outline(init, I, J, O, eye, **debug_kwargs(debug))` where `debug_kwargs` validates the `debug` dict and maps keys → kwargs: `PROPAGATION → propagation`, `CANVAS_RESOLUTION → canvas_resolution`, `NEWTON_CUSP → newton_cusp`, `PROJECT_RESAMPLED → project_resampled`. Unknown keys: log a warning, ignore (don't 400 — preserve existing client compat).
+   - `result = pipeline.build_outline(init, I, J, O, eye, **debug_kwargs(debug))` where `debug_kwargs` validates the `debug` dict and maps keys → kwargs: `PROPAGATION → propagation`, `CANVAS_RESOLUTION → canvas_resolution`, `NEWTON_CONTOUR_POINTS → newton_contour_points`, `PROJECT_RESAMPLED → project_resampled`. Unknown keys: log a warning, ignore (don't 400 — preserve existing client compat).
    - Return `JsonResponse({"lines_by_visibility": ..., "si_lines_by_visibility": ..., "origin": ...})`.
 3. **`O` semantics** (resolved from the frontend at [templates/play.html:330-336](templates/play.html#L330)): `O` is the **world-space point that the frontend wants mapped to view-plane `(0, 0)`**.
    - In ortho mode: `O = unproject(NDC (0, 0, -1))` — the world-space point on the camera's near plane that sits at the screen origin. `I` and `J` are the in-plane direction vectors `unproject(NDC (1,0,-1)) − O` and `unproject(NDC (0,1,-1)) − O`.

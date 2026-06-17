@@ -47,6 +47,23 @@ cs_dtype = np.dtype([
 
 # â”€â”€ O1 helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+def _cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Cross product of two (N, 3) arrays via explicit components.
+
+    Byte-identical to `np.cross(a, b)` for (N, 3) inputs but ~10× faster:
+    `np.cross` routes through `broadcast_to` / `moveaxis` / `normalize_axis_tuple`
+    (a documented hotspot here — thousands of small cross calls per VP-heavy
+    build). Components only; no axis machinery.
+    """
+    a0, a1, a2 = a[:, 0], a[:, 1], a[:, 2]
+    b0, b1, b2 = b[:, 0], b[:, 1], b[:, 2]
+    out = np.empty_like(a)
+    out[:, 0] = a1 * b2 - a2 * b1
+    out[:, 1] = a2 * b0 - a0 * b2
+    out[:, 2] = a0 * b1 - a1 * b0
+    return out
+
+
 def _compute_d_batch(
     uv_arr: np.ndarray,
     vals: tuple[np.ndarray, ...],
@@ -177,8 +194,8 @@ def _compute_d_batch(
     ker_oriented = ker * sign_ker[:, None]              # (N, 2)
 
     # Step B. Compute Np = grad_uv(axis . SN) in uv space (per _bvis_chge).
-    cross_a = np.cross(Suu_arr, Sv_arr) + np.cross(Su_arr, Suv_arr)  # (N, 3)
-    cross_b = np.cross(Suv_arr, Sv_arr) + np.cross(Su_arr, Svv_arr)  # (N, 3)
+    cross_a = _cross3(Suu_arr, Sv_arr) + _cross3(Su_arr, Suv_arr)  # (N, 3)
+    cross_b = _cross3(Suv_arr, Sv_arr) + _cross3(Su_arr, Svv_arr)  # (N, 3)
     Np_u = np.einsum("ij,ij->i", cross_a, axis_per)     # (N,)
     Np_v = np.einsum("ij,ij->i", cross_b, axis_per)     # (N,)
     Np = np.stack([Np_u, Np_v], axis=-1)                # (N, 2)
@@ -254,8 +271,8 @@ def find_contour_points(
 
             # dSN/ds = (SuuÃ—Sv + SuÃ—Suv)Â·pq_u + (SuvÃ—Sv + SuÃ—Svv)Â·pq_v
             dSN_ds = (
-                (np.cross(Suu_arr, Sv_arr) + np.cross(Su_arr, Suv_arr)) * pq_u[:, None]
-                + (np.cross(Suv_arr, Sv_arr) + np.cross(Su_arr, Svv_arr)) * pq_v[:, None]
+                (_cross3(Suu_arr, Sv_arr) + _cross3(Su_arr, Suv_arr)) * pq_u[:, None]
+                + (_cross3(Suv_arr, Sv_arr) + _cross3(Su_arr, Svv_arr)) * pq_v[:, None]
             )  # (N, 3)
 
             if projection.mode == "ortho":

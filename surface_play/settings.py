@@ -47,3 +47,13 @@ DENSIFY_SUBDIV: int = 10
 # two near-tip points straddle the VP (→ a phantom inter-branch occlusion
 # crossing); trimming them removes the straddle. 0 disables trimming.
 VP_TRIM: int = 3
+
+# VP cusp-matching algorithm — dispatched in curves._cc_vp_match_targets:
+#   "match" — equal-distance resampling of both branches near the cusp
+#             (_cc_vp_match_equidist; committed default, "correct by
+#             construction").
+#   "trim"  — asymmetric near-cusp trim, no resampling (_cc_vp_match_asym):
+#             fixed VP_TRIM on the farther branch, the nearer branch trimmed
+#             to leave the cusp at the same image radius. Experimental; toggled
+#             from the debug panel ("VP match mode") for A/B comparison.
+VP_MATCH_MODE: str = "match"

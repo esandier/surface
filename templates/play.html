@@ -105,8 +105,12 @@
                 <input type="checkbox" id="dbg-lp" checked style="cursor:pointer; width:16px; height:16px;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <label for="dbg-newton" style="font-size:12px; color:#333; margin:0;">Newton cusps</label>
+                <label for="dbg-newton" style="font-size:12px; color:#333; margin:0;" title="Newton-refine contour points (find_contour_points use_newton); off = edge-midpoint only">Newton contour points</label>
                 <input type="checkbox" id="dbg-newton" checked style="cursor:pointer; width:16px; height:16px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-refine" style="font-size:12px; color:#333; margin:0;" title="Newton-bisection refine cusps (VPs) to machine precision; off = d-field sign-change segment midpoint (much faster, auto-off in trim mode)">Refine cusps</label>
+                <input type="checkbox" id="dbg-refine" checked style="cursor:pointer; width:16px; height:16px;">
             </div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                 <label for="dbg-project-resampled" style="font-size:12px; color:#333; margin:0;">Project resampled</label>
@@ -137,9 +141,16 @@
                 <label for="dbg-ha-trim" style="font-size:12px; color:#333; margin:0;" title="Trim HA samples within this many chain steps of a cusp/VP/TP">HA cusp trim</label>
                 <input type="number" id="dbg-ha-trim" value="5" min="0" max="50" autocomplete="off" style="width:72px; font-size:11px;">
             </div>
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
-                <label for="dbg-vp-trim" style="font-size:12px; color:#333; margin:0;" title="At each cusp (VP), drop this many innermost equal-distance points from both contour branches">VP trim</label>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <label for="dbg-vp-trim" style="font-size:12px; color:#333; margin:0;" title="At each cusp (VP), drop this many innermost points from the contour branches">VP trim</label>
                 <input type="number" id="dbg-vp-trim" value="3" min="0" max="20" autocomplete="off" style="width:72px; font-size:11px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                <label for="dbg-vp-mode" style="font-size:12px; color:#333; margin:0;" title="Cusp-matching algorithm: 'match' = equal-distance resampling of both branches (committed default); 'trim' = asymmetric near-cusp trim, no resampling (experimental)">VP match mode</label>
+                <select id="dbg-vp-mode" style="width:90px; font-size:11px;">
+                    <option value="match" selected>match</option>
+                    <option value="trim">trim</option>
+                </select>
             </div>
             <div style="display:flex; justify-content:flex-end;">
                 <button id="dbg-apply-btn" class="btn btn-sm btn-outline-secondary" style="font-size:11px; padding:2px 14px;">Apply</button>
@@ -377,6 +388,7 @@
         if (!debugPanel) return {};
         const use_lp     = document.getElementById('dbg-lp').checked;
         const use_newton = document.getElementById('dbg-newton').checked;
+        const refine_cusps = document.getElementById('dbg-refine').checked;
         const project_resampled = document.getElementById('dbg-project-resampled').checked;
         const resolution = parseInt(document.getElementById('dbg-resolution').value);
         const jitter     = document.getElementById('dbg-jitter').checked;
@@ -384,13 +396,15 @@
         const densify    = parseInt(document.getElementById('dbg-densify').value);
         const haTrim     = parseInt(document.getElementById('dbg-ha-trim').value);
         const vpTrim     = parseInt(document.getElementById('dbg-vp-trim').value);
-        // Backend (views._debug_kwargs) routes: PROPAGATION/NEWTON_CUSP/
+        const vpMode     = document.getElementById('dbg-vp-mode').value;
+        // Backend (views._debug_kwargs) routes: PROPAGATION/NEWTON_CONTOUR_POINTS/
         // PROJECT_RESAMPLED → build_outline kwargs; RESOLUTION/JITTER/SEED →
         // build_surface_init; DENSIFY_SUBDIV/HA_CUSP_TRIM/VP_TRIM → scoped
         // surface_play.settings override for the outline build.
         return {
             PROPAGATION: use_lp ? "LP4" : "BFS",
-            NEWTON_CUSP: use_newton,
+            NEWTON_CONTOUR_POINTS: use_newton,
+            REFINE_CUSPS: refine_cusps,
             PROJECT_RESAMPLED: project_resampled,
             RESOLUTION: resolution,
             JITTER: jitter,
@@ -398,6 +412,7 @@
             DENSIFY_SUBDIV: densify,
             HA_CUSP_TRIM: haTrim,
             VP_TRIM: vpTrim,
+            VP_MATCH_MODE: vpMode,
         };
     }
 
@@ -448,14 +463,23 @@
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60000);
 
+        const _t0 = performance.now();
         fetch("{% url 'surface-play' pk=pk %}", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(data),
             signal: controller.signal,
         })
-        .then(r => { clearTimeout(timeoutId); return r.json(); })
-        .then(drawSVG)
+        .then(r => { clearTimeout(timeoutId); window._tReq = performance.now(); return r.json(); })
+        .then(d => {
+            window._tParse = performance.now();
+            drawSVG(d);
+            const tDraw = performance.now();
+            console.log(`[outline] server+net ${(window._tReq-_t0).toFixed(0)}ms | `
+                + `parse ${(window._tParse-window._tReq).toFixed(0)}ms | `
+                + `drawSVG ${(tDraw-window._tParse).toFixed(0)}ms | `
+                + `TOTAL ${(tDraw-_t0).toFixed(0)}ms`);
+        })
         .catch(err => {
             clearTimeout(timeoutId);
             console.error(err);
@@ -517,29 +541,53 @@
 
         updateSVGTransform();
 
+        // Bézier-fit tolerance in DATA units: the outline bbox maps to a few
+        // hundred screen px, so diag/1500 is comfortably sub-pixel. Fitting the
+        // dense (res-200) polylines to cubic Béziers collapses ~14k vertices to
+        // a few hundred path segments → far cheaper SVG DOM + paint. Reuses the
+        // TikZ exporter's Schneider fit (_fitCurve). lastOutline keeps the raw
+        // polylines, so TikZ/PDF export is unaffected.
+        let _mnX = Infinity, _mnY = Infinity, _mxX = -Infinity, _mxY = -Infinity;
+        for (const bucket of [lines, siLines])
+            for (const k in bucket)
+                for (const poly of bucket[k])
+                    for (const p of poly) {
+                        if (p[0] < _mnX) _mnX = p[0]; if (p[0] > _mxX) _mxX = p[0];
+                        if (p[1] < _mnY) _mnY = p[1]; if (p[1] > _mxY) _mxY = p[1];
+                    }
+        const _bezTol = (Math.hypot(_mxX - _mnX, _mxY - _mnY) || 1) / 1500;
+
+        function _bezPathD(bez) {
+            // bez: connected [[p0, c1, c2, p3], ...] → SVG path data string.
+            let d = `M${bez[0][0][0]},${bez[0][0][1]}`;
+            for (const b of bez)
+                d += `C${b[1][0]},${b[1][1]} ${b[2][0]},${b[2][1]} ${b[3][0]},${b[3][1]}`;
+            return d;
+        }
+
         function emitBucket(bucket, strokeWidth) {
             // vis == 0 → front-sheet visible (solid black); vis < 0 → hidden
             // (grey, dashed). For SIC buckets that contain only negative keys
             // every polyline must still be dashed — the rule is absolute, not
             // relative to the bucket's max key.
             const keys = Object.keys(bucket).map(Number).sort((a, b) => a - b);
-            let h = "";
+            const parts = [];
             keys.forEach(k => {
                 const visible = k === 0;
                 bucket[String(k)].forEach(poly => {
-                    const pts = poly.map(p => `${p[0]},${p[1]}`).join(" ");
-                    h += `
-                    <polyline
-                        points="${pts}"
-                        fill="none"
-                        stroke="${visible ? 'black' : 'grey'}"
-                        stroke-width="${strokeWidth}"
-                        ${visible ? '' : 'stroke-dasharray="4"'}
-                        vector-effect="non-scaling-stroke"
-                    />`;
+                    const pts = _dedupe(poly);
+                    if (pts.length < 2) return;
+                    const d = pts.length === 2
+                        ? `M${pts[0][0]},${pts[0][1]}L${pts[1][0]},${pts[1][1]}`
+                        : _bezPathD(_fitCurve(pts, _bezTol));
+                    parts.push(`<path d="${d}" fill="none" `
+                        + `stroke="${visible ? 'black' : 'grey'}" `
+                        + `stroke-width="${strokeWidth}" `
+                        + `${visible ? '' : 'stroke-dasharray="4" '}`
+                        + `vector-effect="non-scaling-stroke"/>`);
                 });
             });
-            return h;
+            return parts.join("");
         }
 
         let html = emitBucket(lines,   "1.5");
@@ -1117,6 +1165,14 @@
 
         document.getElementById('dbg-resolution').addEventListener('input', function() {
             document.getElementById('dbg-resolution-val').textContent = this.value;
+        });
+
+        // Trim VP-match mode takes the d-field segment midpoint as the cusp, so
+        // cusp refinement is redundant (and the main perf cost) — auto-uncheck
+        // "Refine cusps" when trim is chosen, re-check for match. Still manually
+        // overridable afterwards.
+        document.getElementById('dbg-vp-mode').addEventListener('change', function() {
+            document.getElementById('dbg-refine').checked = (this.value !== 'trim');
         });
     }
 

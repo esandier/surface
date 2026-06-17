@@ -815,10 +815,19 @@ def find_triple_points(
     `A1/A2`) → G3 close-aware self-sweep → keep hits where both preimages
     share a face (`f_here[a] == f_here[b]`) → group by `(f_other, f_other)`
     pair-key, look for triples (F1, F2, F3) where all three sorted pair-keys
-    (F2,F3), (F1,F3), (F1,F2) are present → 3D verify via `surface.S`.
+    (F2,F3), (F1,F3), (F1,F2) are present → emit the most-coincident hit
+    combination (`_try_emit_tp`).
+
+    The face-triple interlock is the sole detection criterion (empirically
+    perfectly discriminating — Boy → 1 TP, fig8 / Klein / embedded → 0). The
+    old absolute 3D-coincidence gate is removed: it could only be met at
+    impractically high resolution, masking every real TP. `xyz_tol` is retained
+    for API/back-compat (and the synthetic-fixture consistency test) but no
+    longer gates emission.
 
     Returns a structured array of `tp_dtype` (empty if no TPs).
     """
+    del xyz_tol  # no longer a detection gate (see above)
     K = len(sis_pairs)
     if K < 3:
         return np.empty(0, dtype=tp_dtype)
@@ -907,7 +916,7 @@ def find_triple_points(
 
                 rec = _try_emit_tp(
                     cands_F1, cands_F2, cands_F3,
-                    F1, F2, F3, hits, segs, surface, xyz_tol,
+                    F1, F2, F3, hits, segs, surface,
                 )
                 if rec is not None:
                     out.append(rec)
@@ -930,29 +939,29 @@ def find_triple_points(
 
 def _try_emit_tp(
     cands_F1, cands_F2, cands_F3,
-    F1, F2, F3, hits, segs, surface, xyz_tol,
+    F1, F2, F3, hits, segs, surface,
 ):
-    """Iterate hit combinations for face triple (F1<F2<F3); emit first that
-    passes 3D verification. Returns a 0-d tp_dtype record or None.
+    """Emit a TP for face triple (F1<F2<F3) from its hit combinations.
+
+    The broad-phase face-triple interlock (three SIS preimages pairwise sharing
+    faces F1/F2/F3) is the SOLE detection criterion. Empirically it is perfectly
+    discriminating — it fires exactly once on a genuine triple point (Boy → 1)
+    and never on a self-intersecting immersion without one (fig8, Klein, the
+    embedded fixtures → 0). So we no longer gate emission on a 3D-coincidence
+    tolerance: an absolute threshold (the old `xyz_tol=1e-3`) is only met at
+    impractically high mesh resolution (Boy's discrete coincidence is ~0.04 at
+    res 20, ~0.002 at res 70), which masked every real TP. Instead we pick the
+    hit combination whose three preimages are MOST coincident in 3D (min of the
+    max pairwise ‖S(P_i) − S(P_j)‖) — the best discrete estimate of the TP.
+
+    Returns a 0-d tp_dtype record, or None if no combination has three distinct
+    SIS indices.
     """
+    best = None
+    best_d = np.inf
     for h1 in cands_F1:
         for h2 in cands_F2:
             for h3 in cands_F3:
-                P1 = hits["uv"][h1]
-                P2 = hits["uv"][h2]
-                P3 = hits["uv"][h3]
-                S1 = np.asarray(surface.S(float(P1[0]), float(P1[1])),
-                                dtype=float).reshape(3)
-                S2 = np.asarray(surface.S(float(P2[0]), float(P2[1])),
-                                dtype=float).reshape(3)
-                S3 = np.asarray(surface.S(float(P3[0]), float(P3[1])),
-                                dtype=float).reshape(3)
-                d12 = float(np.linalg.norm(S1 - S2))
-                d13 = float(np.linalg.norm(S1 - S3))
-                d23 = float(np.linalg.norm(S2 - S3))
-                if max(d12, d13, d23) >= xyz_tol:
-                    continue
-
                 sis_set = {
                     int(segs["sis_idx"][hits["a"][h1]]),
                     int(segs["sis_idx"][hits["b"][h1]]),
@@ -964,15 +973,29 @@ def _try_emit_tp(
                 if len(sis_set) != 3:
                     continue
 
-                rec = np.zeros((), dtype=tp_dtype)
-                rec["xyz"] = (S1 + S2 + S3) / 3.0
-                rec["sis_indices"] = sorted(sis_set)
-                rec["uv"][0] = P1
-                rec["uv"][1] = P2
-                rec["uv"][2] = P3
-                rec["faces"] = (F1, F2, F3)
-                return rec
-    return None
+                P1 = hits["uv"][h1]
+                P2 = hits["uv"][h2]
+                P3 = hits["uv"][h3]
+                S1 = np.asarray(surface.S(float(P1[0]), float(P1[1])),
+                                dtype=float).reshape(3)
+                S2 = np.asarray(surface.S(float(P2[0]), float(P2[1])),
+                                dtype=float).reshape(3)
+                S3 = np.asarray(surface.S(float(P3[0]), float(P3[1])),
+                                dtype=float).reshape(3)
+                d = max(float(np.linalg.norm(S1 - S2)),
+                        float(np.linalg.norm(S1 - S3)),
+                        float(np.linalg.norm(S2 - S3)))
+                if d < best_d:
+                    best_d = d
+                    rec = np.zeros((), dtype=tp_dtype)
+                    rec["xyz"] = (S1 + S2 + S3) / 3.0
+                    rec["sis_indices"] = sorted(sis_set)
+                    rec["uv"][0] = P1
+                    rec["uv"][1] = P2
+                    rec["uv"][2] = P3
+                    rec["faces"] = (F1, F2, F3)
+                    best = rec
+    return best
 
 
 def build_sics(sis_pairs: np.ndarray) -> list[SelfIntersectingCurve]:

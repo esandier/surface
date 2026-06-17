@@ -111,6 +111,26 @@ def disk_paraboloid_ca(perturb: bool = True) -> SurfaceParams:
     )
 
 
+def boy(perturb: bool = True) -> SurfaceParams:
+    """Boy surface (Bryant–Kusner immersion of ℝP²) over the antipodal unit
+    disk, w = u + i·v. Its self-intersection set is a single curve with exactly
+    ONE triple point — the canonical immersion-with-triple-point fixture (C12).
+    Matches DB record pk 38 'Boy surface of Bryant-Kustner'.
+    """
+    domain = Domain(type="disk", bounds=(0.0, 1.0, 0.0, TWO_PI),
+                    coord_type="ca", boundary_identify="antipodal")
+    w = "(u+I*v)"
+    den = f"({w}**6+sqrt(5)*{w}**3-1)"
+    g1 = f"(-(3/2)*im(({w}*(1-{w}**4))/{den}))"
+    g2 = f"(-(3/2)*re(({w}*(1+{w}**4))/{den}))"
+    g3 = f"(im((1+{w}**6)/{den})-(1/2))"
+    norm = f"({g1}**2+{g2}**2+{g3}**2)"
+    return SurfaceParams(
+        f"{g1}/{norm}", f"{g2}/{norm}", f"{g3}/{norm}",
+        "u v", domain, perturb=perturb,
+    )
+
+
 # ── Canonical viewpoints for Layer O tests ────────────────────────────────────
 # Each entry: (I, J, eye).  eye=None → orthographic.
 

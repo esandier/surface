@@ -21,7 +21,7 @@ from surface_play.intersections import (
 )
 from surface_play.mesh import build_mesh
 from surface_play.test_fixtures import (
-    fig8, helicoid, mobius_u, paraboloid, torus,
+    boy, fig8, helicoid, mobius_u, paraboloid, torus,
 )
 
 
@@ -623,13 +623,20 @@ def test_find_triple_points_synthetic():
     assert got_uv == expected_uv
 
 
-@pytest.mark.xfail(
-    reason="No 'immersion with triple point' surface in the DB fixture yet",
-    strict=False,
-)
-def test_find_triple_points_db_immersion_with_tp():
-    """TODO: add an immersion-with-TP surface to test_fixtures + assert ≥1 TP."""
-    raise AssertionError("DB fixture for an immersion with TPs not yet added")
+def test_find_triple_points_boy_immersion():
+    """Boy surface (immersion of ℝP²) has exactly ONE triple point; the
+    face-triple interlock must detect it end-to-end on a real antipodal-disk
+    mesh, with three distinct SIS preimages meeting there. Resolution-robust
+    (1 TP at res 20/25/30/40) now that detection no longer gates on an absolute
+    3D-coincidence tolerance — see find_triple_points / _try_emit_tp."""
+    surface = boy()
+    mesh = _build(surface, resolution=30)
+    dps = find_double_points(mesh, surface)
+    sis = build_sis_pairs(dps)
+    tps = find_triple_points(sis, dps, mesh, surface)
+    assert tps.dtype == tp_dtype
+    assert len(tps) == 1
+    assert len(set(tps[0]["sis_indices"].tolist())) == 3
 
 
 @pytest.mark.parametrize("factory", [helicoid, torus, paraboloid, mobius_u])

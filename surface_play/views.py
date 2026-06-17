@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 from typing import Any
 
 import numpy as np
@@ -46,7 +47,8 @@ logger = logging.getLogger(__name__)
 # to the kwarg name on `build_outline`. Keys here go to the outline phase only.
 _OUTLINE_DEBUG_KEY_MAP = {
     "PROPAGATION": "propagation",
-    "NEWTON_CUSP": "newton_cusp",
+    "NEWTON_CONTOUR_POINTS": "newton_contour_points",
+    "REFINE_CUSPS": "refine_cusps",
     "PROJECT_RESAMPLED": "project_resampled",
 }
 
@@ -56,6 +58,10 @@ _OUTLINE_DEBUG_KEY_MAP = {
 # `_override_app_settings`). Safe because all are read in the OUTLINE phase
 # (not the LRU-cached construction), so no stale-cache risk.
 _SETTINGS_OVERRIDE_KEYS = {"DENSIFY_SUBDIV", "HA_CUSP_TRIM", "VP_TRIM"}
+
+# Non-integer settings overrides (handled like _SETTINGS_OVERRIDE_KEYS but kept
+# as their native type rather than coerced via int()).
+_SETTINGS_OVERRIDE_STR_KEYS = {"VP_MATCH_MODE"}
 
 
 @contextlib.contextmanager
@@ -92,9 +98,11 @@ def _debug_kwargs(
       outline density.
     - `JITTER` (bool) / `SEED` (int) → construction kwargs on build_surface_init
       (mesh jitter on/off + deterministic seed). Empty/None SEED → omit (random).
-    - Outline-only keys (PROPAGATION, NEWTON_CUSP, PROJECT_RESAMPLED) routed
+    - Outline-only keys (PROPAGATION, NEWTON_CONTOUR_POINTS, REFINE_CUSPS,
+      PROJECT_RESAMPLED) routed
       via `_OUTLINE_DEBUG_KEY_MAP`.
-    - `_SETTINGS_OVERRIDE_KEYS` (DENSIFY_SUBDIV, HA_CUSP_TRIM, VP_TRIM) → scoped
+    - `_SETTINGS_OVERRIDE_KEYS` (DENSIFY_SUBDIV, HA_CUSP_TRIM, VP_TRIM) and the
+      string-valued `_SETTINGS_OVERRIDE_STR_KEYS` (VP_MATCH_MODE) → scoped
       per-request override of the matching settings constant.
     - Unknown keys logged at WARNING and ignored (preserve client compat).
     """
@@ -118,6 +126,9 @@ def _debug_kwargs(
             continue
         if k in _SETTINGS_OVERRIDE_KEYS:
             settings_overrides[k] = int(v)
+            continue
+        if k in _SETTINGS_OVERRIDE_STR_KEYS:
+            settings_overrides[k] = str(v)
             continue
         target = _OUTLINE_DEBUG_KEY_MAP.get(k)
         if target is None:
@@ -175,10 +186,29 @@ def _play_get(request, record: SurfaceRecord) -> HttpResponse:
     return render(request, "play.html", ctx)
 
 
+# Wire-format coordinate precision (significant figures). The polyline coords
+# are full float64 (~16 digits) internally — wildly over-precise for an SVG that
+# maps the whole bbox to ~700px. Rounding to a scale-invariant ~5 sig figs is
+# sub-pixel at any display/zoom yet cuts the JSON payload ~3× (onde 593→~230KB),
+# speeding transfer + client JSON.parse + drawSVG. OutlineResult stays
+# full-precision (thumbnail/TikZ server paths unaffected).
+_WIRE_SIGFIGS = 5
+
+
+def _round_polylines(polylines: list, decimals: int) -> list:
+    return [[(round(x, decimals), round(y, decimals)) for (x, y) in poly]
+            for poly in polylines]
+
+
 def _vis_dict_to_jsonable(d: dict[int, list]) -> dict[str, list]:
     """JsonResponse can't serialize int keys via the default encoder — convert
-    to strings while keeping order by sorted-vis."""
-    return {str(int(k)): d[k] for k in sorted(d.keys())}
+    to strings while keeping order by sorted-vis. Polyline coordinates are
+    rounded to `_WIRE_SIGFIGS` significant figures (scale-invariant, sub-pixel)
+    to shrink the payload."""
+    mag = max((abs(c) for polys in d.values() for poly in polys for pt in poly
+               for c in pt), default=1.0) or 1.0
+    decimals = max(1, _WIRE_SIGFIGS - 1 - int(math.floor(math.log10(mag))))
+    return {str(int(k)): _round_polylines(d[k], decimals) for k in sorted(d.keys())}
 
 
 def _play_post(request, record: SurfaceRecord) -> HttpResponse:
@@ -206,7 +236,10 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
     O = data["O"]
     eye = data.get("eye")  # None → ortho
 
+    import time as _time
+    _t0 = _time.perf_counter()
     init = pipeline.build_surface_init(record, **init_kwargs)
+    _t1 = _time.perf_counter()
     try:
         # settings_overrides (densify subdiv, HA trim) affect only the outline
         # build, so scope them around build_outline (construction is already
@@ -218,6 +251,12 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
     except ValueError as exc:
         # P3 raises on persp O != eye; surface as 400.
         return HttpResponseBadRequest(str(exc))
+    _t2 = _time.perf_counter()
+    logger.warning(
+        "[timing] pk=%s init=%.0fms outline=%.0fms  outline_kwargs=%s overrides=%s",
+        record.pk, (_t1 - _t0) * 1000, (_t2 - _t1) * 1000,
+        outline_kwargs, settings_overrides,
+    )
 
     return JsonResponse({
         "lines_by_visibility": _vis_dict_to_jsonable(result.lines_by_visibility),

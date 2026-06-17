@@ -271,7 +271,8 @@ def _run_outline_pipeline(
     projection: Projection,
     surface: SurfaceParams,
     *,
-    newton_cusp: bool,
+    newton_contour_points: bool,
+    refine_cusps: bool,
     canvas_resolution: int | None,
     project_resampled: bool,
     propagation: str,
@@ -301,10 +302,10 @@ def _run_outline_pipeline(
         sis_pairs["split1"][:] = -1
         sis_pairs["split2"][:] = -1
 
-    cps = find_contour_points(mesh, projection, use_newton=newton_cusp)
+    cps = find_contour_points(mesh, projection, use_newton=newton_contour_points)
     css = build_contour_segments(cps, mesh)
     ccs = build_contour_curves(css, cps)
-    vps = find_vps(ccs, css, cps, surface, projection)
+    vps = find_vps(ccs, css, cps, surface, projection, refine=refine_cusps)
 
     splits = SplitArrays()
     split_bcs_at_corners(mesh, bcs, splits, projection)
@@ -419,7 +420,8 @@ def build_outline(
     O,
     eye,
     *,
-    newton_cusp: bool = True,
+    newton_contour_points: bool = True,
+    refine_cusps: bool = True,
     canvas_resolution: int | None = None,
     project_resampled: bool = False,
     propagation: Literal["BFS", "LP1", "LP4"] = "LP4",
@@ -436,7 +438,8 @@ def build_outline(
 
     rcs, breaks, vis = _run_outline_pipeline(
         init.construction, projection, init.surface,
-        newton_cusp=newton_cusp,
+        newton_contour_points=newton_contour_points,
+        refine_cusps=refine_cusps,
         canvas_resolution=canvas_resolution,
         project_resampled=project_resampled,
         propagation=propagation,

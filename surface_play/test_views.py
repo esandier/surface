@@ -215,10 +215,13 @@ class PlayEndpointTests(TestCase):
                 arr_a = np.asarray(pa)
                 arr_b = np.asarray(pb)
                 self.assertEqual(arr_a.shape, arr_b.shape)
+                # Wire coordinates are rounded to ~5 significant figures
+                # (views._vis_dict_to_jsonable) to shrink the payload, so the
+                # shift is exact only to sub-pixel (was atol=1e-9 pre-rounding).
                 np.testing.assert_allclose(
                     arr_b - arr_a,
                     np.broadcast_to(expected_shift, arr_a.shape),
-                    atol=1e-9,
+                    atol=1e-3,
                 )
 
     # ── 6. PROPAGATION=LP4 debug knob ────────────────────────────────────────

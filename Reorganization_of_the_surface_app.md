@@ -416,7 +416,7 @@ for i in indices:
 + Detect which of the 2 segments has a sign change.
 + Iterate until VP is found with high precision. 
 
-This refinement may or may not prove useful, we'll see. It is used, or not, according to the value of the variables "NEWTON_CUSP" of settings.py, which can be true or false.
+This refinement may or may not prove useful, we'll see. It is used, or not, according to the value of the variables "NEWTON_CONTOUR_POINTS" of settings.py, which can be true or false.
 
 Once the cusp is determined, it is recorded as a SP, and then a SPT is assigned to the original CS, before bisection. 
 
