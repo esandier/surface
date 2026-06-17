@@ -463,23 +463,14 @@
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-        const _t0 = performance.now();
         fetch("{% url 'surface-play' pk=pk %}", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(data),
             signal: controller.signal,
         })
-        .then(r => { clearTimeout(timeoutId); window._tReq = performance.now(); return r.json(); })
-        .then(d => {
-            window._tParse = performance.now();
-            drawSVG(d);
-            const tDraw = performance.now();
-            console.log(`[outline] server+net ${(window._tReq-_t0).toFixed(0)}ms | `
-                + `parse ${(window._tParse-window._tReq).toFixed(0)}ms | `
-                + `drawSVG ${(tDraw-window._tParse).toFixed(0)}ms | `
-                + `TOTAL ${(tDraw-_t0).toFixed(0)}ms`);
-        })
+        .then(r => { clearTimeout(timeoutId); return r.json(); })
+        .then(drawSVG)
         .catch(err => {
             clearTimeout(timeoutId);
             console.error(err);

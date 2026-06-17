@@ -236,10 +236,7 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
     O = data["O"]
     eye = data.get("eye")  # None → ortho
 
-    import time as _time
-    _t0 = _time.perf_counter()
     init = pipeline.build_surface_init(record, **init_kwargs)
-    _t1 = _time.perf_counter()
     try:
         # settings_overrides (densify subdiv, HA trim) affect only the outline
         # build, so scope them around build_outline (construction is already
@@ -251,12 +248,6 @@ def _play_post(request, record: SurfaceRecord) -> HttpResponse:
     except ValueError as exc:
         # P3 raises on persp O != eye; surface as 400.
         return HttpResponseBadRequest(str(exc))
-    _t2 = _time.perf_counter()
-    logger.warning(
-        "[timing] pk=%s init=%.0fms outline=%.0fms  outline_kwargs=%s overrides=%s",
-        record.pk, (_t1 - _t0) * 1000, (_t2 - _t1) * 1000,
-        outline_kwargs, settings_overrides,
-    )
 
     return JsonResponse({
         "lines_by_visibility": _vis_dict_to_jsonable(result.lines_by_visibility),
