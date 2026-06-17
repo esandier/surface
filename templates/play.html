@@ -727,7 +727,14 @@
         let aL = det === 0 ? 0 : (x0 * c11 - c01 * x1) / det;
         let aR = det === 0 ? 0 : (c00 * x1 - c01 * x0) / det;
         const segLen = _vlen(_vsub(first, last)), eps = 1e-6 * segLen;
-        if (aL < eps || aR < eps) { aL = aR = segLen / 3; }   // Wu/Barsky fallback
+        // Fall back to the Wu/Barsky 1/3-chord heuristic when the least-squares
+        // arm is degenerate (≤ eps) OR overshoots the chord. A near-coincident
+        // point pair makes det → 0, blowing aL/aR up to a control point placed
+        // far away → an image SPIKE. A non-overshooting cubic over one fitted
+        // (smooth) sub-polyline always has arms ≤ chord; anything larger is the
+        // instability — clamp it. If that raises the fit error, _fitCubic just
+        // splits and recurses (more segments, never a spike).
+        if (aL < eps || aR < eps || aL > segLen || aR > segLen) { aL = aR = segLen / 3; }
         return [first, _vadd(first, _vmul(lT, aL)), _vadd(last, _vmul(rT, aR)), last];
     }
     function _reparam(b, pts, u) {
