@@ -1471,23 +1471,22 @@ def resample_all(
     ell = M / float(resolution)
     # Shared BC/HC densification oversampling factor (dense spacing = ell/this).
     densify_subdiv = float(_settings.DENSIFY_SUBDIV)
-    # Degenerate-SubCurve handling (2026-06-17; was a hard raise — see history
-    # below). A SubCurve whose xy polyline is shorter than `1e-4 * ell` has both
-    # SPs at essentially the same image-space point: a curve collapsed to a
-    # point — e.g. a tiny CC loop at a bump tip under some jitter+view, or a
+    # Degenerate-SubCurve handling (2026-06-17). A SubCurve whose xy polyline is
+    # shorter than `1e-4 * ell` is collapsed to essentially a single image point
+    # — e.g. a tiny CC loop at a bump tip under some jitter+view, or a
     # non-generic axis-aligned view (the helicoid CC at u=0 under the Z-axis
-    # view collapses to (0, 0)). Dense-resampling it makes `delta_per_sp`
-    # inherit the tiny L, so `_sample_arclengths` spends 10⁷+ iterations
-    # climbing back to `ell` for every sub sharing the SP. The earlier guard
-    # raised loudly here, which aborted the WHOLE outline → an intermittent
-    # HTTP 400 on bumpy surfaces (e.g. Bosses fortes). Instead we SKIP its
-    # resampling: such subs are collected in `degenerate`, passed through
-    # verbatim in the sampling loop, and their tiny L is excluded from the
-    # per-SP delta (so they don't contaminate neighbours sharing their SPs).
+    # view collapses to (0, 0)). History: originally a hard raise (aborted the
+    # whole outline → intermittent HTTP 400 on bumpy surfaces), then a verbatim
+    # pass-through. Now such subs are DELETED from the pipeline entirely (no RC
+    # emitted): they carry no visible line, but their near-coincident points
+    # destabilise the client cubic-Bézier fit (`_genBezier`'s least-squares
+    # det → 0 → blown-up control arms → image spikes). Dropping them also keeps
+    # their tiny L out of the per-SP delta so `_sample_arclengths` can't spend
+    # 10⁷+ iterations climbing back to `ell` for a neighbour sharing the SP.
+    # SP-less tiny closed loops are included (they spike the same way).
     _L_FLOOR = 1e-4 * ell
     degenerate = {
-        i for i, sub in enumerate(subcurves)
-        if 0 < L_per_sub[i] < _L_FLOOR and not (sub.start == -1 and sub.end == -1)
+        i for i in range(len(subcurves)) if 0 < L_per_sub[i] < _L_FLOOR
     }
     L_per_sp: dict[int, float] = {}
     for i, sub in enumerate(subcurves):
@@ -1531,6 +1530,14 @@ def resample_all(
         uv_p, xyz_p, xy_p = polys[i]
         L_total = L_per_sub[i]
 
+        # Degenerate SubCurve (collapsed to ~a point) → DELETE from the pipeline:
+        # emit no RC at all. It carries no visible line, and its near-coincident
+        # points blow up the client Bézier fit into image spikes. Checked before
+        # the SP-less branch so tiny closed loops are dropped too. Its SPs, if
+        # shared, stay anchored by the real curves that use them.
+        if i in degenerate:
+            continue
+
         # SP-less closed SC → verbatim copy.
         if sub.start == -1 and sub.end == -1:
             depth = (np.asarray(projection.Z(xyz_p), dtype=float)
@@ -1538,22 +1545,6 @@ def resample_all(
             out.append(ResampledCurve(
                 kind=sub.kind, start=-1, end=-1,
                 depth=depth, xy=xy_p.copy(), dir=None,
-                vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
-                uv=uv_p.copy() if len(uv_p) else uv_p,
-            ))
-            continue
-
-        # Degenerate SubCurve (collapsed to ~a point) → verbatim pass-through.
-        # Keeps its SPs in the visibility graph (so neighbours sharing them
-        # still resolve) but skips dense resampling, which would hang on the
-        # tiny L. `dir`/`tan` are None — a collapsed curve is never a
-        # meaningful occluder (visibility.py guards on `ocer_rc.dir is None`).
-        if i in degenerate:
-            depth = (np.asarray(projection.Z(xyz_p), dtype=float)
-                     if len(xyz_p) else np.zeros(0, dtype=float))
-            out.append(ResampledCurve(
-                kind=sub.kind, start=int(sub.start), end=int(sub.end),
-                depth=depth, xy=xy_p.copy(), dir=None, tan=None,
                 vc_in=int(sub.vc_in), vc_out=int(sub.vc_out),
                 uv=uv_p.copy() if len(uv_p) else uv_p,
             ))
