@@ -248,6 +248,27 @@ def _seg_uv_at_bary(sub_kind: str, seg_idx: int, bary: float,
     raise ValueError(f"_seg_uv_at_bary: unsupported kind {sub_kind!r}")
 
 
+def _seg_uv_at_bary_batch(sub_kind: str, seg_idxs: np.ndarray, barys: np.ndarray,
+                          mesh, css, cps) -> np.ndarray:
+    """Vectorized `_seg_uv_at_bary` over many (seg_idx, bary) on a BC/CC chain.
+
+    Byte-identical to looping `_seg_uv_at_bary` (same per-element float ops) but
+    one array pass instead of thousands of scalar calls — the `_build_polyline`
+    hot path. Returns (M, 2).
+    """
+    barys = np.asarray(barys, dtype=float)
+    if sub_kind == "BC":
+        edges = mesh.edges[np.asarray(seg_idxs, dtype=np.int64)]
+        return (np.asarray(edges["p"], dtype=float)
+                + barys[:, None] * np.asarray(edges["pq"], dtype=float))
+    if sub_kind == "CC":
+        rows = css[np.asarray(seg_idxs, dtype=np.int64)]
+        p_uv = np.asarray(cps["uv"][rows["p_cp"]], dtype=float)
+        q_uv = np.asarray(cps["uv"][rows["q_cp"]], dtype=float)
+        return (1.0 - barys)[:, None] * p_uv + barys[:, None] * q_uv
+    raise ValueError(f"_seg_uv_at_bary_batch: unsupported kind {sub_kind!r}")
+
+
 def _needs_close(domain) -> bool:
     """True iff `domain.close` can actually move a point — i.e. a rect domain
     with at least one identified axis. For unidentified rect (and disk/annulus)
@@ -277,25 +298,28 @@ def _build_polyline(
     if sub.kind == "SIC":
         return _sic_node_polyline(sub, sis_pairs, dps, splits, projection)
 
-    uvs: list[np.ndarray] = []
+    # Internal samples, vectorized (was a per-segment _seg_uv_at_bary loop —
+    # the dominant _build_polyline cost). HC has none.
+    if sub.kind != "HC" and sub.internal:
+        _seg = np.fromiter((int(e[0]) for e in sub.internal), dtype=np.int64,
+                           count=len(sub.internal))
+        _bar = np.fromiter((float(e[1]) for e in sub.internal), dtype=float,
+                           count=len(sub.internal))
+        iu = _seg_uv_at_bary_batch(sub.kind, _seg, _bar, mesh, css, cps)
+    else:
+        iu = np.zeros((0, 2), dtype=float)
 
     if sub.kind == "HC":
-        uvs.append(np.asarray(splits.sps[sub.start][0], dtype=float))
-        uvs.append(np.asarray(splits.sps[sub.end][0], dtype=float))
+        uv_arr = np.array([splits.sps[sub.start][0], splits.sps[sub.end][0]],
+                          dtype=float)
     elif sub.start == -1 and sub.end == -1:
-        # SP-less closed SC — walk internal verbatim; close the loop.
-        for seg_idx, bary in sub.internal:
-            uvs.append(_seg_uv_at_bary(sub.kind, int(seg_idx), float(bary),
-                                       mesh, css, sis_pairs, cps, dps))
-        if uvs:
-            uvs.append(uvs[0].copy())
+        # SP-less closed SC — internal verbatim; close the loop.
+        uv_arr = np.vstack([iu, iu[:1]]) if len(iu) else np.zeros((0, 2), dtype=float)
     else:
         # Normal BC/CC SC: start SP → internal → end SP.
-        uvs.append(np.asarray(splits.sps[sub.start][0], dtype=float))
-        for seg_idx, bary in sub.internal:
-            uvs.append(_seg_uv_at_bary(sub.kind, int(seg_idx), float(bary),
-                                       mesh, css, sis_pairs, cps, dps))
-        uvs.append(np.asarray(splits.sps[sub.end][0], dtype=float))
+        s0 = np.asarray(splits.sps[sub.start][0], dtype=float).reshape(1, 2)
+        s1 = np.asarray(splits.sps[sub.end][0], dtype=float).reshape(1, 2)
+        uv_arr = np.vstack([s0, iu, s1])
 
     # Close-aware adjust consecutive vertices, then lift to xyz/xy.
     # Only for GLOBAL periodicities (rect cy/mo), where S is periodic so the
@@ -306,11 +330,10 @@ def _build_polyline(
     # seam-crossing polyline keeps its true uv; its two boundary endpoints P and
     # -P already lift to one xy via S(P) = S(-P), so no long chord appears.
     domain = getattr(mesh, "domain", None)
-    if _needs_close(domain) and not getattr(domain, "is_antipodal", False):
-        for i in range(1, len(uvs)):
-            uvs[i] = domain.interpolate(uvs[i - 1], uvs[i], 1.0)
-
-    uv_arr = np.asarray(uvs, dtype=float) if uvs else np.zeros((0, 2), dtype=float)
+    if (_needs_close(domain) and not getattr(domain, "is_antipodal", False)
+            and len(uv_arr) > 1):
+        for i in range(1, len(uv_arr)):
+            uv_arr[i] = domain.interpolate(uv_arr[i - 1], uv_arr[i], 1.0)
     if len(uv_arr):
         S_batch = np.asarray(
             surface.S(uv_arr[:, 0], uv_arr[:, 1]), dtype=float,
